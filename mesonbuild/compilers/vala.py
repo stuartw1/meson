@@ -70,8 +70,6 @@ class ValaCompiler(Compiler):
                 raise EnvironmentException(msg)
 
     def get_buildtype_args(self, buildtype):
-        if buildtype == 'debug' or buildtype == 'debugoptimized' or buildtype == 'minsize':
-            return ['--debug']
         return []
 
     def find_library(self, libname, env, extra_dirs):
