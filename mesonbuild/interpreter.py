@@ -2578,9 +2578,9 @@ external dependencies (including libraries) must go to "dependencies".''')
             if need_cross_compiler:
                 cross_comp = comp  # C# is platform independent.
         elif lang == 'vala':
-            comp = self.environment.detect_vala_compiler()
+            comp = self.environment.detect_vala_compiler(False)
             if need_cross_compiler:
-                cross_comp = comp  # Vala compiles to platform-independent C
+                cross_comp = self.environment.detect_vala_compiler(True)
         elif lang == 'd':
             comp = self.environment.detect_d_compiler(False)
             if need_cross_compiler:
