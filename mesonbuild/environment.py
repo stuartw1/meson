@@ -866,22 +866,25 @@ class Environment:
 
         self._handle_exceptions(popen_exceptions, compilers)
 
-    def detect_vala_compiler(self):
-        if 'VALAC' in os.environ:
-            exelist = shlex.split(os.environ['VALAC'])
-        elif 'vala' in self.config_info.binaries:
-            exelist = mesonlib.stringlistify(self.config_info.binaries['vala'])
-        else:
-            # TODO support fallback
-            exelist = [self.default_vala[0]]
-        try:
-            p, out = Popen_safe(exelist + ['--version'])[0:2]
-        except OSError:
-            raise EnvironmentException('Could not execute Vala compiler "%s"' % ' '.join(exelist))
-        version = search_version(out)
-        if 'Vala' in out:
-            return ValaCompiler(exelist, version)
-        raise EnvironmentException('Unknown compiler "' + ' '.join(exelist) + '"')
+    def detect_vala_compiler(self, want_cross):
+        popen_exceptions = {}
+        compilers, ccache, is_cross, exe_wrap = self._get_compilers('vala', want_cross)
+        for compiler in compilers:
+            if isinstance(compiler, str):
+                compiler = [compiler]
+            arg = ['--version']
+            try:
+                p, out = Popen_safe(compiler + arg)[0:2]
+            except OSError as e:
+                popen_exceptions[' '.join(compiler + arg)] = e
+                continue
+
+            version = search_version(out)
+
+            if 'Vala' in out:
+                return ValaCompiler(compiler, version, is_cross)
+
+        self._handle_exceptions(popen_exceptions, compilers)
 
     def detect_rust_compiler(self, want_cross):
         popen_exceptions = {}
