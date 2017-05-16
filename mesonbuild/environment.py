@@ -988,20 +988,25 @@ class Environment:
 
         self._handle_exceptions(popen_exceptions, compilers)
 
-    def detect_vala_compiler(self):
-        exelist = self.binaries.host.lookup_entry('vala')
-        if exelist is None:
-            # TODO support fallback
-            exelist = [self.default_vala[0]]
+    def detect_vala_compiler(self, want_cross):
+        popen_exceptions = {}
+        compilers, ccache, is_cross, exe_wrap = self._get_compilers('vala', want_cross)
+        for compiler in compilers:
+            if isinstance(compiler, str):
+                compiler = [compiler]
+            arg = ['--version']
+            try:
+                p, out = Popen_safe(compiler + arg)[0:2]
+            except OSError as e:
+                popen_exceptions[' '.join(compiler + arg)] = e
+                continue
 
-        try:
-            p, out = Popen_safe(exelist + ['--version'])[0:2]
-        except OSError:
-            raise EnvironmentException('Could not execute Vala compiler "%s"' % ' '.join(exelist))
-        version = search_version(out)
-        if 'Vala' in out:
-            return ValaCompiler(exelist, version)
-        raise EnvironmentException('Unknown compiler "' + ' '.join(exelist) + '"')
+            version = search_version(out)
+
+            if 'Vala' in out:
+                return ValaCompiler(compiler, version, is_cross)
+
+        self._handle_exceptions(popen_exceptions, compilers)
 
     def detect_rust_compiler(self, want_cross):
         popen_exceptions = {}
@@ -1113,9 +1118,9 @@ class Environment:
             if need_cross_compiler:
                 cross_comp = comp  # C# is platform independent.
         elif lang == 'vala':
-            comp = self.detect_vala_compiler()
+            comp = self.detect_vala_compiler(False)
             if need_cross_compiler:
-                cross_comp = comp  # Vala compiles to platform-independent C
+                cross_comp = self.detect_vala_compiler(True)
         elif lang == 'd':
             comp = self.detect_d_compiler(False)
             if need_cross_compiler:
