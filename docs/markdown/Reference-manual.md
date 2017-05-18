@@ -1542,6 +1542,10 @@ the following methods.
   refer to files in the current or any other source directory instead
   of constructing paths manually with `meson.current_source_dir()`.
 
+- `get_cross_binary(binname, fallback_value)` returns the given binary
+  from a cross file, the optional second argument is returned if not
+  cross compiling or the given binary is not specified.
+
 - `get_cross_property(propname, fallback_value)` returns the given
   property from a cross file, the optional second argument is returned
   if not cross compiling or the given property is not found.
