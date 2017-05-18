@@ -1695,6 +1695,7 @@ class MesonMain(InterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
+                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'backend': self.backend_method,
                              })
@@ -1876,6 +1877,39 @@ class MesonMain(InterpreterObject):
     @permittedKwargs({})
     def project_name_method(self, args, kwargs):
         return self.interpreter.active_projectname
+
+    @noArgsFlattening
+    @permittedKwargs({})
+    def get_cross_binary_method(self, args, kwargs):
+        if len(args) < 1 or len(args) > 2:
+            raise InterpreterException('Must have one or two arguments.')
+        binname = args[0]
+        if not isinstance(binname, str):
+            raise InterpreterException('Binary name must be string.')
+        if self.build.environment.is_cross_build():
+            try:
+                binaries = self.interpreter.environment.binaries.host.binaries
+                return binaries[binname]
+            except Exception:
+                if len(args) == 2:
+                    return args[1]
+                raise InterpreterException('Unknown cross binary: %s.' % binname)
+        else:
+            if binname == 'ar':
+                static_linker = self.build.static_linker
+                if static_linker is not None:
+                    return static_linker.exelist[0]
+            elif binname == 'libtool':
+                static_linker = self.build.static_linker
+                if static_linker is not None:
+                    ar_binary = static_linker.exelist[0]
+                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
+                        return os.path.join(os.path.dirname(ar_binary), 'libtool')
+            elif binname == 'strip':
+                return self.interpreter.environment.binaries.host.lookup_entry('strip')
+            if len(args) == 2:
+                return args[1]
+            raise InterpreterException('Unknown cross binary: %s.' % binname)
 
     @noArgsFlattening
     @permittedKwargs({})
