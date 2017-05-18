@@ -1051,6 +1051,9 @@ class CrossBuildInfo:
             return self.config['host_machine']['system']
         return None
 
+    def get_binaries(self):
+        return self.config['binaries']
+
     def get_properties(self):
         return self.config['properties']
 
