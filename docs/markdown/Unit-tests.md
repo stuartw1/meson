@@ -30,9 +30,9 @@ Note how you need to specify multiple values as an array.
 Coverage
 --
 
-If you enable coverage measurements by giving Meson the command line flag `-Db_coverage=true`, you can generate coverage reports. Meson will autodetect what coverage generator tools you have installed and will generate the corresponding targets. These targets are `coverage-xml` and `coverage-text` which are both provided by [Gcovr](http://gcovr.com) and `coverage-html`, which requires [Lcov](https://ltp.sourceforge.io/coverage/lcov.php) and [GenHTML](https://linux.die.net/man/1/genhtml).
+If you enable coverage measurements by giving Meson the command line flag `-Db_coverage=true`, you can generate coverage reports. Meson will autodetect what coverage generator tools you have installed and will generate the corresponding targets. These targets are `coverage-xml` and `coverage-text` which are both provided by [Gcovr](http://gcovr.com) and `coverage-html`, which requires [Lcov](https://ltp.sourceforge.io/coverage/lcov.php) and [GenHTML](https://linux.die.net/man/1/genhtml) or [Gcovr](http://gcovr.com) with html support.
 
-The the output of these commands is written to the log directory `meson-logs` in your build directory.
+The output of these commands is written to the log directory `meson-logs` in your build directory.
 
 Parallelism
 --
@@ -57,52 +57,54 @@ Sometimes a test can only determine at runtime that it can not be run. The GNU s
 
 ## Testing tool
 
-In version 0.37.0 a new tool called `mesontest` was added. The goal of this tool is to provide a simple way to run tests in a variety of different ways. The tool is designed to be run in the build directory.
+The goal of the meson test tool is to provide a simple way to run tests in a variety of different ways. The tool is designed to be run in the build directory.
 
 The simplest thing to do is just to run all tests, which is equivalent to running `ninja test`.
 
 ```console
-$ mesontest
+$ meson test
 ```
 
 You can also run only a single test by giving its name:
 
 ```console
-$ mesontest testname
+$ meson test testname
 ```
 
 Sometimes you need to run the tests multiple times, which is done like this:
 
 ```console
-$ mesontest --repeat=10
+$ meson test --repeat=10
 ```
 
 Invoking tests via a helper executable such as Valgrind can be done with the `--wrap` argument
 
 ```console
-$ mesontest --wrap=valgrind testname
+$ meson test --wrap=valgrind testname
 ```
 
 Arguments to the wrapper binary can be given like this:
 
 ```console
-$ mesontest --wrap='valgrind --tool=helgrind' testname
+$ meson test --wrap='valgrind --tool=helgrind' testname
 ```
 
 Meson also supports running the tests under GDB. Just doing this:
 
 ```console
-$ mesontest --gdb testname
+$ meson test --gdb testname
 ```
 
-Mesontest will launch `gdb` all set up to run the test. Just type `run` in the GDB command prompt to start the program.
+Meson will launch `gdb` all set up to run the test. Just type `run` in the GDB command prompt to start the program.
 
 The second use case is a test that segfaults only rarely. In this case you can invoke the following command:
 
 ```console
-$ mesontest --gdb --repeat=10000 testname
+$ meson test --gdb --repeat=10000 testname
 ```
 
-This runs the test up to 10 000 times under GDB automatically. If the program crashes, GDB will halt and the user can debug the application. Note that testing timeouts are disabled in this case so mesontest will not kill `gdb` while the developer is still debugging it. The downside is that if the test binary freezes, the test runner will wait forever.
+This runs the test up to 10 000 times under GDB automatically. If the program crashes, GDB will halt and the user can debug the application. Note that testing timeouts are disabled in this case so `meson test` will not kill `gdb` while the developer is still debugging it. The downside is that if the test binary freezes, the test runner will wait forever.
 
-For further information see the command line help of Mesontest by running `mesontest -h`.
+For further information see the command line help of Meson by running `meson test -h`.
+
+**NOTE:** If `meson test` does not work for you, you likely have a old version of Meson. In that case you should call `mesontest` instead. If `mesontest` doesn't work either you have a very old version prior to 0.37.0 and should upgrade.

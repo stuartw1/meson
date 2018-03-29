@@ -16,10 +16,11 @@ import os
 
 from .. import mlog
 from .. import mesonlib, dependencies, build
-from ..mesonlib import MesonException
+from ..mesonlib import MesonException, extract_as_list
 from . import get_include_args
 from . import ModuleReturnValue
 from . import ExtensionModule
+from ..interpreterbase import permittedKwargs
 
 class WindowsModule(ExtensionModule):
 
@@ -29,13 +30,12 @@ class WindowsModule(ExtensionModule):
                 return compilers[l]
         raise MesonException('Resource compilation requires a C or C++ compiler.')
 
+    @permittedKwargs({'args', 'include_directories'})
     def compile_resources(self, state, args, kwargs):
         comp = self.detect_compiler(state.compilers)
 
         extra_args = mesonlib.stringlistify(kwargs.get('args', []))
-        inc_dirs = kwargs.pop('include_directories', [])
-        if not isinstance(inc_dirs, list):
-            inc_dirs = [inc_dirs]
+        inc_dirs = extract_as_list(kwargs, 'include_directories', pop = True)
         for incd in inc_dirs:
             if not isinstance(incd.held_object, (str, build.IncludeDirs)):
                 raise MesonException('Resource include dirs should be include_directories().')
@@ -67,11 +67,42 @@ class WindowsModule(ExtensionModule):
             suffix = 'o'
         if not rescomp.found():
             raise MesonException('Could not find Windows resource compiler %s.' % ' '.join(rescomp.get_command()))
-        res_kwargs = {'output': '@BASENAME@.' + suffix,
-                      'arguments': res_args}
-        res_gen = build.Generator([rescomp], res_kwargs)
-        res_output = res_gen.process_files('Windows resource', args, state)
-        return ModuleReturnValue(res_output, [res_output])
+
+        res_targets = []
+
+        def add_target(src):
+            if isinstance(src, list):
+                for subsrc in src:
+                    add_target(subsrc)
+                return
+
+            if hasattr(src, 'held_object'):
+                src = src.held_object
+
+            res_kwargs = {
+                'output': '@BASENAME@.' + suffix,
+                'input': [src],
+                'command': [rescomp] + res_args,
+            }
+
+            if isinstance(src, (str, mesonlib.File)):
+                name = 'file {!r}'.format(str(src))
+            elif isinstance(src, build.CustomTarget):
+                if len(src.get_outputs()) > 1:
+                    raise MesonException('windows.compile_resources does not accept custom targets with more than 1 output.')
+
+                name = 'target {!r}'.format(src.get_id())
+            else:
+                raise MesonException('Unexpected source type {!r}. windows.compile_resources accepts only strings, files, custom targets, and lists thereof.'.format(src))
+
+            # Path separators are not allowed in target names
+            name = name.replace('/', '_').replace('\\', '_')
+
+            res_targets.append(build.CustomTarget('Windows resource for ' + name, state.subdir, state.subproject, res_kwargs))
+
+        add_target(args)
+
+        return ModuleReturnValue(res_targets, [res_targets])
 
 def initialize():
     return WindowsModule()

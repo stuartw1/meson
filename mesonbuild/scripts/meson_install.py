@@ -13,12 +13,43 @@
 # limitations under the License.
 
 import sys, pickle, os, shutil, subprocess, gzip, platform, errno
+import shlex
 from glob import glob
 from . import depfixer
 from . import destdir_join
 from ..mesonlib import is_windows, Popen_safe
 
 install_log_file = None
+selinux_updates = []
+
+class DirMaker:
+    def __init__(self):
+        self.dirs = []
+
+    def makedirs(self, path, exist_ok=False):
+        dirname = os.path.normpath(path)
+        dirs = []
+        while dirname != os.path.dirname(dirname):
+            if not os.path.exists(dirname):
+                dirs.append(dirname)
+            dirname = os.path.dirname(dirname)
+        os.makedirs(path, exist_ok=exist_ok)
+
+        # store the directories in creation order, with the parent directory
+        # before the child directories. Future calls of makedir() will not
+        # create the parent directories, so the last element in the list is
+        # the last one to be created. That is the first one to be removed on
+        # __exit__
+        dirs.reverse()
+        self.dirs += dirs
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.dirs.reverse()
+        for d in self.dirs:
+            append_to_log(d)
 
 def set_mode(path, mode):
     if mode is None:
@@ -53,6 +84,31 @@ def set_mode(path, mode):
             msg = '{!r}: Unable to set permissions {!r}: {}, ignoring...'
             print(msg.format(path, mode.perms_s, e.strerror))
 
+def restore_selinux_contexts():
+    '''
+    Restores the SELinux context for files in @selinux_updates
+
+    If $DESTDIR is set, do not warn if the call fails.
+    '''
+    try:
+        subprocess.check_call(['selinuxenabled'])
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError) as e:
+        # If we don't have selinux or selinuxenabled returned 1, failure
+        # is ignored quietly.
+        return
+
+    if not shutil.which('restorecon'):
+        # If we don't have restorecon, failure is ignored quietly.
+        return
+
+    with subprocess.Popen(['restorecon', '-F', '-f-', '-0'],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        out, err = proc.communicate(input=b'\0'.join(os.fsencode(f) for f in selinux_updates) + b'\0')
+        if proc.returncode != 0 and not os.environ.get('DESTDIR'):
+            print('Failed to restore SELinux context of installed files...',
+                  'Standard output:', out.decode(),
+                  'Standard error:', err.decode(), sep='\n')
+
 def append_to_log(line):
     install_log_file.write(line)
     if not line.endswith('\n'):
@@ -73,38 +129,71 @@ def do_copyfile(from_file, to_file):
         os.unlink(to_file)
     shutil.copyfile(from_file, to_file)
     shutil.copystat(from_file, to_file)
+    selinux_updates.append(to_file)
     append_to_log(to_file)
 
-def do_copydir(src_prefix, src_dir, dst_dir):
+def do_copydir(data, src_dir, dst_dir, exclude):
     '''
-    Copies the directory @src_prefix (full path) into @dst_dir
+    Copies the contents of directory @src_dir into @dst_dir.
 
-    @src_dir is simply the parent directory of @src_prefix
+    For directory
+        /foo/
+          bar/
+            excluded
+            foobar
+          file
+    do_copydir(..., '/foo', '/dst/dir', {'bar/excluded'}) creates
+        /dst/
+          dir/
+            bar/
+              foobar
+            file
+
+    Args:
+        src_dir: str, absolute path to the source directory
+        dst_dir: str, absolute path to the destination directory
+        exclude: (set(str), set(str)), tuple of (exclude_files, exclude_dirs),
+                 each element of the set is a path relative to src_dir.
     '''
-    for root, dirs, files in os.walk(src_prefix):
-        for d in dirs:
-            abs_src = os.path.join(src_dir, root, d)
-            filepart = abs_src[len(src_dir) + 1:]
+    if not os.path.isabs(src_dir):
+        raise ValueError('src_dir must be absolute, got %s' % src_dir)
+    if not os.path.isabs(dst_dir):
+        raise ValueError('dst_dir must be absolute, got %s' % dst_dir)
+    if exclude is not None:
+        exclude_files, exclude_dirs = exclude
+    else:
+        exclude_files = exclude_dirs = set()
+    for root, dirs, files in os.walk(src_dir):
+        assert os.path.isabs(root)
+        for d in dirs[:]:
+            abs_src = os.path.join(root, d)
+            filepart = os.path.relpath(abs_src, start=src_dir)
             abs_dst = os.path.join(dst_dir, filepart)
+            # Remove these so they aren't visited by os.walk at all.
+            if filepart in exclude_dirs:
+                dirs.remove(d)
+                continue
             if os.path.isdir(abs_dst):
                 continue
             if os.path.exists(abs_dst):
                 print('Tried to copy directory %s but a file of that name already exists.' % abs_dst)
                 sys.exit(1)
-            os.makedirs(abs_dst)
+            data.dirmaker.makedirs(abs_dst)
             shutil.copystat(abs_src, abs_dst)
         for f in files:
-            abs_src = os.path.join(src_dir, root, f)
-            filepart = abs_src[len(src_dir) + 1:]
+            abs_src = os.path.join(root, f)
+            filepart = os.path.relpath(abs_src, start=src_dir)
+            if filepart in exclude_files:
+                continue
             abs_dst = os.path.join(dst_dir, filepart)
             if os.path.isdir(abs_dst):
                 print('Tried to copy file %s but a directory of that name already exists.' % abs_dst)
             if os.path.exists(abs_dst):
                 os.unlink(abs_dst)
-            parent_dir = os.path.split(abs_dst)[0]
+            parent_dir = os.path.dirname(abs_dst)
             if not os.path.isdir(parent_dir):
                 os.mkdir(parent_dir)
-                shutil.copystat(os.path.split(abs_src)[0], parent_dir)
+                shutil.copystat(os.path.dirname(abs_src), parent_dir)
             shutil.copy2(abs_src, abs_dst, follow_symlinks=False)
             append_to_log(abs_dst)
 
@@ -121,33 +210,31 @@ def do_install(datafilename):
     d.destdir = os.environ.get('DESTDIR', '')
     d.fullprefix = destdir_join(d.destdir, d.prefix)
 
-    install_subdirs(d) # Must be first, because it needs to delete the old subtree.
-    install_targets(d)
-    install_headers(d)
-    install_man(d)
-    install_data(d)
-    run_install_script(d)
+    d.dirmaker = DirMaker()
+    with d.dirmaker:
+        install_subdirs(d) # Must be first, because it needs to delete the old subtree.
+        install_targets(d)
+        install_headers(d)
+        install_man(d)
+        install_data(d)
+        restore_selinux_contexts()
+        run_install_script(d)
 
-def install_subdirs(data):
-    for (src_dir, inst_dir, dst_dir, mode) in data.install_subdirs:
-        if src_dir.endswith('/') or src_dir.endswith('\\'):
-            src_dir = src_dir[:-1]
-        src_prefix = os.path.join(src_dir, inst_dir)
-        print('Installing subdir %s to %s' % (src_prefix, dst_dir))
-        dst_dir = get_destdir_path(data, dst_dir)
-        if not os.path.exists(dst_dir):
-            os.makedirs(dst_dir)
-        do_copydir(src_prefix, src_dir, dst_dir)
-        dst_prefix = os.path.join(dst_dir, inst_dir)
-        set_mode(dst_prefix, mode)
+def install_subdirs(d):
+    for (src_dir, dst_dir, mode, exclude) in d.install_subdirs:
+        full_dst_dir = get_destdir_path(d, dst_dir)
+        print('Installing subdir %s to %s' % (src_dir, full_dst_dir))
+        d.dirmaker.makedirs(full_dst_dir, exist_ok=True)
+        do_copydir(d, src_dir, full_dst_dir, exclude)
+        set_mode(full_dst_dir, mode)
 
 def install_data(d):
     for i in d.data:
         fullfilename = i[0]
         outfilename = get_destdir_path(d, i[1])
         mode = i[2]
-        outdir = os.path.split(outfilename)[0]
-        os.makedirs(outdir, exist_ok=True)
+        outdir = os.path.dirname(outfilename)
+        d.dirmaker.makedirs(outdir, exist_ok=True)
         print('Installing %s to %s' % (fullfilename, outdir))
         do_copyfile(fullfilename, outfilename)
         set_mode(outfilename, mode)
@@ -156,13 +243,15 @@ def install_man(d):
     for m in d.man:
         full_source_filename = m[0]
         outfilename = get_destdir_path(d, m[1])
-        outdir = os.path.split(outfilename)[0]
-        os.makedirs(outdir, exist_ok=True)
+        outdir = os.path.dirname(outfilename)
+        d.dirmaker.makedirs(outdir, exist_ok=True)
         print('Installing %s to %s' % (full_source_filename, outdir))
         if outfilename.endswith('.gz') and not full_source_filename.endswith('.gz'):
             with open(outfilename, 'wb') as of:
                 with open(full_source_filename, 'rb') as sf:
-                    of.write(gzip.compress(sf.read()))
+                    # Set mtime and filename for reproducibility.
+                    with gzip.GzipFile(fileobj=of, mode='wb', filename='', mtime=0) as gz:
+                        gz.write(sf.read())
             shutil.copystat(full_source_filename, outfilename)
             append_to_log(outfilename)
         else:
@@ -171,11 +260,11 @@ def install_man(d):
 def install_headers(d):
     for t in d.headers:
         fullfilename = t[0]
-        fname = os.path.split(fullfilename)[1]
+        fname = os.path.basename(fullfilename)
         outdir = get_destdir_path(d, t[1])
         outfilename = os.path.join(outdir, fname)
         print('Installing %s to %s' % (fname, outdir))
-        os.makedirs(outdir, exist_ok=True)
+        d.dirmaker.makedirs(outdir, exist_ok=True)
         do_copyfile(fullfilename, outfilename)
 
 def run_install_script(d):
@@ -183,7 +272,9 @@ def run_install_script(d):
            'MESON_BUILD_ROOT': d.build_dir,
            'MESON_INSTALL_PREFIX': d.prefix,
            'MESON_INSTALL_DESTDIR_PREFIX': d.fullprefix,
-           'MESONINTROSPECT': d.mesonintrospect}
+           'MESONINTROSPECT': ' '.join([shlex.quote(x) for x in d.mesonintrospect]),
+           }
+
     child_env = os.environ.copy()
     child_env.update(env)
 
@@ -196,7 +287,7 @@ def run_install_script(d):
             rc = subprocess.call(script + args, env=child_env)
             if rc != 0:
                 sys.exit(rc)
-        except:
+        except OSError:
             print('Failed to run install script {!r}'.format(name))
             sys.exit(1)
 
@@ -235,19 +326,19 @@ def install_targets(d):
     for t in d.targets:
         fname = check_for_stampfile(t[0])
         outdir = get_destdir_path(d, t[1])
-        outname = os.path.join(outdir, os.path.split(fname)[-1])
+        outname = os.path.join(outdir, os.path.basename(fname))
         aliases = t[2]
         should_strip = t[3]
         install_rpath = t[4]
         print('Installing %s to %s' % (fname, outname))
-        os.makedirs(outdir, exist_ok=True)
+        d.dirmaker.makedirs(outdir, exist_ok=True)
         if not os.path.exists(fname):
             raise RuntimeError('File {!r} could not be found'.format(fname))
         elif os.path.isfile(fname):
             do_copyfile(fname, outname)
             if should_strip and d.strip_bin is not None:
                 if fname.endswith('.jar'):
-                    print('Not stripping jar target:', os.path.split(fname)[1])
+                    print('Not stripping jar target:', os.path.basename(fname))
                     continue
                 print('Stripping target {!r}'.format(fname))
                 ps, stdo, stde = Popen_safe(d.strip_bin + [outname])
@@ -263,7 +354,7 @@ def install_targets(d):
                 do_copyfile(pdb_filename, pdb_outname)
         elif os.path.isdir(fname):
             fname = os.path.join(d.build_dir, fname.rstrip('/'))
-            do_copydir(fname, os.path.dirname(fname), outdir)
+            do_copydir(d, fname, os.path.join(outdir, os.path.basename(fname)), None)
         else:
             raise RuntimeError('Unknown file type for {!r}'.format(fname))
         printed_symlink_error = False
@@ -297,7 +388,7 @@ def run(args):
         print('Installer script for Meson. Do not run on your own, mmm\'kay?')
         print('meson_install.py [install info file]')
     datafilename = args[0]
-    private_dir = os.path.split(datafilename)[0]
+    private_dir = os.path.dirname(datafilename)
     log_dir = os.path.join(private_dir, '../meson-logs')
     with open(os.path.join(log_dir, 'install-log.txt'), 'w') as lf:
         install_log_file = lf

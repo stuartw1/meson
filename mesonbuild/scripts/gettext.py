@@ -70,7 +70,10 @@ def update_po(src_sub, pkgname, langs):
     potfile = os.path.join(src_sub, pkgname + '.pot')
     for l in langs:
         pofile = os.path.join(src_sub, l + '.po')
-        subprocess.check_call(['msgmerge', '-q', '-o', pofile, pofile, potfile])
+        if os.path.exists(pofile):
+            subprocess.check_call(['msgmerge', '-q', '-o', pofile, pofile, potfile])
+        else:
+            subprocess.check_call(['msginit', '--input', potfile, '--output-file', pofile, '--locale', l, '--no-translator'])
     return 0
 
 def do_install(src_sub, bld_sub, dest, pkgname, langs):
@@ -78,7 +81,7 @@ def do_install(src_sub, bld_sub, dest, pkgname, langs):
         srcfile = os.path.join(bld_sub, l + '.gmo')
         outfile = os.path.join(dest, l, 'LC_MESSAGES',
                                pkgname + '.mo')
-        os.makedirs(os.path.split(outfile)[0], exist_ok=True)
+        os.makedirs(os.path.dirname(outfile), exist_ok=True)
         shutil.copyfile(srcfile, outfile)
         shutil.copystat(srcfile, outfile)
         print('Installing %s to %s' % (srcfile, outfile))
@@ -88,7 +91,7 @@ def run(args):
     options = parser.parse_args(args)
     subcmd = options.command
     langs = options.langs.split('@@') if options.langs else None
-    extra_args = options.extra_args.split('@@')
+    extra_args = options.extra_args.split('@@') if options.extra_args else []
     subdir = os.environ.get('MESON_SUBDIR', '')
     if options.subdir:
         subdir = options.subdir

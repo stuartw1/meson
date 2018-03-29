@@ -26,7 +26,20 @@ Other install commands are the following.
 ```meson
 install_headers('header.h', subdir : 'projname') # -> include/projname/header.h
 install_man('foo.1') # -> share/man/man1/foo.1.gz
-install_data('datafile.cat', install_dir : join_paths(get_option('datadir'), 'progname')) # -> share/progname/datafile.dat
+install_data('datafile.dat', install_dir : join_paths(get_option('datadir'), 'progname')) # -> share/progname/datafile.dat
+```
+
+`install_data()` supports rename of the file *since 0.46.0*.
+
+```meson
+# file.txt -> {datadir}/{projectname}/new-name.txt
+install_data('file.txt', rename : 'new-name.txt')
+
+# file1.txt -> share/myapp/dir1/data.txt
+# file2.txt -> share/myapp/dir2/data.txt
+install_data(['file1.txt', 'file2.txt'],
+             rename : ['dir1/data.txt', 'dir2/data.txt'],
+             install_dir : 'share/myapp')
 ```
 
 Sometimes you want to copy an entire subtree directly. For this use case there is the `install_subdir` command, which can be used like this.
@@ -44,7 +57,7 @@ giving an absolute install path.
 install_data(sources : 'foo.dat', install_dir : '/etc') # -> /etc/foo.dat
 ```
 
-## Custom install behavior ##
+## Custom install behavior
 
 Sometimes you need to do more than just install basic targets. Meson makes this easy by allowing you to specify a custom script to execute at install time. As an example, here is a script that generates an empty file in a custom directory.
 
@@ -65,7 +78,7 @@ meson.add_install_script('myscript.sh')
 
 The argument is the name of the script file relative to the current subdirectory.
 
-## DESTDIR support ##
+## DESTDIR support
 
 Sometimes you need to install to a different directory than the install prefix. This is most common when building rpm or deb packages. This is done with the `DESTDIR` environment variable and it is used just like with other build systems:
 

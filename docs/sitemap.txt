@@ -26,17 +26,21 @@ index.md
 		Localisation.md
 		Build-options.md
 		Subprojects.md
+		Disabler.md
 		Modules.md
+			Gnome-module.md
 			i18n-module.md
+			Icestorm-module.md
 			Pkgconfig-module.md
 			Python-3-module.md
 			Qt4-module.md
 			Qt5-module.md
 			RPM-module.md
+			Simd-module.md
 			Windows-module.md
-			Gnome-module.md
 		Java.md
 		Vala.md
+		D.md
 		IDE-integration.md
 		Custom-build-targets.md
 		Build-system-converters.md
@@ -45,7 +49,10 @@ index.md
 		Creating-releases.md
 		Creating-OSX-packages.md
 		Creating-Linux-binaries.md
+		Project-templates.md
 	Reference-manual.md
+	Reference-tables.md
+	Style-guide.md
 	FAQ.md
 	Reproducible-builds.md
 	howtox.md
@@ -58,6 +65,11 @@ index.md
 		Shipping-prebuilt-binaries-as-wraps.md
 		fallback-wraptool.md
 	Release-notes.md
+		Release-notes-for-0.46.0.md
+		Release-notes-for-0.45.0.md
+		Release-notes-for-0.44.0.md
+		Release-notes-for-0.43.0.md
+		Release-notes-for-0.42.0.md
 		Release-notes-for-0.41.0.md
 		Release-notes-for-0.40.0.md
 		Release-notes-for-0.39.0.md
@@ -82,5 +94,6 @@ index.md
 		Use-of-Python.md
 		Users.md
 		Using-multiple-build-directories.md
+	Contributing.md
 	legal.md
 	Videos.md

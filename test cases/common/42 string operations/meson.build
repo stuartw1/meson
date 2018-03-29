@@ -13,6 +13,8 @@ subs2 = '42'
 
 assert(templ2.format(subs2) == '42', 'String formatting with variables is broken.')
 
+assert('@@0@@ @@1@@'.format(1, 2) == '@1@ @2@', 'String format is recursive.')
+
 long = 'abcde'
 prefix = 'abc'
 suffix = 'cde'
@@ -67,3 +69,31 @@ assert(not version_number.version_compare('!=1.2.8'), 'Version_compare neq broke
 
 assert(version_number.version_compare('<2.0'), 'Version_compare major less broken')
 assert(version_number.version_compare('>0.9'), 'Version_compare major greater broken')
+
+assert(' spaces	tabs	'.strip() == 'spaces	tabs', 'Spaces and tabs badly stripped')
+assert(''' 
+multiline string	'''.strip() == '''multiline string''', 'Newlines badly stripped')
+assert('"1.1.20"'.strip('"') == '1.1.20', '" badly stripped')
+assert('"1.1.20"'.strip('".') == '1.1.20', '". badly stripped')
+assert('"1.1.20"   '.strip('" ') == '1.1.20', '". badly stripped')
+
+bs_b = '''\b'''
+bs_bs_b = '''\\b'''
+nl = '''
+'''
+bs_n = '''\n'''
+bs_nl = '''\
+'''
+bs_bs_n = '''\\n'''
+bs_bs_nl = '''\\
+'''
+
+assert('\b' == bs_b, 'Single backslash broken')
+assert('\\b' == bs_b, 'Double backslash broken')
+assert('\\\b' == bs_bs_b, 'Three backslash broken')
+assert('\\\\b' == bs_bs_b, 'Four backslash broken')
+assert('\n' == nl, 'Newline escape broken')
+assert('\\n' == bs_n, 'Double backslash broken before n')
+assert('\\\n' == bs_nl, 'Three backslash broken before n')
+assert('\\\\n' == bs_bs_n, 'Four backslash broken before n')
+assert('\\\\\n' == bs_bs_nl, 'Five backslash broken before n')

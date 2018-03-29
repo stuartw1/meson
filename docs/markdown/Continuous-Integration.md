@@ -1,14 +1,21 @@
 # Continuous Integration
 
-Here you will find snippets to use Meson with various CI such as Travis and AppVeyor.
+Here you will find snippets to use Meson with various CI such as
+Travis and AppVeyor.
 
-Please [file an issue](https://github.com/mesonbuild/meson/issues/new) if these instructions don't work for you.
+Please [file an issue](https://github.com/mesonbuild/meson/issues/new)
+if these instructions don't work for you.
 
 ## Travis for OS X and Linux (with Docker)
 
-Travis for Linux provides ancient versions of Ubuntu which will likely cause problems building your projects regardless of which build system you're using. We recommend using Docker to get a more-recent version of Ubuntu and installing Ninja, Python3, and Meson inside it.
+Travis for Linux provides ancient versions of Ubuntu which will likely
+cause problems building your projects regardless of which build system
+you're using. We recommend using Docker to get a more-recent version
+of Ubuntu and installing Ninja, Python3, and Meson inside it.
 
-This `yml` file is derived from the [configuration used by Meson for running its own tests](https://github.com/mesonbuild/meson/blob/master/.travis.yml).
+This `yml` file is derived from the [configuration used by Meson for
+running its own
+tests](https://github.com/mesonbuild/meson/blob/master/.travis.yml).
 
 ```yaml
 sudo: false
@@ -39,18 +46,20 @@ script:
 
 ## AppVeyor for Windows
 
-For CI on Windows, [AppVeyor](https://www.appveyor.com/) is probably your best bet. Here's a sample `yml` file for use with that.
+For CI on Windows, [AppVeyor](https://www.appveyor.com/) is probably
+your best bet. Here's a sample `yml` file for use with that.
 
 ```yaml
 os: Visual Studio 2015
 
-matrix:
-  - arch: x86
-    compiler: msvc2010
-  - arch: x86
-    compiler: msvc2015
-  - arch: x64
-    compiler: msvc2015
+environment:
+  matrix:
+    - arch: x86
+      compiler: msvc2010
+    - arch: x86
+      compiler: msvc2015
+    - arch: x64
+      compiler: msvc2015
 
 platform:
   - x64
@@ -58,10 +67,10 @@ platform:
 install:
   # Use the x86 python only when building for x86 for the cpython tests.
   # For all other archs (including, say, arm), use the x64 python.
-  - ps: (new-object net.webclient).DownloadFile('https://dl.dropboxusercontent.com/u/37517477/ninja.exe', 'C:\projects\meson\ninja.exe')
+  - ps: (new-object net.webclient).DownloadFile('https://www.dropbox.com/s/cyghxjrvgplu7sy/ninja.exe?dl=1', 'C:\projects\meson\ninja.exe')
   - cmd: if %arch%==x86 (set MESON_PYTHON_PATH=C:\python34) else (set MESON_PYTHON_PATH=C:\python34-x64)
   - cmd: echo Using Python at %MESON_PYTHON_PATH%
-  - cmd: %MESON_PYTHON_PATH%\pip install meson
+  - cmd: "%MESON_PYTHON_PATH%\\pip install meson"
   - cmd: if %compiler%==msvc2010 ( call "C:\Program Files (x86)\Microsoft Visual Studio 10.0\VC\vcvarsall.bat" %arch% )
   - cmd: if %compiler%==msvc2015 ( call "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" %arch% )
 

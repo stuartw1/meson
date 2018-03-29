@@ -17,6 +17,12 @@ project('myproj', 'c', 'cpp',
         default_options : ['c_std=c11', 'cpp_std=c++11'])
 ```
 
+The language version can also be set on a per-target basis.
+
+```meson
+executable(..., override_options : ['c_std=c11'])
+```
+
 ## Enable threads
 
 Lots of people seem to do this manually with `find_library('pthread')` or something similar. Do not do that. It is not portable. Instead do this.
@@ -91,12 +97,12 @@ $ ninja coverage-html (or coverage-xml)
 
 The coverage report can be found in the meson-logs subdirectory.
 
-## Add some optimization to debug builds ##
+## Add some optimization to debug builds
 
 By default the debug build does not use any optimizations. This is the desired approach most of the time. However some projects benefit from having some minor optimizations enabled. GCC even has a specific compiler flag `-Og` for this. To enable its use, just issue the following command.
 
 ```console
-$ mesonconf -Dc_args=-Og
+$ meson configure -Dc_args=-Og
 ```
 
 This causes all subsequent builds to use this command line argument.
@@ -119,6 +125,12 @@ Install scan-build and configure your project. Then do this:
 $ ninja scan-build
 ```
 
+You can use the `SCANBUILD` environment variable to choose the scan-build executable.
+```console
+$ SCANBUILD=<your exe> ninja scan-build
+```
+
+
 ## Use profile guided optimization
 
 Using profile guided optimization with GCC is a two phase operation. First we set up the project with profile measurements enabled and compile it.
@@ -133,7 +145,7 @@ Then we need to run the program with some representative input. This step depend
 Once that is done we change the compiler flags to use the generated information and rebuild.
 
 ```console
-$ mesonconf -Db_pgo=use
+$ meson configure -Db_pgo=use
 $ ninja
 ```
 

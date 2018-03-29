@@ -41,6 +41,11 @@ assert(somelibver.type_name() == 'internal', 'somelibver should be of type "inte
 somelib = dependency('somelib',
   version : '== 0.1',
   fallback : ['somelib', 'some_dep'])
+# Find an internal dependency again even if required = false
+somelib_reqfalse = dependency('somelib',
+  required: false,
+  fallback : ['somelib', 'some_dep'])
+assert(somelib_reqfalse.found(), 'somelib should have been found')
 # Find an internal dependency again with the same name and incompatible version
 somelibver = dependency('somelib',
   version : '>= 0.3',
@@ -90,9 +95,15 @@ if meson.is_cross_build()
   assert(native_prefix != cross_prefix, 'native prefix == cross_prefix == ' + native_prefix)
 endif
 
-foreach d : ['sdl2', 'gnustep', 'wx', 'gl', 'python3', 'boost', 'gtest', 'gmock']
-  dep = dependency(d, required : false)
-  if dep.found()
-    dep.version()
+objc_found = add_languages('objc', required : false)
+
+foreach d : ['sdl2', 'gnustep', 'wxwidgets', 'gl', 'python3', 'boost', 'gtest', 'gmock', 'valgrind']
+  if d == 'gnustep' and not objc_found
+    message('Skipping gnustep because no ObjC compiler found')
+  else
+    dep = dependency(d, required : false)
+    if dep.found()
+      dep.version()
+    endif
   endif
 endforeach

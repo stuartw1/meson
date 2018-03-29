@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from mesonbuild import mintro
 import sys
 
-sys.exit(mintro.run(sys.argv[1:]))
+if __name__ == '__main__':
+    sys.exit('Error: This executable is no more. Use "meson introspect" instead.')

@@ -16,6 +16,22 @@ foreach lang : ['c', 'cpp']
   elif host_system == 'cygwin'
     d = cc.get_define('__CYGWIN__')
     assert(d == '1', '__CYGWIN__ value is @0@ instead of 1'.format(d))
+  elif host_system == 'haiku'
+    d = cc.get_define('__HAIKU__')
+    assert(d == '1', '__HAIKU__ value is @0@ instead of 1'.format(d))
+  elif host_system == 'freebsd'
+    # the __FreeBSD__ define will be equal to the major version of the release
+    # (ex, in FreeBSD 11.x, __FreeBSD__ == 11). To make the test robust when
+    # being run on various versions of FreeBSD, just test that the define is
+    # set.
+    d = cc.get_define('__FreeBSD__')
+    assert(d != '', '__FreeBSD__ value is unset')
+  elif host_system == 'dragonfly'
+    d = cc.get_define('__DragonFly__')
+    assert(d == '1', '__DragonFly__ value is @0@ instead of 1'.format(d))
+  elif host_system == 'netbsd'
+    d = cc.get_define('__NetBSD__')
+    assert(d == '1', '__NetBSD__ value is @0@ instead of 1'.format(d))
   else
     error('Please report a bug and help us improve support for this platform')
   endif
@@ -25,8 +41,16 @@ foreach lang : ['c', 'cpp']
     # found in the compiler's default search path, GCC inserts an extra comment
     # between the delimiter and the define which causes a parsing error.
     # https://github.com/mesonbuild/meson/issues/1726
-    ver = cc.get_define('ZLIB_VER_MAJOR', prefix : '#include <zlib.h>')
-    assert(ver == '1', 'ZLIB_VER_MAJOR value is "@0@" instead of "1"'.format(ver))
+    if host_machine.system() == 'netbsd'
+      # NetBSD's zlib doesn't is version 1.2.3 and doesn't have a
+      # ZLIB_VER_MAJOR, but it does have a ZLIB_VERSION (which is a string), so
+      # check the first non-quote character of that.
+      ver = cc.get_define('ZLIB_VERSION', prefix : '#include <zlib.h>')[1]
+      assert(ver == '1', 'ZLIB_VERSION (major) value is "@0@" instead of "1"'.format(ver))
+    else
+      ver = cc.get_define('ZLIB_VER_MAJOR', prefix : '#include <zlib.h>')
+      assert(ver == '1', 'ZLIB_VER_MAJOR value is "@0@" instead of "1"'.format(ver))
+    endif
   endif
 
   # Check that an undefined value is empty.
@@ -42,8 +66,8 @@ foreach lang : ['c', 'cpp']
   if meson.is_cross_build()
     # Can't use an empty array as a fallback here because of
     # https://github.com/mesonbuild/meson/issues/1481
-    lang_args = meson.get_cross_property(lang + '_args', false)
-    if lang_args != false
+    lang_args = meson.get_cross_property(lang + '_args', [])
+    if lang_args.length() != 0
       foreach lang_arg : lang_args
         if lang_arg.contains('MESON_TEST_ISSUE_1665')
           run_1665_test = true

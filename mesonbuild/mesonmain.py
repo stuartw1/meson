@@ -12,67 +12,80 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys, stat, traceback, pickle, argparse
-import time, datetime
+import sys, stat, traceback, argparse
+import datetime
 import os.path
 from . import environment, interpreter, mesonlib
 from . import build
+from . import mconf, mintro, mtest, rewriter, minit
 import platform
 from . import mlog, coredata
 from .mesonlib import MesonException
-from .wrap import WrapMode
-
-
-parser = argparse.ArgumentParser()
+from .wrap import WrapMode, wraptool
 
 default_warning = '1'
 
-def add_builtin_argument(name, **kwargs):
+def add_builtin_argument(p, name, **kwargs):
     k = kwargs.get('dest', name.replace('-', '_'))
     c = coredata.get_builtin_option_choices(k)
-    b = True if kwargs.get('action', None) in ['store_true', 'store_false'] else False
+    b = kwargs.get('action', None) in ['store_true', 'store_false']
     h = coredata.get_builtin_option_description(k)
     if not b:
         h = h.rstrip('.') + ' (default: %s).' % coredata.get_builtin_option_default(k)
     if c and not b:
         kwargs['choices'] = c
-    parser.add_argument('--' + name, default=coredata.get_builtin_option_default(k), help=h, **kwargs)
+    default = coredata.get_builtin_option_default(k, noneIfSuppress=True)
+    if default is not None:
+        kwargs['default'] = default
+    else:
+        kwargs['default'] = argparse.SUPPRESS
+    p.add_argument('--' + name, help=h, **kwargs)
 
-add_builtin_argument('prefix')
-add_builtin_argument('libdir')
-add_builtin_argument('libexecdir')
-add_builtin_argument('bindir')
-add_builtin_argument('sbindir')
-add_builtin_argument('includedir')
-add_builtin_argument('datadir')
-add_builtin_argument('mandir')
-add_builtin_argument('infodir')
-add_builtin_argument('localedir')
-add_builtin_argument('sysconfdir')
-add_builtin_argument('localstatedir')
-add_builtin_argument('sharedstatedir')
-add_builtin_argument('backend')
-add_builtin_argument('buildtype')
-add_builtin_argument('strip', action='store_true')
-add_builtin_argument('unity')
-add_builtin_argument('werror', action='store_true')
-add_builtin_argument('layout')
-add_builtin_argument('default-library')
-add_builtin_argument('warnlevel', dest='warning_level')
-add_builtin_argument('stdsplit', action='store_false')
-add_builtin_argument('errorlogs', action='store_false')
+def create_parser():
+    p = argparse.ArgumentParser(prog='meson')
+    add_builtin_argument(p, 'prefix')
+    add_builtin_argument(p, 'libdir')
+    add_builtin_argument(p, 'libexecdir')
+    add_builtin_argument(p, 'bindir')
+    add_builtin_argument(p, 'sbindir')
+    add_builtin_argument(p, 'includedir')
+    add_builtin_argument(p, 'datadir')
+    add_builtin_argument(p, 'mandir')
+    add_builtin_argument(p, 'infodir')
+    add_builtin_argument(p, 'localedir')
+    add_builtin_argument(p, 'sysconfdir')
+    add_builtin_argument(p, 'localstatedir')
+    add_builtin_argument(p, 'sharedstatedir')
+    add_builtin_argument(p, 'backend')
+    add_builtin_argument(p, 'buildtype')
+    add_builtin_argument(p, 'strip', action='store_true')
+    add_builtin_argument(p, 'unity')
+    add_builtin_argument(p, 'werror', action='store_true')
+    add_builtin_argument(p, 'layout')
+    add_builtin_argument(p, 'default-library')
+    add_builtin_argument(p, 'warnlevel', dest='warning_level')
+    add_builtin_argument(p, 'stdsplit', action='store_false')
+    add_builtin_argument(p, 'errorlogs', action='store_false')
+    p.add_argument('--cross-file', default=None,
+                   help='File describing cross compilation environment.')
+    p.add_argument('-D', action='append', dest='projectoptions', default=[], metavar="option",
+                   help='Set the value of an option, can be used several times to set multiple options.')
+    p.add_argument('-v', '--version', action='version',
+                   version=coredata.version)
+    # See the mesonlib.WrapMode enum for documentation
+    p.add_argument('--wrap-mode', default=WrapMode.default,
+                   type=wrapmodetype, choices=WrapMode,
+                   help='Special wrap mode to use')
+    p.add_argument('directories', nargs='*')
+    return p
 
-parser.add_argument('--cross-file', default=None,
-                    help='File describing cross compilation environment.')
-parser.add_argument('-D', action='append', dest='projectoptions', default=[],
-                    help='Set project options.')
-parser.add_argument('-v', '--version', action='version',
-                    version=coredata.version)
-                    # See the mesonlib.WrapMode enum for documentation
-parser.add_argument('--wrap-mode', default=WrapMode.default,
-                    type=lambda t: getattr(WrapMode, t), choices=WrapMode,
-                    help='Special wrap mode to use')
-parser.add_argument('directories', nargs='*')
+def wrapmodetype(string):
+    try:
+        return getattr(WrapMode, string)
+    except AttributeError:
+        msg = ', '.join([t.name.lower() for t in WrapMode])
+        msg = 'invalid argument {!r}, use one of {}'.format(string, msg)
+        raise argparse.ArgumentTypeError(msg)
 
 class MesonApp:
 
@@ -112,13 +125,13 @@ class MesonApp:
         priv_dir = os.path.join(build_dir, 'meson-private/coredata.dat')
         if os.path.exists(priv_dir):
             if not handshake:
-                msg = '''Trying to run Meson on a build directory that has already been configured.
-If you want to build it, just run your build command (e.g. ninja) inside the
-build directory. Meson will autodetect any changes in your setup and regenerate
-itself as required.
-
-If you want to change option values, use the mesonconf tool instead.'''
-                raise RuntimeError(msg)
+                print('Directory already configured, exiting Meson. Just run your build command\n'
+                      '(e.g. ninja) and Meson will regenerate as necessary. If ninja fails, run ninja\n'
+                      'reconfigure to force Meson to regenerate.\n'
+                      '\nIf build failures persist, manually wipe your build directory to clear any\n'
+                      'stored system data.\n'
+                      '\nTo change option values, run meson configure instead.')
+                sys.exit(0)
         else:
             if handshake:
                 raise RuntimeError('Something went terribly wrong. Please file a bug.')
@@ -134,8 +147,12 @@ If you want to change option values, use the mesonconf tool instead.'''
     def generate(self):
         env = environment.Environment(self.source_dir, self.build_dir, self.meson_script_launcher, self.options, self.original_cmd_line_args)
         mlog.initialize(env.get_log_dir())
+        with mesonlib.BuildDirLock(self.build_dir):
+            self._generate(env)
+
+    def _generate(self, env):
         mlog.debug('Build started at', datetime.datetime.now().isoformat())
-        mlog.debug('Python binary:', sys.executable)
+        mlog.debug('Main binary:', sys.executable)
         mlog.debug('Python system:', platform.system())
         mlog.log(mlog.bold('The Meson build system'))
         self.check_pkgconfig_envvar(env)
@@ -153,6 +170,7 @@ If you want to change option values, use the mesonconf tool instead.'''
         elif self.options.backend == 'vs':
             from .backend import vs2010backend
             g = vs2010backend.autodetect_vs_version(b)
+            env.coredata.set_builtin_option('backend', g.name)
             mlog.log('Auto detected Visual Studio backend:', mlog.bold(g.name))
         elif self.options.backend == 'vs2010':
             from .backend import vs2010backend
@@ -178,22 +196,22 @@ If you want to change option values, use the mesonconf tool instead.'''
         mlog.log('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
         mlog.log('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
         intr.run()
-        coredata_mtime = time.time()
-        g.generate(intr)
-        g.run_postconf_scripts()
-        dumpfile = os.path.join(env.get_scratch_dir(), 'build.dat')
-        with open(dumpfile, 'wb') as f:
-            pickle.dump(b, f)
-        # Write this last since we use the existence of this file to check if
-        # we generated the build file successfully, so we don't want an error
-        # that pops up during generation, post-conf scripts, etc to cause us to
-        # incorrectly signal a successful meson run which will cause an error
-        # about an already-configured build directory when the user tries again.
-        #
-        # However, we set the mtime to an earlier value to ensure that doing an
-        # mtime comparison between the coredata dump and other build files
-        # shows the build files to be newer, not older.
-        env.dump_coredata(coredata_mtime)
+        try:
+            dumpfile = os.path.join(env.get_scratch_dir(), 'build.dat')
+            # We would like to write coredata as late as possible since we use the existence of
+            # this file to check if we generated the build file successfully. Since coredata
+            # includes settings, the build files must depend on it and appear newer. However, due
+            # to various kernel caches, we cannot guarantee that any time in Python is exactly in
+            # sync with the time that gets applied to any files. Thus, we dump this file as late as
+            # possible, but before build files, and if any error occurs, delete it.
+            cdf = env.dump_coredata()
+            g.generate(intr)
+            build.save(b, dumpfile)
+            # Post-conf scripts must be run after writing coredata or else introspection fails.
+            g.run_postconf_scripts()
+        except:
+            os.unlink(cdf)
+            raise
 
 def run_script_command(args):
     cmdname = args[0]
@@ -256,25 +274,67 @@ def run_script_command(args):
         raise MesonException('Unknown internal command {}.'.format(cmdname))
     return cmdfunc(cmdargs)
 
-def run(mainfile, args):
-    if sys.version_info < (3, 3):
-        print('Meson works correctly only with python 3.3+.')
+def run(original_args, mainfile=None):
+    if sys.version_info < (3, 5):
+        print('Meson works correctly only with python 3.5+.')
         print('You have python %s.' % sys.version)
         print('Please update your environment')
         return 1
+    args = original_args[:]
+    if len(args) > 0:
+        # First check if we want to run a subcommand.
+        cmd_name = args[0]
+        remaining_args = args[1:]
+        # "help" is a special case: Since printing of the help may be
+        # delegated to a subcommand, we edit cmd_name before executing
+        # the rest of the logic here.
+        if cmd_name == 'help':
+            remaining_args += ['--help']
+            args = remaining_args
+            cmd_name = args[0]
+        if cmd_name == 'test':
+            return mtest.run(remaining_args)
+        elif cmd_name == 'setup':
+            args = remaining_args
+            # FALLTHROUGH like it's 1972.
+        elif cmd_name == 'introspect':
+            return mintro.run(remaining_args)
+        elif cmd_name == 'rewrite':
+            return rewriter.run(remaining_args)
+        elif cmd_name == 'configure':
+            try:
+                return mconf.run(remaining_args)
+            except MesonException as e:
+                mlog.exception(e)
+                sys.exit(1)
+        elif cmd_name == 'wrap':
+            return wraptool.run(remaining_args)
+        elif cmd_name == 'init':
+            return minit.run(remaining_args)
+        elif cmd_name == 'runpython':
+            import runpy
+            script_file = remaining_args[0]
+            sys.argv[1:] = remaining_args[1:]
+            runpy.run_path(script_file, run_name='__main__')
+            sys.exit(0)
+
+    # No special command? Do the basic setup/reconf.
     if len(args) >= 2 and args[0] == '--internal':
         if args[1] != 'regenerate':
             script = args[1]
             try:
                 sys.exit(run_script_command(args[1:]))
             except MesonException as e:
-                mlog.log(mlog.red('\nError in {} helper script:'.format(script)))
-                mlog.log(e)
+                mlog.error('\nError in {} helper script:'.format(script))
+                mlog.exception(e)
                 sys.exit(1)
         args = args[2:]
         handshake = True
     else:
         handshake = False
+
+    parser = create_parser()
+
     args = mesonlib.expand_arguments(args)
     options = parser.parse_args(args)
     args = options.directories
@@ -296,7 +356,9 @@ def run(mainfile, args):
         else:
             dir2 = '.'
     try:
-        app = MesonApp(dir1, dir2, mainfile, handshake, options, sys.argv)
+        if mainfile is None:
+            raise AssertionError('I iz broken. Sorry.')
+        app = MesonApp(dir1, dir2, mainfile, handshake, options, original_args)
     except Exception as e:
         # Log directory does not exist, so just print
         # to stdout.
@@ -307,12 +369,20 @@ def run(mainfile, args):
         app.generate()
     except Exception as e:
         if isinstance(e, MesonException):
-            if hasattr(e, 'file') and hasattr(e, 'lineno') and hasattr(e, 'colno'):
-                mlog.log(mlog.red('\nMeson encountered an error in file %s, line %d, column %d:' % (e.file, e.lineno, e.colno)))
-            else:
-                mlog.log(mlog.red('\nMeson encountered an error:'))
-            mlog.log(e)
+            mlog.exception(e)
+            # Path to log file
+            mlog.shutdown()
+            logfile = os.path.join(app.build_dir, environment.Environment.log_dir, mlog.log_fname)
+            mlog.log("\nA full log can be found at", mlog.bold(logfile))
+            if os.environ.get('MESON_FORCE_BACKTRACE'):
+                raise
+            return 1
         else:
+            if os.environ.get('MESON_FORCE_BACKTRACE'):
+                raise
             traceback.print_exc()
-        return 1
+            return 2
+    finally:
+        mlog.shutdown()
+
     return 0

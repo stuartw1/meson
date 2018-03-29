@@ -2,9 +2,24 @@ import os
 
 from .. import build
 from .. import dependencies
+from .. import mlog
 from ..mesonlib import MesonException
 
+class permittedSnippetKwargs:
+
+    def __init__(self, permitted):
+        self.permitted = permitted
+
+    def __call__(self, f):
+        def wrapped(s, interpreter, state, args, kwargs):
+            for k in kwargs:
+                if k not in self.permitted:
+                    mlog.warning('Passed invalid keyword argument "%s". This will become a hard error in the future.' % k)
+            return f(s, interpreter, state, args, kwargs)
+        return wrapped
+
 _found_programs = {}
+
 
 class ExtensionModule:
     def __init__(self):
@@ -63,21 +78,21 @@ class ModuleReturnValue:
         self.new_objects = new_objects
 
 class GResourceTarget(build.CustomTarget):
-    def __init__(self, name, subdir, kwargs):
-        super().__init__(name, subdir, kwargs)
+    def __init__(self, name, subdir, subproject, kwargs):
+        super().__init__(name, subdir, subproject, kwargs)
 
 class GResourceHeaderTarget(build.CustomTarget):
-    def __init__(self, name, subdir, kwargs):
-        super().__init__(name, subdir, kwargs)
+    def __init__(self, name, subdir, subproject, kwargs):
+        super().__init__(name, subdir, subproject, kwargs)
 
 class GirTarget(build.CustomTarget):
-    def __init__(self, name, subdir, kwargs):
-        super().__init__(name, subdir, kwargs)
+    def __init__(self, name, subdir, subproject, kwargs):
+        super().__init__(name, subdir, subproject, kwargs)
 
 class TypelibTarget(build.CustomTarget):
-    def __init__(self, name, subdir, kwargs):
-        super().__init__(name, subdir, kwargs)
+    def __init__(self, name, subdir, subproject, kwargs):
+        super().__init__(name, subdir, subproject, kwargs)
 
 class VapiTarget(build.CustomTarget):
-    def __init__(self, name, subdir, kwargs):
-        super().__init__(name, subdir, kwargs)
+    def __init__(self, name, subdir, subproject, kwargs):
+        super().__init__(name, subdir, subproject, kwargs)

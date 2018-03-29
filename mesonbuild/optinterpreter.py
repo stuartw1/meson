@@ -12,23 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os, re
+import functools
+
+from . import mlog
 from . import mparser
 from . import coredata
 from . import mesonlib
-import os, re
+
 
 forbidden_option_names = coredata.get_builtin_options()
-forbidden_prefixes = {'c_': True,
-                      'cpp_': True,
-                      'd_': True,
-                      'rust_': True,
-                      'fortran_': True,
-                      'objc_': True,
-                      'objcpp_': True,
-                      'vala_': True,
-                      'csharp_': True,
-                      'swift_': True,
-                      'b_': True,
+forbidden_prefixes = {'c_',
+                      'cpp_',
+                      'd_',
+                      'rust_',
+                      'fortran_',
+                      'objc_',
+                      'objcpp_',
+                      'vala_',
+                      'csharp_',
+                      'swift_',
+                      'b_',
+                      'backend_',
                       }
 
 def is_invalid_name(name):
@@ -42,15 +47,38 @@ def is_invalid_name(name):
 class OptionException(mesonlib.MesonException):
     pass
 
+
+def permitted_kwargs(permitted):
+    """Function that validates kwargs for options."""
+    def _wraps(func):
+        @functools.wraps(func)
+        def _inner(name, description, kwargs):
+            bad = [a for a in kwargs.keys() if a not in permitted]
+            if bad:
+                raise OptionException('Invalid kwargs for option "{}": "{}"'.format(
+                    name, ' '.join(bad)))
+            return func(name, description, kwargs)
+        return _inner
+    return _wraps
+
+
 optname_regex = re.compile('[^a-zA-Z0-9_-]')
 
+@permitted_kwargs({'value', 'yield'})
 def StringParser(name, description, kwargs):
-    return coredata.UserStringOption(name, description,
-                                     kwargs.get('value', ''), kwargs.get('choices', []))
+    return coredata.UserStringOption(name,
+                                     description,
+                                     kwargs.get('value', ''),
+                                     kwargs.get('choices', []),
+                                     kwargs.get('yield', coredata.default_yielding))
 
+@permitted_kwargs({'value', 'yield'})
 def BooleanParser(name, description, kwargs):
-    return coredata.UserBooleanOption(name, description, kwargs.get('value', True))
+    return coredata.UserBooleanOption(name, description,
+                                      kwargs.get('value', True),
+                                      kwargs.get('yield', coredata.default_yielding))
 
+@permitted_kwargs({'value', 'yield', 'choices'})
 def ComboParser(name, description, kwargs):
     if 'choices' not in kwargs:
         raise OptionException('Combo option missing "choices" keyword.')
@@ -60,11 +88,50 @@ def ComboParser(name, description, kwargs):
     for i in choices:
         if not isinstance(i, str):
             raise OptionException('Combo choice elements must be strings.')
-    return coredata.UserComboOption(name, description, choices, kwargs.get('value', choices[0]))
+    return coredata.UserComboOption(name,
+                                    description,
+                                    choices,
+                                    kwargs.get('value', choices[0]),
+                                    kwargs.get('yield', coredata.default_yielding),)
+
+
+@permitted_kwargs({'value', 'min', 'max', 'yield'})
+def IntegerParser(name, description, kwargs):
+    if 'value' not in kwargs:
+        raise OptionException('Integer option must contain value argument.')
+    return coredata.UserIntegerOption(name,
+                                      description,
+                                      kwargs.get('min', None),
+                                      kwargs.get('max', None),
+                                      kwargs['value'],
+                                      kwargs.get('yield', coredata.default_yielding))
+
+@permitted_kwargs({'value', 'yield', 'choices'})
+def string_array_parser(name, description, kwargs):
+    if 'choices' in kwargs:
+        choices = kwargs['choices']
+        if not isinstance(choices, list):
+            raise OptionException('Array choices must be an array.')
+        for i in choices:
+            if not isinstance(i, str):
+                raise OptionException('Array choice elements must be strings.')
+            value = kwargs.get('value', choices)
+    else:
+        choices = None
+        value = kwargs.get('value', [])
+    if not isinstance(value, list):
+        raise OptionException('Array choices must be passed as an array.')
+    return coredata.UserArrayOption(name,
+                                    description,
+                                    value,
+                                    choices=choices,
+                                    yielding=kwargs.get('yield', coredata.default_yielding))
 
 option_types = {'string': StringParser,
                 'boolean': BooleanParser,
                 'combo': ComboParser,
+                'integer': IntegerParser,
+                'array': string_array_parser,
                 }
 
 class OptionInterpreter:
@@ -87,6 +154,30 @@ class OptionInterpreter:
                 continue
             self.cmd_line_options[key] = value
 
+    def get_bad_options(self):
+        subproj_len = len(self.subproject)
+        if subproj_len > 0:
+            subproj_len += 1
+        retval = []
+        # The options need to be sorted (e.g. here) to get consistent
+        # error messages (on all platforms) which is required by some test
+        # cases that check (also) the order of these options.
+        for option in sorted(self.cmd_line_options):
+            if option in list(self.options) + forbidden_option_names:
+                continue
+            if any(option[subproj_len:].startswith(p) for p in forbidden_prefixes):
+                continue
+            retval += [option]
+        return retval
+
+    def check_for_bad_options(self):
+        bad = self.get_bad_options()
+        if bad:
+            sub = 'In subproject {}: '.format(self.subproject) if self.subproject else ''
+            mlog.warning(
+                '{}Unknown command line options: "{}"\n'
+                'This will become a hard error in a future Meson release.'.format(sub, ', '.join(bad)))
+
     def process(self, option_file):
         try:
             with open(option_file, 'r', encoding='utf8') as f:
@@ -106,6 +197,7 @@ class OptionInterpreter:
                 e.colno = cur.colno
                 e.file = os.path.join('meson_options.txt')
                 raise e
+        self.check_for_bad_options()
 
     def reduce_single(self, arg):
         if isinstance(arg, str):
@@ -140,7 +232,7 @@ class OptionInterpreter:
         (posargs, kwargs) = self.reduce_arguments(node.args)
         if 'type' not in kwargs:
             raise OptionException('Option call missing mandatory "type" keyword argument')
-        opt_type = kwargs['type']
+        opt_type = kwargs.pop('type')
         if opt_type not in option_types:
             raise OptionException('Unknown type %s.' % opt_type)
         if len(posargs) != 1:
@@ -154,9 +246,9 @@ class OptionInterpreter:
             raise OptionException('Option name %s is reserved.' % opt_name)
         if self.subproject != '':
             opt_name = self.subproject + ':' + opt_name
-        opt = option_types[opt_type](opt_name, kwargs.get('description', ''), kwargs)
+        opt = option_types[opt_type](opt_name, kwargs.pop('description', ''), kwargs)
         if opt.description == '':
             opt.description = opt_name
         if opt_name in self.cmd_line_options:
-            opt.set_value(opt.parse_string(self.cmd_line_options[opt_name]))
+            opt.set_value(self.cmd_line_options[opt_name])
         self.options[opt_name] = opt

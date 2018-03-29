@@ -14,11 +14,12 @@
 
 from .. import mlog
 import contextlib
-import urllib.request, os, hashlib, shutil
+import urllib.request, os, hashlib, shutil, tempfile, stat
 import subprocess
 import sys
 from pathlib import Path
 from . import WrapMode
+from ..mesonlib import Popen_safe
 
 try:
     import ssl
@@ -50,7 +51,7 @@ def open_wrapdburl(urlstring):
     global ssl_warning_printed
     if has_ssl:
         try:
-            return urllib.request.urlopen(urlstring)#, context=build_ssl_context())
+            return urllib.request.urlopen(urlstring)# , context=build_ssl_context())
         except urllib.error.URLError:
             if not ssl_warning_printed:
                 print('SSL connection failed. Falling back to unencrypted connections.')
@@ -78,6 +79,8 @@ class PackageDefinition:
                 self.type = 'git'
             elif first == '[wrap-hg]':
                 self.type = 'hg'
+            elif first == '[wrap-svn]':
+                self.type = 'svn'
             else:
                 raise RuntimeError('Invalid format of package file')
             for line in ifile:
@@ -145,6 +148,8 @@ class Resolver:
             self.get_git(p)
         elif p.type == "hg":
             self.get_hg(p)
+        elif p.type == "svn":
+            self.get_svn(p)
         else:
             raise AssertionError('Unreachable code.')
         return p.get('directory')
@@ -159,17 +164,24 @@ class Resolver:
         if not ret:
             return False
         # Submodule has not been added, add it
-        if out.startswith(b'-'):
-            if subprocess.call(['git', '-C', self.subdir_root, 'submodule', 'update', '--init', dirname]) != 0:
-                return False
-        # Submodule was added already, but it wasn't populated. Do a checkout.
-        elif out.startswith(b' '):
-            if subprocess.call(['git', 'checkout', '.'], cwd=dirname):
+        if out.startswith(b'+'):
+            mlog.warning('git submodule {} might be out of date'.format(dirname))
+            return True
+        elif out.startswith(b'U'):
+            raise RuntimeError('submodule {} has merge conflicts'.format(dirname))
+        # Submodule exists, but is deinitialized or wasn't initialized
+        elif out.startswith(b'-'):
+            if subprocess.call(['git', '-C', self.subdir_root, 'submodule', 'update', '--init', dirname]) == 0:
                 return True
-        else:
-            m = 'Unknown git submodule output: {!r}'
-            raise AssertionError(m.format(out))
-        return True
+            raise RuntimeError('Failed to git submodule init {!r}'.format(dirname))
+        # Submodule looks fine, but maybe it wasn't populated properly. Do a checkout.
+        elif out.startswith(b' '):
+            subprocess.call(['git', 'checkout', '.'], cwd=dirname)
+            # Even if checkout failed, try building it anyway and let the user
+            # handle any problems manually.
+            return True
+        m = 'Unknown git submodule output: {!r}'
+        raise RuntimeError(m.format(out))
 
     def get_git(self, p):
         checkoutdir = os.path.join(self.subdir_root, p.get('directory'))
@@ -228,8 +240,31 @@ class Resolver:
                 subprocess.check_call(['hg', 'checkout', revno],
                                       cwd=checkoutdir)
 
+    def get_svn(self, p):
+        checkoutdir = os.path.join(self.subdir_root, p.get('directory'))
+        revno = p.get('revision')
+        is_there = os.path.isdir(checkoutdir)
+        if is_there:
+            p, out = Popen_safe(['svn', 'info', '--show-item', 'revision', checkoutdir])
+            current_revno = out
+            if current_revno == revno:
+                return
+
+            if revno.lower() == 'head':
+                # Failure to do pull is not a fatal error,
+                # because otherwise you can't develop without
+                # a working net connection.
+                subprocess.call(['svn', 'update'], cwd=checkoutdir)
+            else:
+                subprocess.check_call(['svn', 'update', '-r', revno], cwd=checkoutdir)
+        else:
+            subprocess.check_call(['svn', 'checkout', '-r', revno, p.get('url'),
+                                   p.get('directory')], cwd=self.subdir_root)
+
     def get_data(self, url):
         blocksize = 10 * 1024
+        h = hashlib.sha256()
+        tmpfile = tempfile.NamedTemporaryFile(mode='wb', dir=self.cachedir, delete=False)
         if url.startswith('https://wrapdb.mesonbuild.com'):
             resp = open_wrapdburl(url)
         else:
@@ -241,26 +276,34 @@ class Resolver:
                 dlsize = None
             if dlsize is None:
                 print('Downloading file of unknown size.')
-                return resp.read()
+                while True:
+                    block = resp.read(blocksize)
+                    if block == b'':
+                        break
+                    h.update(block)
+                    tmpfile.write(block)
+                hashvalue = h.hexdigest()
+                return hashvalue, tmpfile.name
             print('Download size:', dlsize)
             print('Downloading: ', end='')
             sys.stdout.flush()
             printed_dots = 0
-            blocks = []
             downloaded = 0
             while True:
                 block = resp.read(blocksize)
                 if block == b'':
                     break
                 downloaded += len(block)
-                blocks.append(block)
+                h.update(block)
+                tmpfile.write(block)
                 ratio = int(downloaded / dlsize * 10)
                 while printed_dots < ratio:
                     print('.', end='')
                     sys.stdout.flush()
                     printed_dots += 1
             print('')
-        return b''.join(blocks)
+            hashvalue = h.hexdigest()
+        return hashvalue, tmpfile.name
 
     def get_hash(self, data):
         h = hashlib.sha256()
@@ -272,34 +315,55 @@ class Resolver:
         ofname = os.path.join(self.cachedir, p.get('source_filename'))
         if os.path.exists(ofname):
             mlog.log('Using', mlog.bold(packagename), 'from cache.')
-            return
-        srcurl = p.get('source_url')
-        mlog.log('Dowloading', mlog.bold(packagename), 'from', mlog.bold(srcurl))
-        srcdata = self.get_data(srcurl)
-        dhash = self.get_hash(srcdata)
-        expected = p.get('source_hash')
-        if dhash != expected:
-            raise RuntimeError('Incorrect hash for source %s:\n %s expected\n %s actual.' % (packagename, expected, dhash))
-        with open(ofname, 'wb') as f:
-            f.write(srcdata)
+        else:
+            srcurl = p.get('source_url')
+            mlog.log('Downloading', mlog.bold(packagename), 'from', mlog.bold(srcurl))
+            dhash, tmpfile = self.get_data(srcurl)
+            expected = p.get('source_hash')
+            if dhash != expected:
+                os.remove(tmpfile)
+                raise RuntimeError('Incorrect hash for source %s:\n %s expected\n %s actual.' % (packagename, expected, dhash))
+            os.rename(tmpfile, ofname)
         if p.has_patch():
-            purl = p.get('patch_url')
-            mlog.log('Downloading patch from', mlog.bold(purl))
-            pdata = self.get_data(purl)
-            phash = self.get_hash(pdata)
-            expected = p.get('patch_hash')
-            if phash != expected:
-                raise RuntimeError('Incorrect hash for patch %s:\n %s expected\n %s actual' % (packagename, expected, phash))
-            filename = os.path.join(self.cachedir, p.get('patch_filename'))
-            with open(filename, 'wb') as f:
-                f.write(pdata)
+            patch_filename = p.get('patch_filename')
+            filename = os.path.join(self.cachedir, patch_filename)
+            if os.path.exists(filename):
+                mlog.log('Using', mlog.bold(patch_filename), 'from cache.')
+            else:
+                purl = p.get('patch_url')
+                mlog.log('Downloading patch from', mlog.bold(purl))
+                phash, tmpfile = self.get_data(purl)
+                expected = p.get('patch_hash')
+                if phash != expected:
+                    os.remove(tmpfile)
+                    raise RuntimeError('Incorrect hash for patch %s:\n %s expected\n %s actual' % (packagename, expected, phash))
+                os.rename(tmpfile, filename)
         else:
             mlog.log('Package does not require patch.')
+
+    def copy_tree(self, root_src_dir, root_dst_dir):
+        """
+        Copy directory tree. Overwrites also read only files.
+        """
+        for src_dir, dirs, files in os.walk(root_src_dir):
+            dst_dir = src_dir.replace(root_src_dir, root_dst_dir, 1)
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir)
+            for file_ in files:
+                src_file = os.path.join(src_dir, file_)
+                dst_file = os.path.join(dst_dir, file_)
+                if os.path.exists(dst_file):
+                    try:
+                        os.remove(dst_file)
+                    except PermissionError as exc:
+                        os.chmod(dst_file, stat.S_IWUSR)
+                        os.remove(dst_file)
+                shutil.copy2(src_file, dst_dir)
 
     def extract_package(self, package):
         if sys.version_info < (3, 5):
             try:
-                import lzma
+                import lzma # noqa: F401
                 del lzma
             except ImportError:
                 pass
@@ -322,4 +386,9 @@ class Resolver:
             pass
         shutil.unpack_archive(os.path.join(self.cachedir, package.get('source_filename')), extract_dir)
         if package.has_patch():
-            shutil.unpack_archive(os.path.join(self.cachedir, package.get('patch_filename')), self.subdir_root)
+            try:
+                shutil.unpack_archive(os.path.join(self.cachedir, package.get('patch_filename')), self.subdir_root)
+            except Exception:
+                with tempfile.TemporaryDirectory() as workdir:
+                    shutil.unpack_archive(os.path.join(self.cachedir, package.get('patch_filename')), workdir)
+                    self.copy_tree(workdir, self.subdir_root)

@@ -14,274 +14,232 @@
 
 # This file contains the detection logic for miscellaneous external dependencies.
 
-import glob
 import os
-import stat
+import re
+import shlex
 import sysconfig
+
+from pathlib import Path
 
 from .. import mlog
 from .. import mesonlib
 from ..environment import detect_cpu_family
 
-from .base import Dependency, DependencyException, DependencyMethods, ExtraFrameworkDependency, PkgConfigDependency
+from .base import (
+    DependencyException, DependencyMethods, ExternalDependency,
+    ExternalProgram, ExtraFrameworkDependency, PkgConfigDependency,
+    ConfigToolDependency,
+)
 
 
-class BoostDependency(Dependency):
-    # Some boost libraries have different names for
-    # their sources and libraries. This dict maps
-    # between the two.
-    name2lib = {'test': 'unit_test_framework'}
-
+class MPIDependency(ExternalDependency):
     def __init__(self, environment, kwargs):
-        Dependency.__init__(self, 'boost', kwargs)
-        self.name = 'boost'
-        self.environment = environment
-        self.libdir = ''
-        if 'native' in kwargs and environment.is_cross_build():
-            self.want_cross = not kwargs['native']
+        language = kwargs.get('language', 'c')
+        super().__init__('mpi', environment, language, kwargs)
+        required = kwargs.pop('required', True)
+        kwargs['required'] = False
+        kwargs['silent'] = True
+        self.is_found = False
+
+        # NOTE: Only OpenMPI supplies a pkg-config file at the moment.
+        if language == 'c':
+            env_vars = ['MPICC']
+            pkgconfig_files = ['ompi-c']
+            default_wrappers = ['mpicc']
+        elif language == 'cpp':
+            env_vars = ['MPICXX']
+            pkgconfig_files = ['ompi-cxx']
+            default_wrappers = ['mpic++', 'mpicxx', 'mpiCC']
+        elif language == 'fortran':
+            env_vars = ['MPIFC', 'MPIF90', 'MPIF77']
+            pkgconfig_files = ['ompi-fort']
+            default_wrappers = ['mpifort', 'mpif90', 'mpif77']
         else:
-            self.want_cross = environment.is_cross_build()
-        try:
-            self.boost_root = os.environ['BOOST_ROOT']
-            if not os.path.isabs(self.boost_root):
-                raise DependencyException('BOOST_ROOT must be an absolute path.')
-        except KeyError:
-            self.boost_root = None
-        if self.boost_root is None:
-            if self.want_cross:
-                if 'BOOST_INCLUDEDIR' in os.environ:
-                    self.incdir = os.environ['BOOST_INCLUDEDIR']
-                else:
-                    raise DependencyException('BOOST_ROOT or BOOST_INCLUDEDIR is needed while cross-compiling')
-            if mesonlib.is_windows():
-                self.boost_root = self.detect_win_root()
-                self.incdir = self.boost_root
+            raise DependencyException('Language {} is not supported with MPI.'.format(language))
+
+        for pkg in pkgconfig_files:
+            try:
+                pkgdep = PkgConfigDependency(pkg, environment, kwargs, language=self.language)
+                if pkgdep.found():
+                    self.compile_args = pkgdep.get_compile_args()
+                    self.link_args = pkgdep.get_link_args()
+                    self.version = pkgdep.get_version()
+                    self.is_found = True
+                    self.pcdep = pkgdep
+                    break
+            except Exception:
+                pass
+
+        if not self.is_found:
+            # Prefer environment.
+            for var in env_vars:
+                if var in os.environ:
+                    wrappers = [os.environ[var]]
+                    break
             else:
-                if 'BOOST_INCLUDEDIR' in os.environ:
-                    self.incdir = os.environ['BOOST_INCLUDEDIR']
-                else:
-                    self.incdir = '/usr/include'
+                # Or search for default wrappers.
+                wrappers = default_wrappers
+
+            for prog in wrappers:
+                result = self._try_openmpi_wrapper(prog)
+                if result is not None:
+                    self.is_found = True
+                    self.version = result[0]
+                    self.compile_args = self._filter_compile_args(result[1])
+                    self.link_args = self._filter_link_args(result[2])
+                    break
+                result = self._try_other_wrapper(prog)
+                if result is not None:
+                    self.is_found = True
+                    self.version = result[0]
+                    self.compile_args = self._filter_compile_args(result[1])
+                    self.link_args = self._filter_link_args(result[2])
+                    break
+
+        if not self.is_found and mesonlib.is_windows():
+            result = self._try_msmpi()
+            if result is not None:
+                self.is_found = True
+                self.version, self.compile_args, self.link_args = result
+
+        if self.is_found:
+            mlog.log('Dependency', mlog.bold(self.name), 'for', self.language, 'found:', mlog.green('YES'), self.version)
         else:
-            self.incdir = os.path.join(self.boost_root, 'include')
-        self.boost_inc_subdir = os.path.join(self.incdir, 'boost')
-        mlog.debug('Boost library root dir is', self.boost_root)
-        self.src_modules = {}
-        self.lib_modules = {}
-        self.lib_modules_mt = {}
-        self.detect_version()
-        self.requested_modules = self.get_requested(kwargs)
-        module_str = ', '.join(self.requested_modules)
-        if self.version is not None:
-            self.detect_src_modules()
-            self.detect_lib_modules()
-            self.validate_requested()
-            if self.boost_root is not None:
-                info = self.version + ', ' + self.boost_root
+            mlog.log('Dependency', mlog.bold(self.name), 'for', self.language, 'found:', mlog.red('NO'))
+            if required:
+                raise DependencyException('MPI dependency {!r} not found'.format(self.name))
+
+    def _filter_compile_args(self, args):
+        """
+        MPI wrappers return a bunch of garbage args.
+        Drop -O2 and everything that is not needed.
+        """
+        result = []
+        multi_args = ('-I', )
+        if self.language == 'fortran':
+            fc = self.env.coredata.compilers['fortran']
+            multi_args += fc.get_module_incdir_args()
+
+        include_next = False
+        for f in args:
+            if f.startswith(('-D', '-f') + multi_args) or f == '-pthread' \
+                    or (f.startswith('-W') and f != '-Wall' and not f.startswith('-Werror')):
+                result.append(f)
+                if f in multi_args:
+                    # Path is a separate argument.
+                    include_next = True
+            elif include_next:
+                include_next = False
+                result.append(f)
+        return result
+
+    def _filter_link_args(self, args):
+        """
+        MPI wrappers return a bunch of garbage args.
+        Drop -O2 and everything that is not needed.
+        """
+        result = []
+        include_next = False
+        for f in args:
+            if f.startswith(('-L', '-l', '-Xlinker')) or f == '-pthread' \
+                    or (f.startswith('-W') and f != '-Wall' and not f.startswith('-Werror')):
+                result.append(f)
+                if f in ('-L', '-Xlinker'):
+                    include_next = True
+            elif include_next:
+                include_next = False
+                result.append(f)
+        return result
+
+    def _try_openmpi_wrapper(self, prog):
+        prog = ExternalProgram(prog, silent=True)
+        if prog.found():
+            cmd = prog.get_command() + ['--showme:compile']
+            p, o, e = mesonlib.Popen_safe(cmd)
+            p.wait()
+            if p.returncode != 0:
+                mlog.debug('Command', mlog.bold(cmd), 'failed to run:')
+                mlog.debug(mlog.bold('Standard output\n'), o)
+                mlog.debug(mlog.bold('Standard error\n'), e)
+                return
+            cargs = shlex.split(o)
+
+            cmd = prog.get_command() + ['--showme:link']
+            p, o, e = mesonlib.Popen_safe(cmd)
+            p.wait()
+            if p.returncode != 0:
+                mlog.debug('Command', mlog.bold(cmd), 'failed to run:')
+                mlog.debug(mlog.bold('Standard output\n'), o)
+                mlog.debug(mlog.bold('Standard error\n'), e)
+                return
+            libs = shlex.split(o)
+
+            cmd = prog.get_command() + ['--showme:version']
+            p, o, e = mesonlib.Popen_safe(cmd)
+            p.wait()
+            if p.returncode != 0:
+                mlog.debug('Command', mlog.bold(cmd), 'failed to run:')
+                mlog.debug(mlog.bold('Standard output\n'), o)
+                mlog.debug(mlog.bold('Standard error\n'), e)
+                return
+            version = re.search('\d+.\d+.\d+', o)
+            if version:
+                version = version.group(0)
             else:
-                info = self.version
-            mlog.log('Dependency Boost (%s) found:' % module_str, mlog.green('YES'), info)
-        else:
-            mlog.log("Dependency Boost (%s) found:" % module_str, mlog.red('NO'))
-        if 'cpp' not in self.environment.coredata.compilers:
-            raise DependencyException('Tried to use Boost but a C++ compiler is not defined.')
-        self.cpp_compiler = self.environment.coredata.compilers['cpp']
+                version = 'none'
 
-    def detect_win_root(self):
-        globtext = 'c:\\local\\boost_*'
-        files = glob.glob(globtext)
-        if len(files) > 0:
-            return files[0]
-        return 'C:\\'
+            return version, cargs, libs
 
-    def get_compile_args(self):
-        args = []
-        if self.boost_root is not None:
-            if mesonlib.is_windows():
-                include_dir = self.boost_root
-            else:
-                include_dir = os.path.join(self.boost_root, 'include')
-        else:
-            include_dir = self.incdir
+    def _try_other_wrapper(self, prog):
+        prog = ExternalProgram(prog, silent=True)
+        if prog.found():
+            cmd = prog.get_command() + ['-show']
+            p, o, e = mesonlib.Popen_safe(cmd)
+            p.wait()
+            if p.returncode != 0:
+                mlog.debug('Command', mlog.bold(cmd), 'failed to run:')
+                mlog.debug(mlog.bold('Standard output\n'), o)
+                mlog.debug(mlog.bold('Standard error\n'), e)
+                return
+            args = shlex.split(o)
 
-        # Use "-isystem" when including boost headers instead of "-I"
-        # to avoid compiler warnings/failures when "-Werror" is used
+            version = 'none'
 
-        # Careful not to use "-isystem" on default include dirs as it
-        # breaks some of the headers for certain gcc versions
+            return version, args, args
 
-        # For example, doing g++ -isystem /usr/include on a simple
-        # "int main()" source results in the error:
-        # "/usr/include/c++/6.3.1/cstdlib:75:25: fatal error: stdlib.h: No such file or directory"
-
-        # See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70129
-        # and http://stackoverflow.com/questions/37218953/isystem-on-a-system-include-directory-causes-errors
-        # for more details
-
-        # TODO: The correct solution would probably be to ask the
-        # compiler for it's default include paths (ie: "gcc -xc++ -E
-        # -v -") and avoid including those with -isystem
-
-        # For now, use -isystem for all includes except for some
-        # typical defaults (which don't need to be included at all
-        # since they are in the default include paths)
-        if include_dir != '/usr/include' and include_dir != '/usr/local/include':
-            args.append("".join(self.cpp_compiler.get_include_args(include_dir, True)))
-        return args
-
-    def get_requested(self, kwargs):
-        candidates = kwargs.get('modules', [])
-        if isinstance(candidates, str):
-            return [candidates]
-        for c in candidates:
-            if not isinstance(c, str):
-                raise DependencyException('Boost module argument is not a string.')
-        return candidates
-
-    def validate_requested(self):
-        for m in self.requested_modules:
-            if m not in self.src_modules:
-                raise DependencyException('Requested Boost module "%s" not found.' % m)
-
-    def found(self):
-        return self.version is not None
-
-    def get_version(self):
-        return self.version
-
-    def detect_version(self):
-        try:
-            ifile = open(os.path.join(self.boost_inc_subdir, 'version.hpp'))
-        except FileNotFoundError:
-            self.version = None
+    def _try_msmpi(self):
+        if self.language == 'cpp':
+            # MS-MPI does not support the C++ version of MPI, only the standard C API.
             return
-        with ifile:
-            for line in ifile:
-                if line.startswith("#define") and 'BOOST_LIB_VERSION' in line:
-                    ver = line.split()[-1]
-                    ver = ver[1:-1]
-                    self.version = ver.replace('_', '.')
-                    return
-        self.version = None
-
-    def detect_src_modules(self):
-        for entry in os.listdir(self.boost_inc_subdir):
-            entry = os.path.join(self.boost_inc_subdir, entry)
-            if stat.S_ISDIR(os.stat(entry).st_mode):
-                self.src_modules[os.path.split(entry)[-1]] = True
-
-    def detect_lib_modules(self):
-        if mesonlib.is_windows():
-            return self.detect_lib_modules_win()
-        return self.detect_lib_modules_nix()
-
-    def detect_lib_modules_win(self):
-        arch = detect_cpu_family(self.environment.coredata.compilers)
-        # Guess the libdir
+        if 'MSMPI_INC' not in os.environ:
+            return
+        incdir = os.environ['MSMPI_INC']
+        arch = detect_cpu_family(self.env.coredata.compilers)
         if arch == 'x86':
-            gl = 'lib32*'
+            if 'MSMPI_LIB32' not in os.environ:
+                return
+            libdir = os.environ['MSMPI_LIB32']
+            post = 'x86'
         elif arch == 'x86_64':
-            gl = 'lib64*'
+            if 'MSMPI_LIB64' not in os.environ:
+                return
+            libdir = os.environ['MSMPI_LIB64']
+            post = 'x64'
         else:
-            # Does anyone do Boost cross-compiling to other archs on Windows?
-            gl = None
-        # See if the libdir is valid
-        if gl:
-            libdir = glob.glob(os.path.join(self.boost_root, gl))
-        else:
-            libdir = []
-        # Can't find libdir, bail
-        if not libdir:
             return
-        libdir = libdir[0]
-        self.libdir = libdir
-        globber = 'boost_*-gd-*.lib'  # FIXME
-        for entry in glob.glob(os.path.join(libdir, globber)):
-            (_, fname) = os.path.split(entry)
-            base = fname.split('_', 1)[1]
-            modname = base.split('-', 1)[0]
-            self.lib_modules_mt[modname] = fname
-
-    def detect_lib_modules_nix(self):
-        if mesonlib.is_osx() and not self.want_cross:
-            libsuffix = 'dylib'
+        if self.language == 'fortran':
+            return ('none',
+                    ['-I' + incdir, '-I' + os.path.join(incdir, post)],
+                    [os.path.join(libdir, 'msmpi.lib'), os.path.join(libdir, 'msmpifec.lib')])
         else:
-            libsuffix = 'so'
-
-        globber = 'libboost_*.{}'.format(libsuffix)
-        if 'BOOST_LIBRARYDIR' in os.environ:
-            libdirs = [os.environ['BOOST_LIBRARYDIR']]
-        elif self.boost_root is None:
-            libdirs = mesonlib.get_library_dirs()
-        else:
-            libdirs = [os.path.join(self.boost_root, 'lib')]
-        for libdir in libdirs:
-            for entry in glob.glob(os.path.join(libdir, globber)):
-                lib = os.path.basename(entry)
-                name = lib.split('.')[0].split('_', 1)[-1]
-                # I'm not 100% sure what to do here. Some distros
-                # have modules such as thread only as -mt versions.
-                if entry.endswith('-mt.so'):
-                    self.lib_modules_mt[name] = True
-                else:
-                    self.lib_modules[name] = True
-
-    def get_win_link_args(self):
-        args = []
-        if self.boost_root:
-            args.append('-L' + self.libdir)
-        for module in self.requested_modules:
-            module = BoostDependency.name2lib.get(module, module)
-            if module in self.lib_modules_mt:
-                args.append(self.lib_modules_mt[module])
-        return args
-
-    def get_link_args(self):
-        if mesonlib.is_windows():
-            return self.get_win_link_args()
-        args = []
-        if self.boost_root:
-            args.append('-L' + os.path.join(self.boost_root, 'lib'))
-        elif 'BOOST_LIBRARYDIR' in os.environ:
-            args.append('-L' + os.environ['BOOST_LIBRARYDIR'])
-        for module in self.requested_modules:
-            module = BoostDependency.name2lib.get(module, module)
-            libname = 'boost_' + module
-            # The compiler's library detector is the most reliable so use that first.
-            default_detect = self.cpp_compiler.find_library(libname, self.environment, [])
-            if default_detect is not None:
-                if module == 'unit_testing_framework':
-                    emon_args = self.cpp_compiler.find_library('boost_test_exec_monitor')
-                else:
-                    emon_args = None
-                args += default_detect
-                if emon_args is not None:
-                    args += emon_args
-            elif module in self.lib_modules or module in self.lib_modules_mt:
-                linkcmd = '-l' + libname
-                args.append(linkcmd)
-                # FIXME a hack, but Boost's testing framework has a lot of
-                # different options and it's hard to determine what to do
-                # without feedback from actual users. Update this
-                # as we get more bug reports.
-                if module == 'unit_testing_framework':
-                    args.append('-lboost_test_exec_monitor')
-            elif module + '-mt' in self.lib_modules_mt:
-                linkcmd = '-lboost_' + module + '-mt'
-                args.append(linkcmd)
-                if module == 'unit_testing_framework':
-                    args.append('-lboost_test_exec_monitor-mt')
-        return args
-
-    def get_sources(self):
-        return []
-
-    def need_threads(self):
-        return 'thread' in self.requested_modules
+            return ('none',
+                    ['-I' + incdir, '-I' + os.path.join(incdir, post)],
+                    [os.path.join(libdir, 'msmpi.lib')])
 
 
-class ThreadDependency(Dependency):
+class ThreadDependency(ExternalDependency):
     def __init__(self, environment, kwargs):
-        super().__init__('threads', {})
+        super().__init__('threads', environment, None, {})
         self.name = 'threads'
         self.is_found = True
         mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.green('YES'))
@@ -293,22 +251,26 @@ class ThreadDependency(Dependency):
         return 'unknown'
 
 
-class Python3Dependency(Dependency):
+class Python3Dependency(ExternalDependency):
     def __init__(self, environment, kwargs):
-        super().__init__('python3', kwargs)
+        super().__init__('python3', environment, None, kwargs)
         self.name = 'python3'
-        self.is_found = False
+        self.static = kwargs.get('static', False)
         # We can only be sure that it is Python 3 at this point
         self.version = '3'
+        self.pkgdep = None
         if DependencyMethods.PKGCONFIG in self.methods:
             try:
-                pkgdep = PkgConfigDependency('python3', environment, kwargs)
-                if pkgdep.found():
-                    self.cargs = pkgdep.cargs
-                    self.libs = pkgdep.libs
-                    self.version = pkgdep.get_version()
+                self.pkgdep = PkgConfigDependency('python3', environment, kwargs)
+                if self.pkgdep.found():
+                    self.compile_args = self.pkgdep.get_compile_args()
+                    self.link_args = self.pkgdep.get_link_args()
+                    self.version = self.pkgdep.get_version()
                     self.is_found = True
+                    self.pcdep = self.pkgdep
                     return
+                else:
+                    self.pkgdep = None
             except Exception:
                 pass
         if not self.is_found:
@@ -317,22 +279,68 @@ class Python3Dependency(Dependency):
             elif mesonlib.is_osx() and DependencyMethods.EXTRAFRAMEWORK in self.methods:
                 # In OSX the Python 3 framework does not have a version
                 # number in its name.
-                fw = ExtraFrameworkDependency('python', False, None, kwargs)
+                # There is a python in /System/Library/Frameworks, but that's
+                # python 2, Python 3 will always bin in /Library
+                fw = ExtraFrameworkDependency(
+                    'python', False, '/Library/Frameworks', self.env, self.language, kwargs)
                 if fw.found():
-                    self.cargs = fw.get_compile_args()
-                    self.libs = fw.get_link_args()
+                    self.compile_args = fw.get_compile_args()
+                    self.link_args = fw.get_link_args()
                     self.is_found = True
         if self.is_found:
             mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.green('YES'))
         else:
             mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.red('NO'))
 
+    @staticmethod
+    def get_windows_python_arch():
+        pyplat = sysconfig.get_platform()
+        if pyplat == 'mingw':
+            pycc = sysconfig.get_config_var('CC')
+            if pycc.startswith('x86_64'):
+                return '64'
+            elif pycc.startswith(('i686', 'i386')):
+                return '32'
+            else:
+                mlog.log('MinGW Python built with unknown CC {!r}, please file'
+                         'a bug'.format(pycc))
+                return None
+        elif pyplat == 'win32':
+            return '32'
+        elif pyplat in ('win64', 'win-amd64'):
+            return '64'
+        mlog.log('Unknown Windows Python platform {!r}'.format(pyplat))
+        return None
+
+    def get_windows_link_args(self):
+        pyplat = sysconfig.get_platform()
+        if pyplat.startswith('win'):
+            vernum = sysconfig.get_config_var('py_version_nodot')
+            if self.static:
+                libname = 'libpython{}.a'.format(vernum)
+            else:
+                libname = 'python{}.lib'.format(vernum)
+            lib = Path(sysconfig.get_config_var('base')) / 'libs' / libname
+        elif pyplat == 'mingw':
+            if self.static:
+                libname = sysconfig.get_config_var('LIBRARY')
+            else:
+                libname = sysconfig.get_config_var('LDLIBRARY')
+            lib = Path(sysconfig.get_config_var('LIBDIR')) / libname
+        if not lib.exists():
+            mlog.log('Could not find Python3 library {!r}'.format(str(lib)))
+            return None
+        return [str(lib)]
+
     def _find_libpy3_windows(self, env):
         '''
         Find python3 libraries on Windows and also verify that the arch matches
         what we are building for.
         '''
-        pyarch = sysconfig.get_platform()
+        pyarch = self.get_windows_python_arch()
+        if pyarch is None:
+            self.is_found = False
+            return
         arch = detect_cpu_family(env.coredata.compilers)
         if arch == 'x86':
             arch = '32'
@@ -345,31 +353,28 @@ class Python3Dependency(Dependency):
             self.is_found = False
             return
         # Pyarch ends in '32' or '64'
-        if arch != pyarch[-2:]:
-            mlog.log('Need', mlog.bold(self.name),
-                     'for {}-bit, but found {}-bit'.format(arch, pyarch[-2:]))
+        if arch != pyarch:
+            mlog.log('Need', mlog.bold(self.name), 'for {}-bit, but '
+                     'found {}-bit'.format(arch, pyarch))
             self.is_found = False
             return
+        # This can fail if the library is not found
+        largs = self.get_windows_link_args()
+        if largs is None:
+            self.is_found = False
+            return
+        self.link_args = largs
+        # Compile args
         inc = sysconfig.get_path('include')
         platinc = sysconfig.get_path('platinclude')
-        self.cargs = ['-I' + inc]
+        self.compile_args = ['-I' + inc]
         if inc != platinc:
-            self.cargs.append('-I' + platinc)
-        # Nothing exposes this directly that I coulf find
-        basedir = sysconfig.get_config_var('base')
-        vernum = sysconfig.get_config_var('py_version_nodot')
-        self.libs = ['-L{}/libs'.format(basedir),
-                     '-lpython{}'.format(vernum)]
-        self.version = sysconfig.get_config_var('py_version_short')
+            self.compile_args.append('-I' + platinc)
+        self.version = sysconfig.get_config_var('py_version')
         self.is_found = True
 
-    def get_compile_args(self):
-        return self.cargs
-
-    def get_link_args(self):
-        return self.libs
-
-    def get_methods(self):
+    @staticmethod
+    def get_methods():
         if mesonlib.is_windows():
             return [DependencyMethods.PKGCONFIG, DependencyMethods.SYSCONFIG]
         elif mesonlib.is_osx():
@@ -377,5 +382,127 @@ class Python3Dependency(Dependency):
         else:
             return [DependencyMethods.PKGCONFIG]
 
-    def get_version(self):
-        return self.version
+    def get_pkgconfig_variable(self, variable_name, kwargs):
+        if self.pkgdep:
+            return self.pkgdep.get_pkgconfig_variable(variable_name, kwargs)
+        else:
+            return super().get_pkgconfig_variable(variable_name, kwargs)
+
+
+class PcapDependency(ExternalDependency):
+    def __init__(self, environment, kwargs):
+        super().__init__('pcap', environment, None, kwargs)
+
+    @classmethod
+    def _factory(cls, environment, kwargs):
+        methods = cls._process_method_kw(kwargs)
+        if DependencyMethods.PKGCONFIG in methods:
+            try:
+                pcdep = PkgConfigDependency('pcap', environment, kwargs)
+                if pcdep.found():
+                    return pcdep
+            except Exception as e:
+                mlog.debug('Pcap not found via pkgconfig. Trying next, error was:', str(e))
+        if DependencyMethods.CONFIG_TOOL in methods:
+            try:
+                ctdep = ConfigToolDependency.factory(
+                    'pcap', environment, None, kwargs, ['pcap-config'], 'pcap-config')
+                if ctdep.found():
+                    ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
+                    ctdep.link_args = ctdep.get_config_value(['--libs'], 'link_args')
+                    ctdep.version = cls.get_pcap_lib_version(ctdep)
+                    return ctdep
+            except Exception as e:
+                mlog.debug('Pcap not found via pcap-config. Trying next, error was:', str(e))
+
+        return PcapDependency(environment, kwargs)
+
+    @staticmethod
+    def get_methods():
+        if mesonlib.is_osx():
+            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.EXTRAFRAMEWORK]
+        else:
+            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL]
+
+    @staticmethod
+    def get_pcap_lib_version(ctdep):
+        return ctdep.compiler.get_return_value('pcap_lib_version', 'string',
+                                               '#include <pcap.h>', ctdep.env, [], [ctdep])
+
+
+class CupsDependency(ExternalDependency):
+    def __init__(self, environment, kwargs):
+        super().__init__('cups', environment, None, kwargs)
+
+    @classmethod
+    def _factory(cls, environment, kwargs):
+        methods = cls._process_method_kw(kwargs)
+        if DependencyMethods.PKGCONFIG in methods:
+            try:
+                pcdep = PkgConfigDependency('cups', environment, kwargs)
+                if pcdep.found():
+                    return pcdep
+            except Exception as e:
+                mlog.debug('cups not found via pkgconfig. Trying next, error was:', str(e))
+        if DependencyMethods.CONFIG_TOOL in methods:
+            try:
+                ctdep = ConfigToolDependency.factory(
+                    'cups', environment, None, kwargs, ['cups-config'], 'cups-config')
+                if ctdep.found():
+                    ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
+                    ctdep.link_args = ctdep.get_config_value(['--ldflags', '--libs'], 'link_args')
+                    return ctdep
+            except Exception as e:
+                mlog.debug('cups not found via cups-config. Trying next, error was:', str(e))
+        if DependencyMethods.EXTRAFRAMEWORK in methods:
+            if mesonlib.is_osx():
+                fwdep = ExtraFrameworkDependency('cups', False, None, environment,
+                                                 kwargs.get('language', None), kwargs)
+                if fwdep.found():
+                    return fwdep
+        mlog.log('Dependency', mlog.bold('cups'), 'found:', mlog.red('NO'))
+
+        return CupsDependency(environment, kwargs)
+
+    @staticmethod
+    def get_methods():
+        if mesonlib.is_osx():
+            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.EXTRAFRAMEWORK]
+        else:
+            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL]
+
+
+class LibWmfDependency(ExternalDependency):
+    def __init__(self, environment, kwargs):
+        super().__init__('libwmf', environment, None, kwargs)
+
+    @classmethod
+    def _factory(cls, environment, kwargs):
+        methods = cls._process_method_kw(kwargs)
+        if DependencyMethods.PKGCONFIG in methods:
+            try:
+                kwargs['required'] = False
+                pcdep = PkgConfigDependency('libwmf', environment, kwargs)
+                if pcdep.found():
+                    return pcdep
+            except Exception as e:
+                mlog.debug('LibWmf not found via pkgconfig. Trying next, error was:', str(e))
+        if DependencyMethods.CONFIG_TOOL in methods:
+            try:
+                ctdep = ConfigToolDependency.factory(
+                    'libwmf', environment, None, kwargs, ['libwmf-config'], 'libwmf-config')
+                if ctdep.found():
+                    ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
+                    ctdep.link_args = ctdep.get_config_value(['--libs'], 'link_args')
+                    return ctdep
+            except Exception as e:
+                mlog.debug('cups not found via libwmf-config. Trying next, error was:', str(e))
+
+        return LibWmfDependency(environment, kwargs)
+
+    @staticmethod
+    def get_methods():
+        if mesonlib.is_osx():
+            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.EXTRAFRAMEWORK]
+        else:
+            return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL]

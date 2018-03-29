@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import xml.etree.ElementTree as ET
 
 from .vs2010backend import Vs2010Backend
 
@@ -24,4 +25,10 @@ class Vs2017Backend(Vs2010Backend):
         self.platform_toolset = 'v141'
         self.vs_version = '2017'
         # WindowsSDKVersion should be set by command prompt.
-        self.windows_target_platform_version = os.getenv('WindowsSDKVersion', None).rstrip('\\')
+        sdk_version = os.environ.get('WindowsSDKVersion', None)
+        if sdk_version:
+            self.windows_target_platform_version = sdk_version.rstrip('\\')
+
+    def generate_debug_information(self, link):
+        # valid values for vs2017 is 'false', 'true', 'DebugFastLink', 'DebugFull'
+        ET.SubElement(link, 'GenerateDebugInformation').text = 'DebugFull'

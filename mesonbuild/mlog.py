@@ -18,20 +18,25 @@ import sys, os, platform, io
 information about Meson runs. Some output goes to screen,
 some to logging dir and some goes to both."""
 
-colorize_console = platform.system().lower() != 'windows' and os.isatty(sys.stdout.fileno()) and \
-    os.environ.get('TERM') != 'dumb'
+if platform.system().lower() == 'windows':
+    colorize_console = os.isatty(sys.stdout.fileno()) and os.environ.get('ANSICON')
+else:
+    colorize_console = os.isatty(sys.stdout.fileno()) and os.environ.get('TERM') != 'dumb'
 log_dir = None
 log_file = None
+log_fname = 'meson-log.txt'
 
 def initialize(logdir):
     global log_dir, log_file
     log_dir = logdir
-    log_file = open(os.path.join(logdir, 'meson-log.txt'), 'w', encoding='utf8')
+    log_file = open(os.path.join(logdir, log_fname), 'w', encoding='utf8')
 
 def shutdown():
     global log_file
     if log_file is not None:
-        log_file.close()
+        exception_around_goer = log_file
+        log_file = None
+        exception_around_goer.close()
 
 class AnsiDecorator:
     plain_code = "\033[0m"
@@ -97,8 +102,37 @@ def log(*args, **kwargs):
         arr = process_markup(args, True)
     force_print(*arr, **kwargs)
 
+def _log_error(severity, *args, **kwargs):
+    from . import environment
+    if severity == 'warning':
+        args = (yellow('WARNING:'),) + args
+    elif severity == 'error':
+        args = (red('ERROR:'),) + args
+    else:
+        assert False, 'Invalid severity ' + severity
+
+    if 'location' in kwargs:
+        location = kwargs['location']
+        del kwargs['location']
+        location_str = '{}:{}:'.format(os.path.join(location.subdir,
+                                                    environment.build_filename),
+                                       location.lineno)
+        args = (location_str,) + args
+
+    log(*args, **kwargs)
+
+def error(*args, **kwargs):
+    return _log_error('error', *args, **kwargs)
+
 def warning(*args, **kwargs):
-    log(yellow('WARNING:'), *args, **kwargs)
+    return _log_error('warning', *args, **kwargs)
+
+def exception(e):
+    log()
+    if hasattr(e, 'file') and hasattr(e, 'lineno') and hasattr(e, 'colno'):
+        log('%s:%d:%d:' % (e.file, e.lineno, e.colno), red('ERROR: '), e)
+    else:
+        log(red('ERROR:'), e)
 
 # Format a list for logging purposes as a string. It separates
 # all but the last item with commas, and the last with 'and'.

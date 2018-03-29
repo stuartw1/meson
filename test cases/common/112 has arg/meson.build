@@ -19,6 +19,9 @@ assert(not cc.has_argument(isnt_arg), 'Arg that should be broken is not.')
 assert(cpp.has_argument(is_arg), 'Arg that should have worked does not work.')
 assert(not cpp.has_argument(isnt_arg), 'Arg that should be broken is not.')
 
+assert(cc.get_supported_arguments([is_arg, isnt_arg, useless]) == [is_arg, useless], 'Arg filtering returned different result.')
+assert(cpp.get_supported_arguments([is_arg, isnt_arg, useless]) == [is_arg, useless], 'Arg filtering returned different result.')
+
 # Have useless at the end to ensure that the search goes from front to back.
 l1 = cc.first_supported_argument([isnt_arg, is_arg, isnt_arg, useless])
 l2 = cc.first_supported_argument(isnt_arg, isnt_arg, isnt_arg)
@@ -41,4 +44,11 @@ if cc.get_id() == 'gcc'
   assert(not cc.has_multi_arguments([anti_pre_arg, arg]), 'Arg that should be broken is not.')
   assert(cc.has_multi_arguments(pre_arg), 'Arg that should have worked does not work.')
   assert(cc.has_multi_arguments([pre_arg, arg]), 'Arg that should have worked does not work.')
+endif
+
+if cc.get_id() == 'clang' and cc.version().version_compare('<=4.0.0')
+  # 4.0.0 does not support -fpeel-loops. Newer versions may.
+  # Please adjust above version number as new versions of clang are released.
+  notyet_arg = '-fpeel-loops'
+  assert(not cc.has_argument(notyet_arg), 'Arg that should be broken (unless clang added support recently) is not.')
 endif

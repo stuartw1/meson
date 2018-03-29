@@ -25,16 +25,16 @@ assert((5 % 2) == 1, 'Integer modulo (odd) is broken')
 assert((4 % 2) == 0, 'Integer modulo (even) is broken')
 
 if 2 * 1 % 2 != 0
-  error('Modulo precendence with multiplication is broken')
+  error('Modulo precedence with multiplication is broken')
 endif
 if 2 + 1 % 2 != 3
-  error('Modulo precendence with addition is broken')
+  error('Modulo precedence with addition is broken')
 endif
 if 9 / 9 % 2 != 1
-  error('Modulo precendence with division is broken')
+  error('Modulo precedence with division is broken')
 endif
 if 9 - 9 % 2 != 8
-  error('Modulo precendence with subtraction is broken')
+  error('Modulo precedence with subtraction is broken')
 endif
 
 assert(2.is_even(), 'int is_even() broken for even value')
@@ -56,3 +56,9 @@ assert(3 >= 3, 'Gte broken')
 
 assert(true.to_int() == 1,'bool to_int() broken')
 assert(false.to_int() == 0,'bool to_int() broken')
+
+hex_255 = 0xff
+hex2_255 = 0XFF
+
+assert(hex_255 == 255, 'Hex parsing is broken.')
+assert(hex2_255 == 255, 'Uppercase hex parsing is broken.')

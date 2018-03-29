@@ -12,7 +12,7 @@ girlib = shared_library(
 girexe = executable(
   'girprog',
   sources : 'prog.c',
-  dependencies : [glib, gobj, gir],
+  dependencies : [glib, gobj, gir, dep1_dep],
   link_with : girlib
 )
 
@@ -27,8 +27,13 @@ gnome.generate_gir(
   identifier_prefix : 'Meson',
   includes : ['GObject-2.0', 'MesonDep1-1.0'],
   # dep1_dep pulls in dep2_dep for us
-  dependencies : [fake_dep, dep1_dep],
-  install : true
+  dependencies : [[fake_dep, dep1_dep]],
+  install : true,
+  build_by_default : true,
+  # Test that unknown kwargs do not crash the parser.
+  # Unknown kwargs will eventually become a hard error.
+  # Once that happens remove this.
+  unknown_kwarg : true,
 )
 
 test('gobject introspection/c', girexe)
@@ -36,5 +41,8 @@ gir_paths = ':'.join([girlib.outdir(), dep1lib.outdir(), dep2lib.outdir()])
 envdata = environment()
 envdata.append('GI_TYPELIB_PATH', gir_paths, separator : ':')
 envdata.append('LD_LIBRARY_PATH', gir_paths)
+if ['windows', 'cygwin'].contains(host_machine.system())
+  envdata.append('PATH', gir_paths)
+endif
 test('gobject introspection/py', find_program('prog.py'),
      env : envdata)

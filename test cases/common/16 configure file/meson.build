@@ -70,7 +70,70 @@ dump.set('SHOULD_BE_UNDEFINED', false)
 dump.set('SHOULD_BE_ONE', 1)
 dump.set('SHOULD_BE_ZERO', 0, description : 'Absolutely zero')
 dump.set('SHOULD_BE_QUOTED_ONE', '"1"')
+
+dump.set_quoted('INTEGER_AS_STRING', '12')
+if dump.get_unquoted('INTEGER_AS_STRING').to_int() == 12
+  dump.set('SHOULD_BE_UNQUOTED_STRING', dump.get_unquoted('SHOULD_BE_STRING'))
+endif
+
 configure_file(output : 'config3.h',
   configuration : dump)
 
 test('Configless.', executable('dumpprog', 'dumpprog.c'))
+
+
+# Config file generation in a loop with @BASENAME@ substitution
+dump = configuration_data()
+dump.set('ZERO', 0)
+config_templates = files(['config4a.h.in', 'config4b.h.in'])
+foreach config_template : config_templates
+  configure_file(input : config_template, output : '@BASENAME@',
+                 configuration : dump)
+endforeach
+
+test('Substituted', executable('prog4', 'prog4.c'))
+
+# Test `capture` keyword
+
+basename_py = find_program('basename.py')
+file_contains_py = find_program('file_contains.py')
+test_string = 'hello world'
+test_input_file = join_paths(meson.current_build_dir(), test_string)
+run_command(find_program('touch.py'), test_input_file)
+configs = [
+    # no input
+    configure_file(command: [ basename_py, test_string ], capture: true, output: 'capture test 1'),
+    # with input
+    configure_file(input: test_input_file, command: [ basename_py, '@INPUT@' ], capture: true, output: 'capture test 2'),
+]
+foreach c : configs
+    test('@0@'.format(c), file_contains_py, args: [ c, test_string ])
+endforeach
+
+# Test variable is substituted only once
+conf5 = configuration_data()
+conf5.set('var', '@var2@')
+conf5.set('var2', 'error')
+configure_file(
+  input : 'config5.h.in',
+  output : '@BASENAME@',
+  configuration : conf5
+)
+test('test5', executable('prog5', 'prog5.c'))
+
+# Test escaping
+conf6 = configuration_data()
+conf6.set('var1', 'foo')
+conf6.set('var2', 'bar')
+configure_file(
+  input : 'config6.h.in',
+  output : '@BASENAME@',
+  configuration : conf6
+)
+test('test6', executable('prog6', 'prog6.c'))
+
+# test empty install dir string
+cfile = configure_file(input : 'config.h.in',
+  output : 'do_not_get_installed.h',
+  install_dir : '',
+  configuration : conf)

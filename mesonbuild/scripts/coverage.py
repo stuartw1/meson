@@ -14,23 +14,23 @@
 
 from mesonbuild import environment
 
-import sys, os, subprocess
-
-def remove_dir_from_trace(lcov_command, covfile, dirname):
-    tmpfile = covfile + '.tmp'
-    subprocess.check_call([lcov_command, '--remove', covfile, dirname, '-o', tmpfile])
-    os.replace(tmpfile, covfile)
+import sys, os, subprocess, pathlib
 
 def coverage(source_root, build_root, log_dir):
-    (gcovr_exe, lcov_exe, genhtml_exe) = environment.find_coverage_tools()
+    (gcovr_exe, gcovr_new_rootdir, lcov_exe, genhtml_exe) = environment.find_coverage_tools()
     if gcovr_exe:
+        # gcovr >= 3.1 interprets rootdir differently
+        if gcovr_new_rootdir:
+            rootdir = build_root
+        else:
+            rootdir = source_root
         subprocess.check_call([gcovr_exe,
                                '-x',
-                               '-r', source_root,
+                               '-r', rootdir,
                                '-o', os.path.join(log_dir, 'coverage.xml'),
                                ])
         subprocess.check_call([gcovr_exe,
-                               '-r', source_root,
+                               '-r', rootdir,
                                '-o', os.path.join(log_dir, 'coverage.txt'),
                                ])
     if lcov_exe and genhtml_exe:
@@ -38,6 +38,7 @@ def coverage(source_root, build_root, log_dir):
         covinfo = os.path.join(log_dir, 'coverage.info')
         initial_tracefile = covinfo + '.initial'
         run_tracefile = covinfo + '.run'
+        raw_tracefile = covinfo + '.raw'
         subprocess.check_call([lcov_exe,
                                '--directory', build_root,
                                '--capture',
@@ -55,9 +56,12 @@ def coverage(source_root, build_root, log_dir):
         subprocess.check_call([lcov_exe,
                                '-a', initial_tracefile,
                                '-a', run_tracefile,
-                               '-o', covinfo])
-        remove_dir_from_trace(lcov_exe, covinfo, '/usr/include/*')
-        remove_dir_from_trace(lcov_exe, covinfo, '/usr/local/include/*')
+                               '-o', raw_tracefile])
+        # Remove all directories outside the source_root from the covinfo
+        subprocess.check_call([lcov_exe,
+                               '--extract', raw_tracefile,
+                               os.path.join(source_root, '*'),
+                               '--output-file', covinfo])
         subprocess.check_call([genhtml_exe,
                                '--prefix', build_root,
                                '--output-directory', htmloutdir,
@@ -66,6 +70,23 @@ def coverage(source_root, build_root, log_dir):
                                '--show-details',
                                '--branch-coverage',
                                covinfo])
+    elif gcovr_exe and gcovr_new_rootdir:
+        htmloutdir = os.path.join(log_dir, 'coveragereport')
+        subprocess.check_call([gcovr_exe,
+                               '--html',
+                               '--html-details',
+                               '-r', build_root,
+                               '-o', os.path.join(htmloutdir, 'index.html'),
+                               ])
+    if gcovr_exe:
+        print('')
+        print('XML coverage report can be found at',
+              pathlib.Path(log_dir, 'coverage.xml').as_uri())
+        print('Text coverage report can be found at',
+              pathlib.Path(log_dir, 'coverage.txt').as_uri())
+    if (lcov_exe and genhtml_exe) or (gcovr_exe and gcovr_new_rootdir):
+        print('Html coverage report can be found at',
+              pathlib.Path(htmloutdir, 'index.html').as_uri())
     return 0
 
 def run(args):

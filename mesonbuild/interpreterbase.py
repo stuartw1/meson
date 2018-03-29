@@ -18,7 +18,7 @@
 from . import mparser, mesonlib, mlog
 from . import environment, dependencies
 
-import os, copy, re
+import os, copy, re, types
 from functools import wraps
 
 # Decorators for method calls.
@@ -55,6 +55,46 @@ def stringArgs(f):
         return f(self, node, args, kwargs)
     return wrapped
 
+class permittedKwargs:
+
+    def __init__(self, permitted):
+        self.permitted = permitted
+
+    def __call__(self, f):
+        @wraps(f)
+        def wrapped(s, node_or_state, args, kwargs):
+            loc = types.SimpleNamespace()
+            if hasattr(s, 'subdir'):
+                loc.subdir = s.subdir
+                loc.lineno = s.current_lineno
+            elif hasattr(node_or_state, 'subdir'):
+                loc.subdir = node_or_state.subdir
+                loc.lineno = node_or_state.current_lineno
+            else:
+                loc = None
+            for k in kwargs:
+                if k not in self.permitted:
+                    mlog.warning('''Passed invalid keyword argument "{}".'''.format(k), location=loc)
+                    mlog.warning('This will become a hard error in the future.')
+            return f(s, node_or_state, args, kwargs)
+        return wrapped
+
+
+class permittedMethodKwargs:
+
+    def __init__(self, permitted):
+        self.permitted = permitted
+
+    def __call__(self, f):
+        @wraps(f)
+        def wrapped(obj, args, kwargs):
+            for k in kwargs:
+                if k not in self.permitted:
+                    mlog.warning('''Passed invalid keyword argument "{}".'''.format(k))
+                    mlog.warning('This will become a hard error in the future.')
+            return f(obj, args, kwargs)
+        return wrapped
+
 
 class InterpreterException(mesonlib.MesonException):
     pass
@@ -63,6 +103,9 @@ class InvalidCode(InterpreterException):
     pass
 
 class InvalidArguments(InterpreterException):
+    pass
+
+class SubdirDoneRequest(BaseException):
     pass
 
 class InterpreterObject:
@@ -78,6 +121,29 @@ class MutableInterpreterObject(InterpreterObject):
     def __init__(self):
         super().__init__()
 
+class Disabler(InterpreterObject):
+    def __init__(self):
+        super().__init__()
+        self.methods.update({'found': self.found_method})
+
+    def found_method(self, args, kwargs):
+        return False
+
+def is_disabler(i):
+    return isinstance(i, Disabler)
+
+def is_disabled(args, kwargs):
+    for i in args:
+        if isinstance(i, Disabler):
+            return True
+    for i in kwargs.values():
+        if isinstance(i, Disabler):
+            return True
+        if isinstance(i, list):
+            for j in i:
+                if isinstance(j, Disabler):
+                    return True
+    return False
 
 class InterpreterBase:
     def __init__(self, source_root, subdir):
@@ -87,6 +153,7 @@ class InterpreterBase:
         self.subdir = subdir
         self.variables = {}
         self.argument_depth = 0
+        self.current_lineno = -1
 
     def load_root_meson_file(self):
         mesonfile = os.path.join(self.source_root, self.subdir, environment.build_filename)
@@ -137,7 +204,10 @@ class InterpreterBase:
         while i < len(statements):
             cur = statements[i]
             try:
+                self.current_lineno = cur.lineno
                 self.evaluate_statement(cur)
+            except SubdirDoneRequest:
+                break
             except Exception as e:
                 if not(hasattr(e, 'lineno')):
                     e.lineno = cur.lineno
@@ -206,6 +276,8 @@ class InterpreterBase:
         assert(isinstance(node, mparser.IfClauseNode))
         for i in node.ifs:
             result = self.evaluate_statement(i.condition)
+            if is_disabler(result):
+                return result
             if not(isinstance(result, bool)):
                 raise InvalidCode('If clause {!r} does not evaluate to true or false.'.format(result))
             if result:
@@ -214,14 +286,31 @@ class InterpreterBase:
         if not isinstance(node.elseblock, mparser.EmptyNode):
             self.evaluate_codeblock(node.elseblock)
 
+    def validate_comparison_types(self, val1, val2):
+        if type(val1) != type(val2):
+            return False
+        return True
+
     def evaluate_comparison(self, node):
         val1 = self.evaluate_statement(node.left)
+        if is_disabler(val1):
+            return val1
         val2 = self.evaluate_statement(node.right)
+        if is_disabler(val2):
+            return val2
+        valid = self.validate_comparison_types(val1, val2)
+        # Ordering comparisons of different types isn't allowed since PR #1810
+        # (0.41.0).  Since PR #2884 we also warn about equality comparisons of
+        # different types, which will one day become an error.
+        if not valid and (node.ctype == '==' or node.ctype == '!='):
+            mlog.warning('''Trying to compare values of different types ({}, {}) using {}.
+The result of this is undefined and will become a hard error in a future Meson release.'''
+                         .format(type(val1).__name__, type(val2).__name__, node.ctype), location=node)
         if node.ctype == '==':
             return val1 == val2
         elif node.ctype == '!=':
             return val1 != val2
-        elif not isinstance(val1, type(val2)):
+        elif not valid:
             raise InterpreterException(
                 'Values of different types ({}, {}) cannot be compared using {}.'.format(type(val1).__name__,
                                                                                          type(val2).__name__,
@@ -243,35 +332,49 @@ class InterpreterBase:
 
     def evaluate_andstatement(self, cur):
         l = self.evaluate_statement(cur.left)
+        if is_disabler(l):
+            return l
         if not isinstance(l, bool):
             raise InterpreterException('First argument to "and" is not a boolean.')
         if not l:
             return False
         r = self.evaluate_statement(cur.right)
+        if is_disabler(r):
+            return r
         if not isinstance(r, bool):
             raise InterpreterException('Second argument to "and" is not a boolean.')
         return r
 
     def evaluate_orstatement(self, cur):
         l = self.evaluate_statement(cur.left)
+        if is_disabler(l):
+            return l
         if not isinstance(l, bool):
             raise InterpreterException('First argument to "or" is not a boolean.')
         if l:
             return True
         r = self.evaluate_statement(cur.right)
+        if is_disabler(r):
+            return r
         if not isinstance(r, bool):
             raise InterpreterException('Second argument to "or" is not a boolean.')
         return r
 
     def evaluate_uminusstatement(self, cur):
         v = self.evaluate_statement(cur.value)
+        if is_disabler(v):
+            return v
         if not isinstance(v, int):
             raise InterpreterException('Argument to negation is not an integer.')
         return -v
 
     def evaluate_arithmeticstatement(self, cur):
         l = self.evaluate_statement(cur.left)
+        if is_disabler(l):
+            return l
         r = self.evaluate_statement(cur.right)
+        if is_disabler(r):
+            return r
 
         if cur.operation == 'add':
             try:
@@ -300,6 +403,8 @@ class InterpreterBase:
     def evaluate_ternary(self, node):
         assert(isinstance(node, mparser.TernaryNode))
         result = self.evaluate_statement(node.condition)
+        if is_disabler(result):
+            return result
         if not isinstance(result, bool):
             raise InterpreterException('Ternary condition is not boolean.')
         if result:
@@ -311,6 +416,8 @@ class InterpreterBase:
         assert(isinstance(node, mparser.ForeachClauseNode))
         varname = node.varname.value
         items = self.evaluate_statement(node.items)
+        if is_disabler(items):
+            return items
         if not isinstance(items, list):
             raise InvalidArguments('Items of foreach loop is not an array')
         for item in items:
@@ -321,6 +428,9 @@ class InterpreterBase:
         assert(isinstance(node, mparser.PlusAssignmentNode))
         varname = node.var_name
         addition = self.evaluate_statement(node.value)
+        if is_disabler(addition):
+            self.set_variable(varname, addition)
+            return
         # Remember that all variables are immutable. We must always create a
         # full new variable and then assign it.
         old_variable = self.get_variable(varname)
@@ -345,18 +455,24 @@ class InterpreterBase:
     def evaluate_indexing(self, node):
         assert(isinstance(node, mparser.IndexNode))
         iobject = self.evaluate_statement(node.iobject)
-        if not isinstance(iobject, list):
-            raise InterpreterException('Tried to index a non-array object.')
+        if is_disabler(iobject):
+            return iobject
+        if not hasattr(iobject, '__getitem__'):
+            raise InterpreterException(
+                'Tried to index an object that doesn\'t support indexing.')
         index = self.evaluate_statement(node.index)
         if not isinstance(index, int):
             raise InterpreterException('Index value is not an integer.')
-        if index < -len(iobject) or index >= len(iobject):
+        try:
+            return iobject[index]
+        except IndexError:
             raise InterpreterException('Index %d out of bounds of array of size %d.' % (index, len(iobject)))
-        return iobject[index]
 
     def function_call(self, node):
         func_name = node.func_name
         (posargs, kwargs) = self.reduce_arguments(node.args)
+        if is_disabled(posargs, kwargs):
+            return Disabler()
         if func_name in self.funcs:
             return self.funcs[func_name](node, self.flatten(posargs), kwargs)
         else:
@@ -378,18 +494,26 @@ class InterpreterBase:
         if isinstance(obj, int):
             return self.int_method_call(obj, method_name, args)
         if isinstance(obj, list):
-            return self.array_method_call(obj, method_name, self.reduce_arguments(args)[0])
+            return self.array_method_call(obj, method_name, args)
         if isinstance(obj, mesonlib.File):
             raise InvalidArguments('File object "%s" is not callable.' % obj)
         if not isinstance(obj, InterpreterObject):
             raise InvalidArguments('Variable "%s" is not callable.' % object_name)
         (args, kwargs) = self.reduce_arguments(args)
+        # Special case. This is the only thing you can do with a disabler
+        # object. Every other use immediately returns the disabler object.
+        if isinstance(obj, Disabler) and method_name == 'found':
+            return False
+        if is_disabled(args, kwargs):
+            return Disabler()
         if method_name == 'extract_objects':
             self.validate_extraction(obj.held_object)
         return obj.method_call(method_name, self.flatten(args), kwargs)
 
     def bool_method_call(self, obj, method_name, args):
-        (posargs, _) = self.reduce_arguments(args)
+        (posargs, kwargs) = self.reduce_arguments(args)
+        if is_disabled(posargs, kwargs):
+            return Disabler()
         if method_name == 'to_string':
             if not posargs:
                 if obj:
@@ -412,7 +536,9 @@ class InterpreterBase:
             raise InterpreterException('Unknown method "%s" for a boolean.' % method_name)
 
     def int_method_call(self, obj, method_name, args):
-        (posargs, _) = self.reduce_arguments(args)
+        (posargs, kwargs) = self.reduce_arguments(args)
+        if is_disabled(posargs, kwargs):
+            return Disabler()
         if method_name == 'is_even':
             if not posargs:
                 return obj % 2 == 0
@@ -423,12 +549,35 @@ class InterpreterBase:
                 return obj % 2 != 0
             else:
                 raise InterpreterException('int.is_odd() must have no arguments.')
+        elif method_name == 'to_string':
+            if not posargs:
+                return str(obj)
+            else:
+                raise InterpreterException('int.to_string() must have no arguments.')
         else:
             raise InterpreterException('Unknown method "%s" for an integer.' % method_name)
 
+    @staticmethod
+    def _get_one_string_posarg(posargs, method_name):
+        if len(posargs) > 1:
+            m = '{}() must have zero or one arguments'
+            raise InterpreterException(m.format(method_name))
+        elif len(posargs) == 1:
+            s = posargs[0]
+            if not isinstance(s, str):
+                m = '{}() argument must be a string'
+                raise InterpreterException(m.format(method_name))
+            return s
+        return None
+
     def string_method_call(self, obj, method_name, args):
-        (posargs, _) = self.reduce_arguments(args)
+        (posargs, kwargs) = self.reduce_arguments(args)
+        if is_disabled(posargs, kwargs):
+            return Disabler()
         if method_name == 'strip':
+            s = self._get_one_string_posarg(posargs, 'strip')
+            if s is not None:
+                return obj.strip(s)
             return obj.strip()
         elif method_name == 'format':
             return self.format_string(obj, args)
@@ -439,15 +588,10 @@ class InterpreterBase:
         elif method_name == 'underscorify':
             return re.sub(r'[^a-zA-Z0-9]', '_', obj)
         elif method_name == 'split':
-            if len(posargs) > 1:
-                raise InterpreterException('Split() must have at most one argument.')
-            elif len(posargs) == 1:
-                s = posargs[0]
-                if not isinstance(s, str):
-                    raise InterpreterException('Split() argument must be a string')
+            s = self._get_one_string_posarg(posargs, 'split')
+            if s is not None:
                 return obj.split(s)
-            else:
-                return obj.split()
+            return obj.split()
         elif method_name == 'startswith' or method_name == 'contains' or method_name == 'endswith':
             s = posargs[0]
             if not isinstance(s, str):
@@ -478,19 +622,22 @@ class InterpreterBase:
         raise InterpreterException('Unknown method "%s" for a string.' % method_name)
 
     def unknown_function_called(self, func_name):
-            raise InvalidCode('Unknown function "%s".' % func_name)
+        raise InvalidCode('Unknown function "%s".' % func_name)
 
     def array_method_call(self, obj, method_name, args):
+        (posargs, kwargs) = self.reduce_arguments(args)
+        if is_disabled(posargs, kwargs):
+            return Disabler()
         if method_name == 'contains':
-            return self.check_contains(obj, args)
+            return self.check_contains(obj, posargs)
         elif method_name == 'length':
             return len(obj)
         elif method_name == 'get':
-            index = args[0]
+            index = posargs[0]
             fallback = None
-            if len(args) == 2:
-                fallback = args[1]
-            elif len(args) > 2:
+            if len(posargs) == 2:
+                fallback = posargs[1]
+            elif len(posargs) > 2:
                 m = 'Array method \'get()\' only takes two arguments: the ' \
                     'index and an optional fallback value if the index is ' \
                     'out of range.'
@@ -577,53 +724,6 @@ To specify a keyword argument, use : instead of =.''')
     def is_assignable(self, value):
         return isinstance(value, (InterpreterObject, dependencies.Dependency,
                                   str, int, list, mesonlib.File))
-
-    def func_build_target(self, node, args, kwargs):
-        if 'target_type' not in kwargs:
-            raise InterpreterException('Missing target_type keyword argument')
-        target_type = kwargs.pop('target_type')
-        if target_type == 'executable':
-            return self.func_executable(node, args, kwargs)
-        elif target_type == 'shared_library':
-            return self.func_shared_lib(node, args, kwargs)
-        elif target_type == 'static_library':
-            return self.func_static_lib(node, args, kwargs)
-        elif target_type == 'library':
-            return self.func_library(node, args, kwargs)
-        elif target_type == 'jar':
-            return self.func_jar(node, args, kwargs)
-        else:
-            raise InterpreterException('Unknown target_type.')
-
-    def func_set_variable(self, node, args, kwargs):
-        if len(args) != 2:
-            raise InvalidCode('Set_variable takes two arguments.')
-        varname = args[0]
-        value = args[1]
-        self.set_variable(varname, value)
-
-#    @noKwargs
-    def func_get_variable(self, node, args, kwargs):
-        if len(args) < 1 or len(args) > 2:
-            raise InvalidCode('Get_variable takes one or two arguments.')
-        varname = args[0]
-        if not isinstance(varname, str):
-            raise InterpreterException('First argument must be a string.')
-        try:
-            return self.variables[varname]
-        except KeyError:
-            pass
-        if len(args) == 2:
-            return args[1]
-        raise InterpreterException('Tried to get unknown variable "%s".' % varname)
-
-    @stringArgs
-    @noKwargs
-    def func_is_variable(self, node, args, kwargs):
-        if len(args) != 1:
-            raise InvalidCode('Is_variable takes two arguments.')
-        varname = args[0]
-        return varname in self.variables
 
     def is_elementary_type(self, v):
         return isinstance(v, (int, float, str, bool, list))

@@ -14,12 +14,115 @@
 
 """A library of random helper functionality."""
 
+import sys
 import stat
 import time
 import platform, subprocess, operator, os, shutil, re
 import collections
+from mesonbuild import mlog
+
+have_fcntl = False
+have_msvcrt = False
+
+try:
+    import fcntl
+    have_fcntl = True
+except Exception:
+    pass
+
+try:
+    import msvcrt
+    have_msvcrt = True
+except Exception:
+    pass
 
 from glob import glob
+
+def detect_meson_py_location():
+    c = sys.argv[0]
+    c_dir, c_fname = os.path.split(c)
+
+    # get the absolute path to the <mesontool> folder
+    m_dir = None
+    if os.path.isabs(c):
+        # $ /foo/<mesontool>.py <args>
+        m_dir = c_dir
+    elif c_dir == '':
+        # $ <mesontool> <args> (gets run from /usr/bin/<mesontool>)
+        in_path_exe = shutil.which(c_fname)
+        if in_path_exe:
+            if not os.path.isabs(in_path_exe):
+                m_dir = os.getcwd()
+                c_fname = in_path_exe
+            else:
+                m_dir, c_fname = os.path.split(in_path_exe)
+    else:
+        m_dir = os.path.abspath(c_dir)
+
+    # find meson in m_dir
+    if m_dir is not None:
+        for fname in ['meson', 'meson.py']:
+            m_path = os.path.join(m_dir, fname)
+            if os.path.exists(m_path):
+                return m_path
+
+    # No meson found, which means that either:
+    # a) meson is not installed
+    # b) meson is installed to a non-standard location
+    # c) the script that invoked mesonlib is not the one of meson tools (e.g. run_unittests.py)
+    fname = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'meson.py'))
+    if os.path.exists(fname):
+        return fname
+    # If meson is still not found, we might be imported by out-of-source tests
+    # https://github.com/mesonbuild/meson/issues/3015
+    exe = shutil.which('meson')
+    if exe is None:
+        exe = shutil.which('meson.py')
+    if exe is not None:
+        return exe
+    # Give up.
+    raise RuntimeError('Could not determine how to run Meson. Please file a bug with details.')
+
+if os.path.basename(sys.executable) == 'meson.exe':
+    # In Windows and using the MSI installed executable.
+    meson_command = [sys.executable]
+    python_command = [sys.executable, 'runpython']
+else:
+    python_command = [sys.executable]
+    meson_command = python_command + [detect_meson_py_location()]
+
+def is_ascii_string(astring):
+    try:
+        if isinstance(astring, str):
+            astring.encode('ascii')
+        if isinstance(astring, bytes):
+            astring.decode('ascii')
+    except UnicodeDecodeError:
+        return False
+    return True
+
+def check_direntry_issues(direntry_array):
+    import locale
+    # Warn if the locale is not UTF-8. This can cause various unfixable issues
+    # such as os.stat not being able to decode filenames with unicode in them.
+    # There is no way to reset both the preferred encoding and the filesystem
+    # encoding, so we can just warn about it.
+    e = locale.getpreferredencoding()
+    if e.upper() != 'UTF-8' and not is_windows():
+        if not isinstance(direntry_array, list):
+            direntry_array = [direntry_array]
+        for de in direntry_array:
+            if is_ascii_string(de):
+                continue
+            mlog.warning('''You are using {!r} which is not a Unicode-compatible '
+locale but you are trying to access a file system entry called {!r} which is
+not pure ASCII. This may cause problems.
+'''.format(e, de), file=sys.stderr)
+
+# Put this in objects that should not get dumped to pickle files
+# by accident.
+import threading
+an_unpicklable_object = threading.Lock()
 
 class MesonException(Exception):
     '''Exceptions thrown by Meson'''
@@ -177,15 +280,6 @@ class File:
     def relative_name(self):
         return os.path.join(self.subdir, self.fname)
 
-def get_meson_script(env, script):
-    '''
-    Given the path of `meson.py`/`meson`, get the path of a meson script such
-    as `mesonintrospect` or `mesontest`.
-    '''
-    meson_py = env.get_build_command()
-    (base, ext) = os.path.splitext(meson_py)
-    return os.path.join(os.path.dirname(base), script + ext)
-
 def get_compiler_for_source(compilers, src):
     for comp in compilers:
         if comp.can_compile(src):
@@ -202,22 +296,17 @@ def classify_unity_sources(compilers, sources):
             compsrclist[comp].append(src)
     return compsrclist
 
-def flatten(item):
-    if not isinstance(item, list):
-        return [item]
-    result = []
-    for i in item:
-        if isinstance(i, list):
-            result += flatten(i)
-        else:
-            result.append(i)
-    return result
-
 def is_osx():
     return platform.system().lower() == 'darwin'
 
 def is_linux():
     return platform.system().lower() == 'linux'
+
+def is_android():
+    return platform.system().lower() == 'android'
+
+def is_haiku():
+    return platform.system().lower() == 'haiku'
 
 def is_windows():
     platname = platform.system().lower()
@@ -229,6 +318,84 @@ def is_cygwin():
 
 def is_debianlike():
     return os.path.isfile('/etc/debian_version')
+
+def is_dragonflybsd():
+    return platform.system().lower() == 'dragonfly'
+
+def is_freebsd():
+    return platform.system().lower() == 'freebsd'
+
+def for_windows(is_cross, env):
+    """
+    Host machine is windows?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_windows()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'windows'
+    return False
+
+def for_cygwin(is_cross, env):
+    """
+    Host machine is cygwin?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_cygwin()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'cygwin'
+    return False
+
+def for_linux(is_cross, env):
+    """
+    Host machine is linux?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_linux()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'linux'
+    return False
+
+def for_darwin(is_cross, env):
+    """
+    Host machine is Darwin (iOS/OS X)?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_osx()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'darwin'
+    return False
+
+def for_android(is_cross, env):
+    """
+    Host machine is Android?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_android()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'android'
+    return False
+
+def for_haiku(is_cross, env):
+    """
+    Host machine is Haiku?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_haiku()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'haiku'
+    return False
 
 def exe_exists(arglist):
     try:
@@ -259,7 +426,7 @@ def detect_vcs(source_dir):
 
 def grab_leading_numbers(vstr, strict=False):
     result = []
-    for x in vstr.split('.'):
+    for x in vstr.rstrip('.').split('.'):
         try:
             result.append(int(x))
         except ValueError as e:
@@ -367,24 +534,40 @@ def get_library_dirs():
     unixdirs += glob('/lib/' + plat + '*')
     return unixdirs
 
+def has_path_sep(name, sep='/\\'):
+    'Checks if any of the specified @sep path separators are in @name'
+    for each in sep:
+        if each in name:
+            return True
+    return False
 
 def do_replacement(regex, line, confdata):
-    match = re.search(regex, line)
-    while match:
-        varname = match.group(1)
-        if varname in confdata:
-            (var, desc) = confdata.get(varname)
-            if isinstance(var, str):
-                pass
-            elif isinstance(var, int):
-                var = str(var)
-            else:
-                raise RuntimeError('Tried to replace a variable with something other than a string or int.')
+    missing_variables = set()
+
+    def variable_replace(match):
+        # Pairs of escape characters before '@' or '\@'
+        if match.group(0).endswith('\\'):
+            num_escapes = match.end(0) - match.start(0)
+            return '\\' * (num_escapes // 2)
+        # Single escape character and '@'
+        elif match.group(0) == '\\@':
+            return '@'
+        # Template variable to be replaced
         else:
-            var = ''
-        line = line.replace('@' + varname + '@', var)
-        match = re.search(regex, line)
-    return line
+            varname = match.group(1)
+            if varname in confdata:
+                (var, desc) = confdata.get(varname)
+                if isinstance(var, str):
+                    pass
+                elif isinstance(var, int):
+                    var = str(var)
+                else:
+                    raise RuntimeError('Tried to replace a variable with something other than a string or int.')
+            else:
+                missing_variables.add(varname)
+                var = ''
+            return var
+    return re.sub(regex, variable_replace, line), missing_variables
 
 def do_mesondefine(line, confdata):
     arr = line.split()
@@ -416,22 +599,26 @@ def do_conf_file(src, dst, confdata):
         raise MesonException('Could not read input file %s: %s' % (src, str(e)))
     # Only allow (a-z, A-Z, 0-9, _, -) as valid characters for a define
     # Also allow escaping '@' with '\@'
-    regex = re.compile(r'[^\\]?@([-a-zA-Z0-9_]+)@')
+    regex = re.compile(r'(?:\\\\)+(?=\\?@)|\\@|@([-a-zA-Z0-9_]+)@')
     result = []
+    missing_variables = set()
     for line in data:
         if line.startswith('#mesondefine'):
             line = do_mesondefine(line, confdata)
         else:
-            line = do_replacement(regex, line, confdata)
+            line, missing = do_replacement(regex, line, confdata)
+            missing_variables.update(missing)
         result.append(line)
     dst_tmp = dst + '~'
     with open(dst_tmp, 'w', encoding='utf-8') as f:
         f.writelines(result)
     shutil.copymode(src, dst_tmp)
     replace_if_different(dst, dst_tmp)
+    return missing_variables
 
 def dump_conf_header(ofilename, cdata):
-    with open(ofilename, 'w', encoding='utf-8') as ofile:
+    ofilename_tmp = ofilename + '~'
+    with open(ofilename_tmp, 'w', encoding='utf-8') as ofile:
         ofile.write('''/*
  * Autogenerated by the Meson build system.
  * Do not edit, your changes will be lost.
@@ -453,13 +640,14 @@ def dump_conf_header(ofilename, cdata):
                 ofile.write('#define %s %s\n\n' % (k, v))
             else:
                 raise MesonException('Unknown data type in configuration file entry: ' + k)
+    replace_if_different(ofilename, ofilename_tmp)
 
 def replace_if_different(dst, dst_tmp):
     # If contents are identical, don't touch the file to prevent
     # unnecessary rebuilds.
     different = True
     try:
-        with open(dst, 'r') as f1, open(dst_tmp, 'r') as f2:
+        with open(dst, 'rb') as f1, open(dst_tmp, 'rb') as f2:
             if f1.read() == f2.read():
                 different = False
     except FileNotFoundError:
@@ -468,6 +656,47 @@ def replace_if_different(dst, dst_tmp):
         os.replace(dst_tmp, dst)
     else:
         os.unlink(dst_tmp)
+
+def listify(item, flatten=True, unholder=False):
+    '''
+    Returns a list with all args embedded in a list if they are not a list.
+    This function preserves order.
+    @flatten: Convert lists of lists to a flat list
+    @unholder: Replace each item with the object it holds, if required
+
+    Note: unholding only works recursively when flattening
+    '''
+    if not isinstance(item, list):
+        if unholder and hasattr(item, 'held_object'):
+            item = item.held_object
+        return [item]
+    result = []
+    for i in item:
+        if unholder and hasattr(i, 'held_object'):
+            i = i.held_object
+        if flatten and isinstance(i, list):
+            result += listify(i, flatten=True, unholder=unholder)
+        else:
+            result.append(i)
+    return result
+
+
+def extract_as_list(dict_object, *keys, pop=False, **kwargs):
+    '''
+    Extracts all values from given dict_object and listifies them.
+    '''
+    result = []
+    fetch = dict_object.get
+    if pop:
+        fetch = dict_object.pop
+    # If there's only one key, we don't return a list with one element
+    if len(keys) == 1:
+        return listify(fetch(keys[0], []), **kwargs)
+    # Return a list of values corresponding to *keys
+    for key in keys:
+        result.append(listify(fetch(key, []), **kwargs))
+    return result
+
 
 def typeslistify(item, types):
     '''
@@ -505,6 +734,8 @@ def expand_arguments(args):
     return expended_args
 
 def Popen_safe(args, write=None, stderr=subprocess.PIPE, **kwargs):
+    if sys.version_info < (3, 6) or not sys.stdout.encoding:
+        return Popen_safe_legacy(args, write=write, stderr=stderr, **kwargs)
     p = subprocess.Popen(args, universal_newlines=True,
                          close_fds=False,
                          stdout=subprocess.PIPE,
@@ -512,30 +743,24 @@ def Popen_safe(args, write=None, stderr=subprocess.PIPE, **kwargs):
     o, e = p.communicate(write)
     return p, o, e
 
-def commonpath(paths):
-    '''
-    For use on Python 3.4 where os.path.commonpath is not available.
-    We currently use it everywhere so this receives enough testing.
-    '''
-    # XXX: Replace me with os.path.commonpath when we start requiring Python 3.5
-    import pathlib
-    if not paths:
-        raise ValueError('arg is an empty sequence')
-    common = pathlib.PurePath(paths[0])
-    for path in paths[1:]:
-        new = []
-        path = pathlib.PurePath(path)
-        for c, p in zip(common.parts, path.parts):
-            if c != p:
-                break
-            new.append(c)
-        # Don't convert '' into '.'
-        if not new:
-            common = ''
-            break
-        new = os.path.join(*new)
-        common = pathlib.PurePath(new)
-    return str(common)
+def Popen_safe_legacy(args, write=None, stderr=subprocess.PIPE, **kwargs):
+    p = subprocess.Popen(args, universal_newlines=False,
+                         stdout=subprocess.PIPE,
+                         stderr=stderr, **kwargs)
+    if write is not None:
+        write = write.encode('utf-8')
+    o, e = p.communicate(write)
+    if o is not None:
+        if sys.stdout.encoding:
+            o = o.decode(encoding=sys.stdout.encoding, errors='replace').replace('\r\n', '\n')
+        else:
+            o = o.decode(errors='replace').replace('\r\n', '\n')
+    if e is not None:
+        if sys.stderr.encoding:
+            e = e.decode(encoding=sys.stderr.encoding, errors='replace').replace('\r\n', '\n')
+        else:
+            e = e.decode(errors='replace').replace('\r\n', '\n')
+    return p, o, e
 
 def iter_regexin_iter(regexiter, initer):
     '''
@@ -607,6 +832,8 @@ def substitute_values(command, values):
     _substitute_values_check_errors(command, values)
     # Substitution
     outcmd = []
+    rx_keys = [re.escape(key) for key in values if key not in ('@INPUT@', '@OUTPUT@')]
+    value_rx = re.compile('|'.join(rx_keys)) if rx_keys else None
     for vv in command:
         if not isinstance(vv, str):
             outcmd.append(vv)
@@ -633,12 +860,9 @@ def substitute_values(command, values):
         elif vv in values:
             outcmd.append(values[vv])
         # Substitute everything else with replacement
+        elif value_rx:
+            outcmd.append(value_rx.sub(lambda m: values[m.group(0)], vv))
         else:
-            for key, value in values.items():
-                if key in ('@INPUT@', '@OUTPUT@'):
-                    # Already done above
-                    continue
-                vv = vv.replace(key, value)
             outcmd.append(vv)
     return outcmd
 
@@ -674,7 +898,7 @@ def get_filenames_templates_dict(inputs, outputs):
             values['@INPUT{}@'.format(ii)] = vv
         if len(inputs) == 1:
             # Just one value, substitute @PLAINNAME@ and @BASENAME@
-            values['@PLAINNAME@'] = plain = os.path.split(inputs[0])[1]
+            values['@PLAINNAME@'] = plain = os.path.basename(inputs[0])
             values['@BASENAME@'] = os.path.splitext(plain)[0]
     if outputs:
         # Gather values derived from the outputs, similar to above.
@@ -682,7 +906,7 @@ def get_filenames_templates_dict(inputs, outputs):
         for (ii, vv) in enumerate(outputs):
             values['@OUTPUT{}@'.format(ii)] = vv
         # Outdir should be the same for all outputs
-        values['@OUTDIR@'] = os.path.split(outputs[0])[0]
+        values['@OUTDIR@'] = os.path.dirname(outputs[0])
         # Many external programs fail on empty arguments.
         if values['@OUTDIR@'] == '':
             values['@OUTDIR@'] = '.'
@@ -699,10 +923,37 @@ def windows_proof_rmtree(f):
         try:
             shutil.rmtree(f)
             return
+        except FileNotFoundError:
+            return
         except (OSError, PermissionError):
             time.sleep(d)
     # Try one last time and throw if it fails.
     shutil.rmtree(f)
+
+
+def detect_subprojects(spdir_name, current_dir='', result=None):
+    if result is None:
+        result = {}
+    spdir = os.path.join(current_dir, spdir_name)
+    if not os.path.exists(spdir):
+        return result
+    for trial in glob(os.path.join(spdir, '*')):
+        basename = os.path.basename(trial)
+        if trial == 'packagecache':
+            continue
+        append_this = True
+        if os.path.isdir(trial):
+            detect_subprojects(spdir_name, trial, result)
+        elif trial.endswith('.wrap') and os.path.isfile(trial):
+            basename = os.path.splitext(basename)[0]
+        else:
+            append_this = False
+        if append_this:
+            if basename in result:
+                result[basename].append(trial)
+            else:
+                result[basename] = [trial]
+    return result
 
 class OrderedSet(collections.MutableSet):
     """A set that preserves the order in which items are added, by first
@@ -742,3 +993,26 @@ class OrderedSet(collections.MutableSet):
 
     def difference(self, set_):
         return type(self)(e for e in self if e not in set_)
+
+class BuildDirLock:
+
+    def __init__(self, builddir):
+        self.lockfilename = os.path.join(builddir, 'meson-private/meson.lock')
+
+    def __enter__(self):
+        self.lockfile = open(self.lockfilename, 'w')
+        try:
+            if have_fcntl:
+                fcntl.flock(self.lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif have_msvcrt:
+                msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+        except (BlockingIOError, PermissionError):
+            self.lockfile.close()
+            raise MesonException('Some other Meson process is already using this build directory. Exiting.')
+
+    def __exit__(self, *args):
+        if have_fcntl:
+            fcntl.flock(self.lockfile, fcntl.LOCK_UN)
+        elif have_msvcrt:
+            msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_UNLCK, 1)
+        self.lockfile.close()

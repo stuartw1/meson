@@ -1,8 +1,5 @@
 project('run target', 'c')
 
-# deprecated format, fix once we remove support for it.
-run_target('mycommand','scripts/script.sh')
-
 # Make it possible to run built programs.
 # In cross builds exe_wrapper should be added if it exists.
 
@@ -49,3 +46,14 @@ run_target('check_exists',
 # executable but test that the output is generated correctly.
 run_target('donotrunme',
   command : hex)
+
+# Ensure configure files can be passed
+conf = configure_file(
+  input: 'configure.in',
+  output: 'configure',
+  configuration: configuration_data()
+)
+
+run_target('configure_script',
+  command : conf
+)

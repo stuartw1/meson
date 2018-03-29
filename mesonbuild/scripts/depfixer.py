@@ -103,7 +103,7 @@ class SectionHeader(DataSizes):
             self.sh_addralign = struct.unpack(self.XWord, ifile.read(self.XWordSize))[0]
         else:
             self.sh_addralign = struct.unpack(self.Word, ifile.read(self.WordSize))[0]
-#Elf64_Xword
+# Elf64_Xword
         if is_64:
             self.sh_entsize = struct.unpack(self.XWord, ifile.read(self.XWordSize))[0]
         else:
@@ -127,8 +127,13 @@ class Elf(DataSizes):
     def __enter__(self):
         return self
 
+    def __del__(self):
+        if self.bf:
+            self.bf.close()
+
     def __exit__(self, exc_type, exc_value, traceback):
         self.bf.close()
+        self.bf = None
 
     def detect_elf_type(self):
         data = self.bf.read(6)
@@ -337,7 +342,7 @@ def run(args):
         print('This application resets target rpath.')
         print('Don\'t run this unless you know what you are doing.')
         print('%s: <binary file> <prefix>' % sys.argv[0])
-        exit(1)
+        sys.exit(1)
     with Elf(args[0]) as e:
         if len(args) == 1:
             e.print_rpath()

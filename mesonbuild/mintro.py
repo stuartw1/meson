@@ -19,44 +19,47 @@ tests and so on. All output is in JSON for simple parsing.
 Currently only works for the Ninja backend. Others use generated
 project files and don't need this info."""
 
-import json, pickle
-from . import coredata, build
+import json
+from . import build, mtest, coredata as cdata
+from .backend import ninjabackend
 import argparse
 import sys, os
 import pathlib
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--targets', action='store_true', dest='list_targets', default=False,
-                    help='List top level targets.')
-parser.add_argument('--installed', action='store_true', dest='list_installed', default=False,
-                    help='List all installed files and directories.')
-parser.add_argument('--target-files', action='store', dest='target_files', default=None,
-                    help='List source files for a given target.')
-parser.add_argument('--buildsystem-files', action='store_true', dest='buildsystem_files', default=False,
-                    help='List files that make up the build system.')
-parser.add_argument('--buildoptions', action='store_true', dest='buildoptions', default=False,
-                    help='List all build options.')
-parser.add_argument('--tests', action='store_true', dest='tests', default=False,
-                    help='List all unit tests.')
-parser.add_argument('--benchmarks', action='store_true', dest='benchmarks', default=False,
-                    help='List all benchmarks.')
-parser.add_argument('--dependencies', action='store_true', dest='dependencies', default=False,
-                    help='List external dependencies.')
-parser.add_argument('--projectinfo', action='store_true', dest='projectinfo', default=False,
-                    help='Information about projects.')
-parser.add_argument('builddir', nargs='?', help='The build directory')
+def buildparser():
+    parser = argparse.ArgumentParser(prog='meson introspect')
+    parser.add_argument('--targets', action='store_true', dest='list_targets', default=False,
+                        help='List top level targets.')
+    parser.add_argument('--installed', action='store_true', dest='list_installed', default=False,
+                        help='List all installed files and directories.')
+    parser.add_argument('--target-files', action='store', dest='target_files', default=None,
+                        help='List source files for a given target.')
+    parser.add_argument('--buildsystem-files', action='store_true', dest='buildsystem_files', default=False,
+                        help='List files that make up the build system.')
+    parser.add_argument('--buildoptions', action='store_true', dest='buildoptions', default=False,
+                        help='List all build options.')
+    parser.add_argument('--tests', action='store_true', dest='tests', default=False,
+                        help='List all unit tests.')
+    parser.add_argument('--benchmarks', action='store_true', dest='benchmarks', default=False,
+                        help='List all benchmarks.')
+    parser.add_argument('--dependencies', action='store_true', dest='dependencies', default=False,
+                        help='List external dependencies.')
+    parser.add_argument('--projectinfo', action='store_true', dest='projectinfo', default=False,
+                        help='Information about projects.')
+    parser.add_argument('builddir', nargs='?', help='The build directory')
+    return parser
 
 def determine_installed_path(target, installdata):
     install_target = None
     for i in installdata.targets:
-        if os.path.split(i[0])[1] == target.get_filename(): # FIXME, might clash due to subprojects.
+        if os.path.basename(i[0]) == target.get_filename(): # FIXME, might clash due to subprojects.
             install_target = i
             break
     if install_target is None:
         raise RuntimeError('Something weird happened. File a bug.')
     fname = i[0]
     outdir = i[1]
-    outname = os.path.join(installdata.prefix, outdir, os.path.split(fname)[-1])
+    outname = os.path.join(installdata.prefix, outdir, os.path.basename(fname))
     # Normalize the path by using os.path.sep consistently, etc.
     # Does not change the effective path.
     return str(pathlib.PurePath(outname))
@@ -104,6 +107,7 @@ def list_targets(coredata, builddata, installdata):
             t['install_filename'] = determine_installed_path(target, installdata)
         else:
             t['installed'] = False
+        t['build_by_default'] = target.build_by_default
         tlist.append(t)
     print(json.dumps(tlist))
 
@@ -131,22 +135,24 @@ def add_keys(optlist, options):
     for key in keys:
         opt = options[key]
         optdict = {'name': key, 'value': opt.value}
-        if isinstance(opt, coredata.UserStringOption):
+        if isinstance(opt, cdata.UserStringOption):
             typestr = 'string'
-        elif isinstance(opt, coredata.UserBooleanOption):
+        elif isinstance(opt, cdata.UserBooleanOption):
             typestr = 'boolean'
-        elif isinstance(opt, coredata.UserComboOption):
+        elif isinstance(opt, cdata.UserComboOption):
             optdict['choices'] = opt.choices
             typestr = 'combo'
-        elif isinstance(opt, coredata.UserStringArrayOption):
-            typestr = 'stringarray'
+        elif isinstance(opt, cdata.UserIntegerOption):
+            typestr = 'integer'
+        elif isinstance(opt, cdata.UserArrayOption):
+            typestr = 'array'
         else:
             raise RuntimeError("Unknown option type")
         optdict['type'] = typestr
         optdict['description'] = opt.description
         optlist.append(optdict)
 
-def list_buildsystem_files(coredata, builddata):
+def list_buildsystem_files(builddata):
     src_dir = builddata.environment.get_source_dir()
     # I feel dirty about this. But only slightly.
     filelist = []
@@ -158,11 +164,11 @@ def list_buildsystem_files(coredata, builddata):
 
 def list_deps(coredata):
     result = []
-    for d in coredata.deps:
+    for d in coredata.deps.values():
         if d.found():
-            args = {'compile_args': d.get_compile_args(),
-                    'link_args': d.get_link_args()}
-            result += [d.name, args]
+            result += [{'name': d.name,
+                        'compile_args': d.get_compile_args(),
+                        'link_args': d.get_link_args()}]
     print(json.dumps(result))
 
 def list_tests(testdata):
@@ -182,6 +188,7 @@ def list_tests(testdata):
         to['workdir'] = t.workdir
         to['timeout'] = t.timeout
         to['suite'] = t.suite
+        to['is_parallel'] = t.is_parallel
         result.append(to)
     print(json.dumps(result))
 
@@ -197,7 +204,7 @@ def list_projinfo(builddata):
 
 def run(args):
     datadir = 'meson-private'
-    options = parser.parse_args(args)
+    options = buildparser().parse_args(args)
     if options.builddir is not None:
         datadir = os.path.join(options.builddir, datadir)
     if not os.path.isdir(datadir):
@@ -205,26 +212,15 @@ def run(args):
               'change the working directory to it.')
         return 1
 
-    corefile = os.path.join(datadir, 'coredata.dat')
-    buildfile = os.path.join(datadir, 'build.dat')
-    installfile = os.path.join(datadir, 'install.dat')
-    testfile = os.path.join(datadir, 'meson_test_setup.dat')
-    benchmarkfile = os.path.join(datadir, 'meson_benchmark_setup.dat')
+    coredata = cdata.load(options.builddir)
+    builddata = build.load(options.builddir)
+    testdata = mtest.load_tests(options.builddir)
+    benchmarkdata = mtest.load_benchmarks(options.builddir)
 
-    # Load all data files
-    with open(corefile, 'rb') as f:
-        coredata = pickle.load(f)
-    with open(buildfile, 'rb') as f:
-        builddata = pickle.load(f)
-    with open(testfile, 'rb') as f:
-        testdata = pickle.load(f)
-    with open(benchmarkfile, 'rb') as f:
-        benchmarkdata = pickle.load(f)
     # Install data is only available with the Ninja backend
-    if os.path.isfile(installfile):
-        with open(installfile, 'rb') as f:
-            installdata = pickle.load(f)
-    else:
+    try:
+        installdata = ninjabackend.load(options.builddir)
+    except FileNotFoundError:
         installdata = None
 
     if options.list_targets:
@@ -234,7 +230,7 @@ def run(args):
     elif options.target_files is not None:
         list_target_files(options.target_files, coredata, builddata)
     elif options.buildsystem_files:
-        list_buildsystem_files(coredata, builddata)
+        list_buildsystem_files(builddata)
     elif options.buildoptions:
         list_buildoptions(coredata, builddata)
     elif options.tests:

@@ -10,6 +10,8 @@ project('include order', 'c')
 # 5. Include paths added via `include_directories:` of internal deps
 #    Within this, the build dir takes precedence over the source dir
 
+# Custom target dir with a built header
+subdir('ctsub')
 # Defines an internal dep
 subdir('sub1')
 # Defines a per-target include path
@@ -28,3 +30,7 @@ f = executable('somefxe', 'sub4/main.c',
 
 test('eh', e)
 test('oh', f)
+
+# Test that the order in include_directories() is maintained
+incs = include_directories('inc1', 'inc2')
+executable('ordertest', 'ordertest.c', include_directories: incs)

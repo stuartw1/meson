@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from mesonbuild import mconf
 import sys
 
-sys.exit(mconf.run(sys.argv[1:]))
+if __name__ == '__main__':
+    sys.exit('Error: This executable is no more. Use "meson configure" instead.')

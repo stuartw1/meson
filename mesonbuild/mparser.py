@@ -71,6 +71,7 @@ class Lexer:
             # Need to be sorted longest to shortest.
             ('ignore', re.compile(r'[ \t]')),
             ('id', re.compile('[_a-zA-Z][_0-9a-zA-Z]*')),
+            ('hexnumber', re.compile('0[xX][0-9a-fA-F]+')),
             ('number', re.compile(r'\d+')),
             ('eol_cont', re.compile(r'\\\n')),
             ('eol', re.compile(r'\n')),
@@ -111,6 +112,7 @@ class Lexer:
         par_count = 0
         bracket_count = 0
         col = 0
+        newline_rx = re.compile(r'(?<!\\)((?:\\\\)*)\\n')
         while loc < len(self.code):
             matched = False
             value = None
@@ -139,10 +141,13 @@ class Lexer:
                     elif tid == 'dblquote':
                         raise ParseException('Double quotes are not supported. Use single quotes.', self.getline(line_start), lineno, col)
                     elif tid == 'string':
-                        value = match_text[1:-1]\
-                            .replace(r"\'", "'")\
-                            .replace(r" \\ ".strip(), r" \ ".strip())\
-                            .replace("\\n", "\n")
+                        # Handle here and not on the regexp to give a better error message.
+                        if match_text.find("\n") != -1:
+                            mlog.warning("""Newline character in a string detected, use ''' (three single quotes) for multiline strings instead.
+This will become a hard error in a future Meson release.""", self.getline(line_start), lineno, col)
+                        value = match_text[1:-1].replace(r"\'", "'")
+                        value = newline_rx.sub(r'\1\n', value)
+                        value = value.replace(r" \\ ".strip(), r" \ ".strip())
                     elif tid == 'multiline_string':
                         tid = 'string'
                         value = match_text[3:-3]
@@ -152,6 +157,9 @@ class Lexer:
                             line_start = mo.end() - len(lines[-1])
                     elif tid == 'number':
                         value = int(match_text)
+                    elif tid == 'hexnumber':
+                        tid = 'number'
+                        value = int(match_text, base=16)
                     elif tid == 'eol' or tid == 'eol_cont':
                         lineno += 1
                         line_start = loc
@@ -368,7 +376,8 @@ class ArgumentNode:
 
     def set_kwarg(self, name, value):
         if name in self.kwargs:
-            mlog.warning('Keyword argument "%s" defined multiple times. This will be a an error in future Meson releases.' % name)
+            mlog.warning('Keyword argument "{}" defined multiple times.'.format(name), location=self)
+            mlog.warning('This will be an error in future Meson releases.')
         self.kwargs[name] = value
 
     def num_args(self):
@@ -475,12 +484,18 @@ class Parser:
     def e2(self):
         left = self.e3()
         while self.accept('or'):
+            if isinstance(left, EmptyNode):
+                raise ParseException('Invalid or clause.',
+                                     self.getline(), left.lineno, left.colno)
             left = OrNode(left, self.e3())
         return left
 
     def e3(self):
         left = self.e4()
         while self.accept('and'):
+            if isinstance(left, EmptyNode):
+                raise ParseException('Invalid and clause.',
+                                     self.getline(), left.lineno, left.colno)
             left = AndNode(left, self.e4())
         return left
 
@@ -633,6 +648,7 @@ class Parser:
     def ifblock(self):
         condition = self.statement()
         clause = IfClauseNode(condition.lineno, condition.colno)
+        self.expect('eol')
         block = self.codeblock()
         clause.ifs.append(IfNode(clause.lineno, clause.colno, condition, block))
         self.elseifblock(clause)
