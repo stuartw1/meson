@@ -70,6 +70,7 @@ syn keyword mesonBuiltin
   \ add_project_link_arguments
   \ add_test_setup
   \ benchmark
+  \ both_libraries
   \ build_machine
   \ build_target
   \ configuration_data
@@ -77,6 +78,7 @@ syn keyword mesonBuiltin
   \ custom_target
   \ declare_dependency
   \ dependency
+  \ disabler
   \ environment
   \ error
   \ executable

@@ -24,69 +24,68 @@ from .mesonlib import File, MesonException, listify, extract_as_list
 from .mesonlib import typeslistify, stringlistify, classify_unity_sources
 from .mesonlib import get_filenames_templates_dict, substitute_values
 from .mesonlib import for_windows, for_darwin, for_cygwin, for_android, has_path_sep
-from .compilers import is_object, clike_langs, sort_clike, lang_suffixes
+from .compilers import is_object, clink_langs, sort_clink, lang_suffixes
+from .interpreterbase import FeatureNew
 
-known_basic_kwargs = {'install': True,
-                      'c_pch': True,
-                      'cpp_pch': True,
-                      'c_args': True,
-                      'objc_args': True,
-                      'objcpp_args': True,
-                      'cpp_args': True,
-                      'cs_args': True,
-                      'vala_args': True,
-                      'fortran_args': True,
-                      'd_args': True,
-                      'd_import_dirs': True,
-                      'd_unittest': True,
-                      'd_module_versions': True,
-                      'java_args': True,
-                      'rust_args': True,
-                      'link_args': True,
-                      'link_depends': True,
-                      'link_with': True,
-                      'link_whole': True,
-                      'implicit_include_directories': True,
-                      'include_directories': True,
-                      'dependencies': True,
-                      'install_dir': True,
-                      'main_class': True,
-                      'name_suffix': True,
-                      'gui_app': True,
-                      'extra_files': True,
-                      'install_rpath': True,
-                      'build_rpath': True,
-                      'resources': True,
-                      'sources': True,
-                      'objects': True,
-                      'native': True,
-                      'build_by_default': True,
-                      'override_options': True,
-                      }
+pch_kwargs = set(['c_pch', 'cpp_pch'])
 
-# These contain kwargs supported by both static and shared libraries. These are
-# combined here because a library() call might be shared_library() or
-# static_library() at runtime based on the configuration.
-# FIXME: Find a way to pass that info down here so we can have proper target
-# kwargs checking when specifically using shared_library() or static_library().
-known_lib_kwargs = known_basic_kwargs.copy()
-known_lib_kwargs.update({'version': True, # Only for shared libs
-                         'soversion': True, # Only for shared libs
-                         'name_prefix': True,
-                         'vs_module_defs': True, # Only for shared libs
-                         'vala_header': True,
-                         'vala_vapi': True,
-                         'vala_gir': True,
-                         'pic': True, # Only for static libs
-                         'rust_crate_type': True, # Only for Rust libs
-                         })
+lang_arg_kwargs = set([
+    'c_args',
+    'cpp_args',
+    'd_args',
+    'd_import_dirs',
+    'd_unittest',
+    'd_module_versions',
+    'fortran_args',
+    'java_args',
+    'objc_args',
+    'objcpp_args',
+    'rust_args',
+    'vala_args',
+    'cs_args',
+])
 
-known_exe_kwargs = known_basic_kwargs.copy()
-known_exe_kwargs.update({'implib': True,
-                         'export_dynamic': True
-                         })
-known_jar_kwargs = known_basic_kwargs.copy()
-known_jar_kwargs.update({'target_type': 'jar'})
+vala_kwargs = set(['vala_header', 'vala_gir', 'vala_vapi'])
+rust_kwargs = set(['rust_crate_type'])
+cs_kwargs = set(['resources', 'cs_args'])
+
+buildtarget_kwargs = set([
+    'build_by_default',
+    'build_rpath',
+    'dependencies',
+    'extra_files',
+    'gui_app',
+    'link_with',
+    'link_whole',
+    'link_args',
+    'link_depends',
+    'implicit_include_directories',
+    'include_directories',
+    'install',
+    'install_rpath',
+    'install_dir',
+    'install_mode',
+    'name_prefix',
+    'name_suffix',
+    'native',
+    'objects',
+    'override_options',
+    'sources',
+])
+
+known_build_target_kwargs = (
+    buildtarget_kwargs |
+    lang_arg_kwargs |
+    pch_kwargs |
+    vala_kwargs |
+    rust_kwargs |
+    cs_kwargs)
+
+known_exe_kwargs = known_build_target_kwargs | {'implib', 'export_dynamic'}
+known_shlib_kwargs = known_build_target_kwargs | {'version', 'soversion', 'vs_module_defs'}
+known_shmod_kwargs = known_build_target_kwargs
+known_stlib_kwargs = known_build_target_kwargs | {'pic'}
+known_jar_kwargs = known_exe_kwargs | {'main_class'}
 
 class InvalidArguments(MesonException):
     pass
@@ -124,6 +123,8 @@ class Build:
         self.dep_manifest = {}
         self.cross_stdlibs = {}
         self.test_setups = {}
+        self.find_overrides = {}
+        self.searched_programs = set() # The list of all programs that have been searched for.
 
     def add_compiler(self, compiler):
         if self.static_linker is None and compiler.needs_static_linker():
@@ -214,39 +215,49 @@ class ExtractedObjects:
     '''
     Holds a list of sources for which the objects must be extracted
     '''
-    def __init__(self, target, srclist, is_unity):
+    def __init__(self, target, srclist=[], genlist=[], objlist=[], recursive=True):
         self.target = target
+        self.recursive = recursive
         self.srclist = srclist
-        if is_unity:
+        self.genlist = genlist
+        self.objlist = objlist
+        if self.target.is_unity:
             self.check_unity_compatible()
 
     def __repr__(self):
         r = '<{0} {1!r}: {2}>'
         return r.format(self.__class__.__name__, self.target.name, self.srclist)
 
+    def classify_all_sources(self, sources, generated_sources):
+        # Merge sources and generated sources
+        sources = list(sources)
+        for gensrc in generated_sources:
+            for s in gensrc.get_outputs():
+                # We cannot know the path where this source will be generated,
+                # but all we need here is the file extension to determine the
+                # compiler.
+                sources.append(s)
+
+        # Filter out headers and all non-source files
+        sources = [s for s in sources if environment.is_source(s) and not environment.is_header(s)]
+
+        return classify_unity_sources(self.target.compilers.values(), sources)
+
     def check_unity_compatible(self):
         # Figure out if the extracted object list is compatible with a Unity
         # build. When we're doing a Unified build, we go through the sources,
         # and create a single source file from each subset of the sources that
         # can be compiled with a specific compiler. Then we create one object
-        # from each unified source file.
-        # If the list of sources for which we want objects is the same as the
-        # list of sources that go into each unified build, we're good.
-        srclist_set = set(self.srclist)
-        # Objects for all the sources are required, so we're compatible
-        if srclist_set == set(self.target.sources):
-            return
-        # Check if the srclist is a subset (of the target's sources) that is
-        # going to form a unified source file and a single object
-        compsrcs = classify_unity_sources(self.target.compilers.values(),
-                                          self.target.sources)
-        for srcs in compsrcs.values():
-            if srclist_set == set(srcs):
-                return
-        msg = 'Single object files can not be extracted in Unity builds. ' \
-              'You can only extract all the object files at once.'
-        raise MesonException(msg)
+        # from each unified source file. So for each compiler we can either
+        # extra all its sources or none.
+        cmpsrcs = self.classify_all_sources(self.target.sources, self.target.generated)
+        extracted_cmpsrcs = self.classify_all_sources(self.srclist, self.genlist)
 
+        for comp, srcs in extracted_cmpsrcs.items():
+            if set(srcs) != set(cmpsrcs[comp]):
+                raise MesonException('Single object files can not be extracted '
+                                     'in Unity builds. You can only extract all '
+                                     'the object files for each compiler at once.')
 
 class EnvironmentVariables:
     def __init__(self):
@@ -281,7 +292,7 @@ class EnvironmentVariables:
         return value
 
     def get_env(self, full_env):
-        env = {}
+        env = full_env.copy()
         for method, name, values, kwargs in self.envvars:
             env[name] = method(full_env, name, values, kwargs)
         return env
@@ -298,7 +309,7 @@ a hard error in the future.''' % name)
         self.subproject = subproject
         self.build_by_default = build_by_default
         self.install = False
-        self.build_always = False
+        self.build_always_stale = False
         self.option_overrides = {}
 
     def get_basename(self):
@@ -310,11 +321,16 @@ a hard error in the future.''' % name)
     def get_id(self):
         # This ID must also be a valid file name on all OSs.
         # It should also avoid shell metacharacters for obvious
-        # reasons.
-        base = self.name + self.type_suffix()
-        if self.subproject == '':
-            return base
-        return self.subproject + '@@' + base
+        # reasons. '@' is not used as often as '_' in source code names.
+        # In case of collisions consider using checksums.
+        # FIXME replace with assert when slash in names is prohibited
+        name_part = self.name.replace('/', '@').replace('\\', '@')
+        assert not has_path_sep(self.type_suffix())
+        myid = name_part + self.type_suffix()
+        if self.subdir:
+            subdir_part = self.subdir.replace('/', '@').replace('\\', '@')
+            myid = subdir_part + '@@' + myid
+        return myid
 
     def process_kwargs(self, kwargs):
         if 'build_by_default' in kwargs:
@@ -337,6 +353,8 @@ a hard error in the future.''' % name)
 
 
 class BuildTarget(Target):
+    known_kwargs = known_build_target_kwargs
+
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
         super().__init__(name, subdir, subproject, True)
         self.is_cross = is_cross
@@ -396,7 +414,7 @@ class BuildTarget(Target):
     def check_unknown_kwargs(self, kwargs):
         # Override this method in derived classes that have more
         # keywords.
-        self.check_unknown_kwargs_int(kwargs, known_basic_kwargs)
+        self.check_unknown_kwargs_int(kwargs, self.known_kwargs)
 
     def check_unknown_kwargs_int(self, kwargs, known_kwargs):
         unknowns = []
@@ -469,16 +487,16 @@ class BuildTarget(Target):
             extra = set()
             for t in itertools.chain(self.link_targets, self.link_whole_targets):
                 for name, compiler in t.compilers.items():
-                    if name in clike_langs:
+                    if name in clink_langs:
                         extra.add((name, compiler))
-            for name, compiler in sorted(extra, key=lambda p: sort_clike(p[0])):
+            for name, compiler in sorted(extra, key=lambda p: sort_clink(p[0])):
                 self.compilers[name] = compiler
 
         if not self.compilers:
             # No source files or parent targets, target consists of only object
-            # files of unknown origin. Just add the first clike compiler
+            # files of unknown origin. Just add the first clink compiler
             # that we have and hope that it can link these objects
-            for lang in clike_langs:
+            for lang in clink_langs:
                 if lang in compilers:
                     self.compilers[lang] = compilers[lang]
                     break
@@ -535,9 +553,9 @@ class BuildTarget(Target):
                         if lang not in self.compilers:
                             self.compilers[lang] = compiler
                         break
-            # Re-sort according to clike_langs
+            # Re-sort according to clink_langs
             self.compilers = OrderedDict(sorted(self.compilers.items(),
-                                                key=lambda t: sort_clike(t[0])))
+                                                key=lambda t: sort_clink(t[0])))
 
         # If all our sources are Vala, our target also needs the C compiler but
         # it won't get added above.
@@ -626,13 +644,15 @@ class BuildTarget(Target):
             if not isinstance(src, str):
                 raise MesonException('Object extraction arguments must be strings.')
             src = File(False, self.subdir, src)
+            # FIXME: It could be a generated source
             if src not in self.sources:
                 raise MesonException('Tried to extract unknown source %s.' % src)
             obj_src.append(src)
-        return ExtractedObjects(self, obj_src, self.is_unity)
+        return ExtractedObjects(self, obj_src)
 
-    def extract_all_objects(self):
-        return ExtractedObjects(self, self.sources, self.is_unity)
+    def extract_all_objects(self, recursive=True):
+        return ExtractedObjects(self, self.sources, self.generated, self.objects,
+                                recursive)
 
     def get_all_link_deps(self):
         return self.get_transitive_link_deps()
@@ -645,6 +665,9 @@ class BuildTarget(Target):
 
     def get_custom_install_dir(self):
         return self.install_dir
+
+    def get_custom_install_mode(self):
+        return self.install_mode
 
     def process_kwargs(self, kwargs, environment):
         super().process_kwargs(kwargs)
@@ -680,7 +703,7 @@ just like those detected with the dependency() function.''')
         for key, value in compiler_args.items():
             self.add_compiler_args(key, value)
 
-        if not isinstance(self, Executable):
+        if not isinstance(self, Executable) or 'export_dynamic' in kwargs:
             self.vala_header = kwargs.get('vala_header', self.name + '.h')
             self.vala_vapi = kwargs.get('vala_vapi', self.name + '.vapi')
             self.vala_gir = kwargs.get('vala_gir', None)
@@ -723,6 +746,7 @@ This will become a hard error in a future Meson release.''')
         # the list index of that item will not be installed
         self.install_dir = typeslistify(kwargs.get('install_dir', [None]),
                                         (str, bool))
+        self.install_mode = kwargs.get('install_mode', None)
         main_class = kwargs.get('main_class', '')
         if not isinstance(main_class, str):
             raise InvalidArguments('Main class must be a string')
@@ -771,6 +795,10 @@ This will become a hard error in a future Meson release.''')
             else:
                 if not isinstance(name_suffix, str):
                     raise InvalidArguments('name_suffix must be a string.')
+                if name_suffix == '':
+                    raise InvalidArguments('name_suffix should not be an empty string. '
+                                           'If you want meson to use the default behaviour '
+                                           'for each platform pass `[]` (empty array)')
                 self.suffix = name_suffix
                 self.name_suffix_set = True
         if isinstance(self, StaticLibrary):
@@ -799,12 +827,22 @@ This will become a hard error in a future Meson release.''')
     def get_extra_args(self, language):
         return self.extra_args.get(language, [])
 
-    def get_dependencies(self):
+    def get_dependencies(self, exclude=None, internal=True):
         transitive_deps = []
-        for t in itertools.chain(self.link_targets, self.link_whole_targets):
+        if exclude is None:
+            exclude = []
+        if internal:
+            link_targets = itertools.chain(self.link_targets, self.link_whole_targets)
+        else:
+            # We don't want the 'internal' libraries when generating the
+            # `Libs:` and `Libs.private:` lists in pkg-config files.
+            link_targets = self.link_targets
+        for t in link_targets:
+            if t in transitive_deps or t in exclude:
+                continue
             transitive_deps.append(t)
             if isinstance(t, StaticLibrary):
-                transitive_deps += t.get_dependencies()
+                transitive_deps += t.get_dependencies(transitive_deps + exclude, internal)
         return transitive_deps
 
     def get_source_subdir(self):
@@ -847,13 +885,14 @@ This will become a hard error in a future Meson release.''')
                     self.link(l)
                 for l in dep.whole_libraries:
                     self.link_whole(l)
-                # Those parts that are external.
-                extpart = dependencies.InternalDependency('undefined',
-                                                          [],
-                                                          dep.compile_args,
-                                                          dep.link_args,
-                                                          [], [], [], [])
-                self.external_deps.append(extpart)
+                if dep.compile_args or dep.link_args:
+                    # Those parts that are external.
+                    extpart = dependencies.InternalDependency('undefined',
+                                                              [],
+                                                              dep.compile_args,
+                                                              dep.link_args,
+                                                              [], [], [], [])
+                    self.external_deps.append(extpart)
                 # Deps of deps.
                 self.add_deps(dep.ext_deps)
             elif isinstance(dep, dependencies.Dependency):
@@ -953,13 +992,15 @@ You probably should put it in link_with instead.''')
         Sometimes you want to link to a C++ library that exports C API, which
         means the linker must link in the C++ stdlib, and we must use a C++
         compiler for linking. The same is also applicable for objc/objc++, etc,
-        so we can keep using clike_langs for the priority order.
+        so we can keep using clink_langs for the priority order.
 
         See: https://github.com/mesonbuild/meson/issues/1653
         '''
         langs = []
         # Check if any of the external libraries were written in this language
         for dep in self.external_deps:
+            if dep.language is None:
+                continue
             if dep.language not in langs:
                 langs.append(dep.language)
         # Check if any of the internal libraries this target links to were
@@ -970,9 +1011,9 @@ You probably should put it in link_with instead.''')
                     langs.append(language)
         return langs
 
-    def get_clike_dynamic_linker(self):
+    def get_clink_dynamic_linker_and_stdlibs(self):
         '''
-        We use the order of languages in `clike_langs` to determine which
+        We use the order of languages in `clink_langs` to determine which
         linker to use in case the target has sources compiled with multiple
         compilers. All languages other than those in this list have their own
         linker.
@@ -989,15 +1030,22 @@ You probably should put it in link_with instead.''')
         # Languages used by dependencies
         dep_langs = self.get_langs_used_by_deps()
         # Pick a compiler based on the language priority-order
-        for l in clike_langs:
+        for l in clink_langs:
             if l in self.compilers or l in dep_langs:
                 try:
-                    return all_compilers[l]
+                    linker = all_compilers[l]
                 except KeyError:
                     raise MesonException(
                         'Could not get a dynamic linker for build target {!r}. '
                         'Requires a linker for language "{}", but that is not '
                         'a project language.'.format(self.name, l))
+                stdlib_args = []
+                added_languages = set()
+                for dl in itertools.chain(self.compilers, dep_langs):
+                    if dl != linker.language:
+                        stdlib_args += all_compilers[dl].language_stdlib_only_link_flags()
+                        added_languages.add(dl)
+                return linker, stdlib_args
 
         m = 'Could not get a dynamic linker for build target {!r}'
         raise AssertionError(m.format(self.name))
@@ -1020,7 +1068,8 @@ You probably should put it in link_with instead.''')
         2. If the target contains only objects, process_compilers guesses and
            picks the first compiler that smells right.
         '''
-        linker = self.get_clike_dynamic_linker()
+        linker, _ = self.get_clink_dynamic_linker_and_stdlibs()
+        # Mixing many languages with MSVC is not supported yet so ignore stdlibs.
         if linker and linker.get_id() == 'msvc':
             return True
         return False
@@ -1034,8 +1083,12 @@ You probably should put it in link_with instead.''')
         '''
         for link_target in self.link_targets:
             if isinstance(link_target, SharedModule):
-                mlog.warning('''target links against shared modules. This is not
-recommended as it can lead to undefined behaviour on some platforms''')
+                if for_darwin(self.is_cross, self.environment):
+                    raise MesonException('''target links against shared modules.
+This is not permitted on OSX''')
+                else:
+                    mlog.warning('''target links against shared modules. This is not
+recommended as it is not supported on some platforms''')
                 return
 
 class Generator:
@@ -1184,6 +1237,8 @@ class GeneratedList:
         return self.extra_args
 
 class Executable(BuildTarget):
+    known_kwargs = known_exe_kwargs
+
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
         # Unless overridden, executables have no suffix or prefix. Except on
@@ -1196,7 +1251,11 @@ class Executable(BuildTarget):
                     for_cygwin(is_cross, environment) or 'cs' in self.compilers):
                 self.suffix = 'exe'
             else:
-                self.suffix = ''
+                if ('c' in self.compilers and self.compilers['c'].get_id().startswith('arm') or
+                   'cpp' in self.compilers and self.compilers['cpp'].get_id().startswith('arm')):
+                    self.suffix = 'axf'
+                else:
+                    self.suffix = ''
         self.filename = self.name
         if self.suffix:
             self.filename += '.' + self.suffix
@@ -1239,9 +1298,6 @@ class Executable(BuildTarget):
     def type_suffix(self):
         return "@exe"
 
-    def check_unknown_kwargs(self, kwargs):
-        self.check_unknown_kwargs_int(kwargs, known_exe_kwargs)
-
     def get_import_filename(self):
         """
         The name of the import library that will be outputted by the compiler
@@ -1259,6 +1315,8 @@ class Executable(BuildTarget):
         return self.is_linkwithable
 
 class StaticLibrary(BuildTarget):
+    known_kwargs = known_stlib_kwargs
+
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
         if 'pic' not in kwargs and 'b_staticpic' in environment.coredata.base_options:
             kwargs['pic'] = environment.coredata.base_options['b_staticpic'].value
@@ -1297,9 +1355,6 @@ class StaticLibrary(BuildTarget):
     def type_suffix(self):
         return "@sta"
 
-    def check_unknown_kwargs(self, kwargs):
-        self.check_unknown_kwargs_int(kwargs, known_lib_kwargs)
-
     def process_kwargs(self, kwargs, environment):
         super().process_kwargs(kwargs, environment)
         if 'rust_crate_type' in kwargs:
@@ -1313,6 +1368,8 @@ class StaticLibrary(BuildTarget):
         return True
 
 class SharedLibrary(BuildTarget):
+    known_kwargs = known_shlib_kwargs
+
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
         self.soversion = None
         self.ltversion = None
@@ -1501,9 +1558,6 @@ class SharedLibrary(BuildTarget):
             else:
                 raise InvalidArguments('Invalid rust_crate_type "{0}": must be a string.'.format(rust_crate_type))
 
-    def check_unknown_kwargs(self, kwargs):
-        self.check_unknown_kwargs_int(kwargs, known_lib_kwargs)
-
     def get_import_filename(self):
         """
         The name of the import library that will be outputted by the compiler
@@ -1559,28 +1613,32 @@ class SharedLibrary(BuildTarget):
 # A shared library that is meant to be used with dlopen rather than linking
 # into something else.
 class SharedModule(SharedLibrary):
+    known_kwargs = known_shmod_kwargs
+
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
         if 'version' in kwargs:
             raise MesonException('Shared modules must not specify the version kwarg.')
         if 'soversion' in kwargs:
             raise MesonException('Shared modules must not specify the soversion kwarg.')
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
-        self.import_filename = None
 
 class CustomTarget(Target):
-    known_kwargs = {'input': True,
-                    'output': True,
-                    'command': True,
-                    'capture': False,
-                    'install': True,
-                    'install_dir': True,
-                    'build_always': True,
-                    'depends': True,
-                    'depend_files': True,
-                    'depfile': True,
-                    'build_by_default': True,
-                    'override_options': True,
-                    }
+    known_kwargs = set([
+        'input',
+        'output',
+        'command',
+        'capture',
+        'install',
+        'install_dir',
+        'install_mode',
+        'build_always',
+        'build_always_stale',
+        'depends',
+        'depend_files',
+        'depfile',
+        'build_by_default',
+        'override_options',
+    ])
 
     def __init__(self, name, subdir, subproject, kwargs, absolute_paths=False):
         super().__init__(name, subdir, subproject, False)
@@ -1651,7 +1709,11 @@ class CustomTarget(Target):
                 if not c.found():
                     m = 'Tried to use not-found external program {!r} in "command"'
                     raise InvalidArguments(m.format(c.name))
-                self.depend_files.append(File.from_absolute_file(c.get_path()))
+                path = c.get_path()
+                if os.path.isabs(path):
+                    # Can only add a dependency on an external program which we
+                    # know the absolute path of
+                    self.depend_files.append(File.from_absolute_file(path))
                 final_cmd += c.get_command()
             elif isinstance(c, (BuildTarget, CustomTarget)):
                 self.dependencies.append(c)
@@ -1679,7 +1741,7 @@ class CustomTarget(Target):
             if i.strip() == '':
                 raise InvalidArguments('Output must not consist only of whitespace.')
             if has_path_sep(i):
-                raise InvalidArguments('Output must not contain a path segment.')
+                raise InvalidArguments('Output {!r} must not contain a path segment.'.format(i))
             if '@INPUT@' in i or '@INPUT0@' in i:
                 m = 'Output cannot contain @INPUT@ or @INPUT0@, did you ' \
                     'mean @PLAINNAME@ or @BASENAME@?'
@@ -1716,15 +1778,28 @@ class CustomTarget(Target):
                 if 'install_dir' not in kwargs:
                     raise InvalidArguments('"install_dir" must be specified '
                                            'when installing a target')
+
+                if isinstance(kwargs['install_dir'], list):
+                    FeatureNew('multiple install_dir for custom_target', '0.40.0').use(self.subproject)
                 # If an item in this list is False, the output corresponding to
                 # the list index of that item will not be installed
                 self.install_dir = typeslistify(kwargs['install_dir'], (str, bool))
+                self.install_mode = kwargs.get('install_mode', None)
         else:
             self.install = False
             self.install_dir = [None]
-        self.build_always = kwargs.get('build_always', False)
-        if not isinstance(self.build_always, bool):
-            raise InvalidArguments('Argument build_always must be a boolean.')
+            self.install_mode = None
+        if 'build_always' in kwargs and 'build_always_stale' in kwargs:
+            raise InvalidArguments('build_always and build_always_stale are mutually exclusive. Combine build_by_default and build_always_stale.')
+        elif 'build_always' in kwargs:
+            mlog.deprecation('build_always is deprecated. Combine build_by_default and build_always_stale instead.')
+            if 'build_by_default' not in kwargs:
+                self.build_by_default = kwargs['build_always']
+            self.build_always_stale = kwargs['build_always']
+        elif 'build_always_stale' in kwargs:
+            self.build_always_stale = kwargs['build_always_stale']
+        if not isinstance(self.build_always_stale, bool):
+            raise InvalidArguments('Argument build_always_stale must be a boolean.')
         extra_deps, depend_files = extract_as_list(kwargs, 'depends', 'depend_files', pop = False)
         for ed in extra_deps:
             while hasattr(ed, 'held_object'):
@@ -1748,6 +1823,9 @@ class CustomTarget(Target):
     def get_custom_install_dir(self):
         return self.install_dir
 
+    def get_custom_install_mode(self):
+        return self.install_mode
+
     def get_outputs(self):
         return self.outputs
 
@@ -1768,6 +1846,18 @@ class CustomTarget(Target):
 
     def get_generated_sources(self):
         return self.get_generated_lists()
+
+    def get_dep_outname(self, infilenames):
+        if self.depfile is None:
+            raise InvalidArguments('Tried to get depfile name for custom_target that does not have depfile defined.')
+        if len(infilenames):
+            plainname = os.path.basename(infilenames[0])
+            basename = os.path.splitext(plainname)[0]
+            return self.depfile.replace('@BASENAME@', basename).replace('@PLAINNAME@', plainname)
+        else:
+            if '@BASENAME@' in self.depfile or '@PLAINNAME@' in self.depfile:
+                raise InvalidArguments('Substitution in depfile for custom_target that does not have an input file.')
+            return self.depfile
 
     def type_suffix(self):
         return "@cus"
@@ -1814,11 +1904,16 @@ class RunTarget(Target):
         return "@run"
 
 class Jar(BuildTarget):
+    known_kwargs = known_jar_kwargs
+
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
         for s in self.sources:
             if not s.endswith('.java'):
                 raise InvalidArguments('Jar source %s is not a java file.' % s)
+        for t in self.link_targets:
+            if not isinstance(t, Jar):
+                raise InvalidArguments('Link target %s is not a jar target.' % t)
         self.filename = self.name + '.jar'
         self.outputs = [self.filename]
         self.java_args = kwargs.get('java_args', [])
@@ -1836,8 +1931,12 @@ class Jar(BuildTarget):
         # All jar targets are installable.
         pass
 
-    def check_unknown_kwargs(self, kwargs):
-        self.check_unknown_kwargs_int(kwargs, known_jar_kwargs)
+    def is_linkable_target(self):
+        return True
+
+    def get_classpath_args(self):
+        cp_paths = [os.path.join(l.get_subdir(), l.get_filename()) for l in self.link_targets]
+        return ['-cp', os.pathsep.join(cp_paths)]
 
 class CustomTargetIndex:
 
@@ -1860,7 +1959,6 @@ class CustomTargetIndex:
 
     def get_subdir(self):
         return self.target.get_subdir()
-
 
 class ConfigureFile:
 
@@ -1948,7 +2046,7 @@ def get_sources_string_names(sources):
             s = s.held_object
         if isinstance(s, str):
             names.append(s)
-        elif isinstance(s, (BuildTarget, CustomTarget, GeneratedList)):
+        elif isinstance(s, (BuildTarget, CustomTarget, CustomTargetIndex, GeneratedList)):
             names += s.get_outputs()
         elif isinstance(s, File):
             names.append(s.fname)

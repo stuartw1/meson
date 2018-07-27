@@ -19,7 +19,10 @@ option('combo_opt', type : 'combo', choices : ['one', 'two', 'three'], value : '
 option('integer_opt', type : 'integer', min : 0, max : 5, value : 3) # Since 0.45.0
 option('free_array_opt', type : 'array', value : ['one', 'two'])
 option('array_opt', type : 'array', choices : ['one', 'two', 'three'], value : ['one', 'two'])
+option('some_feature', type : 'feature', value : 'enabled')
 ```
+
+## Build option types
 
 All types allow a `description` value to be set describing the option,
 if no option is set then the name of the option will be used instead.
@@ -40,7 +43,7 @@ A combo allows any one of the values in the `choices` parameter to be
 selected.  If no default value is set then the first value will be the
 default.
 
-## Integers
+### Integers
 
 An integer option contains a single integer with optional upper and
 lower values that are specified with the `min` and `max` keyword
@@ -58,8 +61,46 @@ empty. The `value` parameter specifies the default value of the option
 and if it is unset then the values of `choices` will be used as the
 default.
 
+As of 0.47.0 -Dopt= and -Dopt=[] both pass an empty list, before this -Dopt=
+would pass a list with an empty string.
+
 This type is available since version 0.44.0
 
+### Features
+
+A `feature` option has three states: `enabled`, `disabled` or `auto`. It is intended
+to be passed as value for the `required` keyword argument of most functions.
+Currently supported in
+[`dependency()`](Reference-manual.md#dependency),
+[`find_library()`](Reference-manual.md#compiler-object),
+[`find_program()`](Reference-manual.md#find_program) and
+[`add_languages()`](Reference-manual.md#add_languages) functions.
+
+- `enabled` is the same as passing `required : true`.
+- `auto` is the same as passing `required : false`.
+- `disabled` do not look for the dependency and always return 'not-found'.
+
+When getting the value of this type of option using `get_option()`, a special
+object is returned instead of the string representation of the option's value.
+That object has three methods returning boolean and taking no argument:
+`enabled()`, `disabled()`, and `auto()`.
+
+```meson
+d = dependency('foo', required : get_option('myfeature'))
+if d.found()
+  app = executable('myapp', 'main.c', dependencies : [d])
+endif
+```
+
+If the value of a `feature` option is set to `auto`, that value is overriden by
+the global `auto_features` option (which defaults to `auto`). This is intended
+to be used by packagers who want to have full control on which dependencies are
+required and which are disabled, and not rely on build-deps being installed
+(at the right version) to get a feature enabled. They could set
+`auto_features=enabled` to enable all features and disable explicitly only the
+few they don't want, if any.
+
+This type is available since version 0.47.0
 
 ## Using build options
 
@@ -135,3 +176,29 @@ project which also has an option called `some_option`, then calling
 `get_option` returns the value of the superproject. If the value of
 `yield` is `false`, `get_option` returns the value of the subproject's
 option.
+
+
+## Built-in build options
+
+There are a number of built-in options. To get the current list execute `meson
+configure` in the build directory.
+
+### Visual Studio
+
+#### Startup project
+
+The backend\_startup\_project option can be set to define the default project
+that will be executed with the "Start debugging F5" action in visual studio.
+It should be the same name as an executable target name.
+
+```meson
+project('my_project', 'c', default_options: ['backend_startup_project=my_exe'])
+executable('my_exe', ...)
+```
+
+### Ninja
+
+#### Max links
+
+The backend\_max\_links can be set to limit the number of processes that ninja
+will use to link.

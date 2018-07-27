@@ -1,4 +1,4 @@
-# Copyright 2013-2017 The Meson development team
+# Copyright 2013-2018 The Meson development team
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,11 @@
 # This file contains the detection logic for external dependencies.
 # Custom logic for several other packages are in separate files.
 
+import copy
 import os
 import re
 import stat
+import json
 import shlex
 import shutil
 import textwrap
@@ -26,10 +28,9 @@ from pathlib import PurePath
 
 from .. import mlog
 from .. import mesonlib
-from ..mesonlib import (
-    MesonException, Popen_safe, version_compare_many, version_compare, listify
-)
-
+from ..compilers import clib_langs
+from ..mesonlib import MesonException, OrderedSet
+from ..mesonlib import Popen_safe, version_compare_many, version_compare, listify
 
 # These must be defined in this file to avoid cyclical references.
 packages = {}
@@ -58,6 +59,8 @@ class DependencyMethods(Enum):
     CUPSCONFIG = 'cups-config'
     PCAPCONFIG = 'pcap-config'
     LIBWMFCONFIG = 'libwmf-config'
+    # Misc
+    DUB = 'dub'
 
 
 class Dependency:
@@ -100,6 +103,9 @@ class Dependency:
         self.type_name = type_name
         self.compile_args = []
         self.link_args = []
+        # Raw -L and -l arguments without manual library searching
+        # If None, self.link_args will be used
+        self.raw_link_args = None
         self.sources = []
         self.methods = self._process_method_kw(kwargs)
 
@@ -110,7 +116,9 @@ class Dependency:
     def get_compile_args(self):
         return self.compile_args
 
-    def get_link_args(self):
+    def get_link_args(self, raw=False):
+        if raw and self.raw_link_args is not None:
+            return self.raw_link_args
         return self.link_args
 
     def found(self):
@@ -134,6 +142,9 @@ class Dependency:
     def get_exe_args(self, compiler):
         return []
 
+    def need_openmp(self):
+        return False
+
     def need_threads(self):
         return False
 
@@ -142,6 +153,23 @@ class Dependency:
 
     def get_configtool_variable(self, variable_name):
         raise DependencyException('{!r} is not a config-tool dependency'.format(self.name))
+
+    def get_partial_dependency(self, *, compile_args=False, link_args=False,
+                               links=False, includes=False, sources=False):
+        """Create a new dependency that contains part of the parent dependency.
+
+        The following options can be inherited:
+            links -- all link_with arguemnts
+            includes -- all include_directory and -I/-isystem calls
+            sources -- any source, header, or generated sources
+            compile_args -- any compile args
+            link_args -- any link args
+
+        Additionally the new dependency will have the version parameter of it's
+        parent (if any) and the requested values of any dependencies will be
+        added as well.
+        """
+        RuntimeError('Unreachable code in partial_dependency called')
 
 
 class InternalDependency(Dependency):
@@ -165,6 +193,21 @@ class InternalDependency(Dependency):
         raise DependencyException('Method "get_configtool_variable()" is '
                                   'invalid for an internal dependency')
 
+    def get_partial_dependency(self, *, compile_args=False, link_args=False,
+                               links=False, includes=False, sources=False):
+        compile_args = self.compile_args.copy() if compile_args else []
+        link_args = self.link_args.copy() if link_args else []
+        libraries = self.libraries.copy() if links else []
+        whole_libraries = self.whole_libraries.copy() if links else []
+        sources = self.sources.copy() if sources else []
+        includes = self.include_directories.copy() if includes else []
+        deps = [d.get_partial_dependency(
+            compile_args=compile_args, link_args=link_args, links=links,
+            includes=includes, sources=sources) for d in self.ext_deps]
+        return InternalDependency(
+            self.version, includes, compile_args, link_args, libraries,
+            whole_libraries, sources, deps)
+
 
 class ExternalDependency(Dependency):
     def __init__(self, type_name, environment, language, kwargs):
@@ -184,6 +227,7 @@ class ExternalDependency(Dependency):
             self.want_cross = not kwargs['native']
         else:
             self.want_cross = self.env.is_cross_build()
+        self.clib_compiler = None
         # Set the compiler that will be used by this dependency
         # This is only used for configuration checks
         if self.want_cross:
@@ -194,19 +238,40 @@ class ExternalDependency(Dependency):
         # else try to pick something that looks usable.
         if self.language:
             if self.language not in compilers:
-                m = self.name.capitalize() + ' requires a {} compiler'
+                m = self.name.capitalize() + ' requires a {0} compiler, but ' \
+                    '{0} is not in the list of project languages'
                 raise DependencyException(m.format(self.language.capitalize()))
-            self.compiler = compilers[self.language]
+            self.clib_compiler = compilers[self.language]
         else:
-            # Try to find a compiler that this dependency can use for compiler
-            # checks. It's ok if we don't find one.
-            for lang in ('c', 'cpp', 'objc', 'objcpp', 'fortran', 'd'):
-                self.compiler = compilers.get(lang, None)
-                if self.compiler:
+            # Try to find a compiler that can find C libraries for
+            # running compiler.find_library()
+            for lang in clib_langs:
+                self.clib_compiler = compilers.get(lang, None)
+                if self.clib_compiler:
                     break
 
     def get_compiler(self):
-        return self.compiler
+        return self.clib_compiler
+
+    def get_partial_dependency(self, *, compile_args=False, link_args=False,
+                               links=False, includes=False, sources=False):
+        new = copy.copy(self)
+        if not compile_args:
+            new.compile_args = []
+        if not link_args:
+            new.link_args = []
+        if not sources:
+            new.sources = []
+
+        return new
+
+
+class NotFoundDependency(Dependency):
+    def __init__(self, environment):
+        super().__init__('not-found', {})
+        self.env = environment
+        self.name = 'not-found'
+        self.is_found = False
 
 
 class ConfigToolDependency(ExternalDependency):
@@ -362,6 +427,8 @@ class PkgConfigDependency(ExternalDependency):
     # The class's copy of the pkg-config path. Avoids having to search for it
     # multiple times in the same Meson invocation.
     class_pkgbin = None
+    # We cache all pkg-config subprocess invocations to avoid redundant calls
+    pkgbin_cache = {}
 
     def __init__(self, name, environment, kwargs, language=None):
         super().__init__('pkgconfig', environment, language, kwargs)
@@ -378,8 +445,7 @@ class PkgConfigDependency(ExternalDependency):
                 if self.required:
                     raise DependencyException('Pkg-config binary missing from cross file')
             else:
-                pkgname = environment.cross_info.config['binaries']['pkgconfig']
-                potential_pkgbin = ExternalProgram(pkgname, silent=True)
+                potential_pkgbin = ExternalProgram.from_cross_info(environment.cross_info, 'pkgconfig')
                 if potential_pkgbin.found():
                     self.pkgbin = potential_pkgbin
                     PkgConfigDependency.class_pkgbin = self.pkgbin
@@ -459,11 +525,25 @@ class PkgConfigDependency(ExternalDependency):
         return s.format(self.__class__.__name__, self.name, self.is_found,
                         self.version_reqs)
 
+    def _call_pkgbin_real(self, args, env):
+        cmd = self.pkgbin.get_command() + args
+        p, out = Popen_safe(cmd, env=env)[0:2]
+        rc, out = p.returncode, out.strip()
+        call = ' '.join(cmd)
+        mlog.debug("Called `{}` -> {}\n{}".format(call, rc, out))
+        return rc, out
+
     def _call_pkgbin(self, args, env=None):
-        if not env:
+        if env is None:
+            fenv = env
             env = os.environ
-        p, out = Popen_safe(self.pkgbin.get_command() + args, env=env)[0:2]
-        return p.returncode, out.strip()
+        else:
+            fenv = frozenset(env.items())
+        targs = tuple(args)
+        cache = PkgConfigDependency.pkgbin_cache
+        if (self.pkgbin, targs, fenv) not in cache:
+            cache[(self.pkgbin, targs, fenv)] = self._call_pkgbin_real(args, env)
+        return cache[(self.pkgbin, targs, fenv)]
 
     def _convert_mingw_paths(self, args):
         '''
@@ -511,38 +591,76 @@ class PkgConfigDependency(ExternalDependency):
         libcmd = [self.name, '--libs']
         if self.static:
             libcmd.append('--static')
-            # Force pkg-config to output -L fields even if they are system
-            # paths so we can do manual searching with cc.find_library() later.
-            env = os.environ.copy()
-            env['PKG_CONFIG_ALLOW_SYSTEM_LIBS'] = '1'
+        # Force pkg-config to output -L fields even if they are system
+        # paths so we can do manual searching with cc.find_library() later.
+        env = os.environ.copy()
+        env['PKG_CONFIG_ALLOW_SYSTEM_LIBS'] = '1'
         ret, out = self._call_pkgbin(libcmd, env=env)
         if ret != 0:
             raise DependencyException('Could not generate libs for %s:\n\n%s' %
                                       (self.name, out))
-        self.link_args = []
-        libpaths = []
-        static_libs_notfound = []
+        # Also get the 'raw' output without -Lfoo system paths for usage when
+        # a library can't be found, and also in gnome.generate_gir
+        # + gnome.gtkdoc which need -L -l arguments.
+        ret, out_raw = self._call_pkgbin(libcmd)
+        if ret != 0:
+            raise DependencyException('Could not generate libs for %s:\n\n%s' %
+                                      (self.name, out_raw))
+        link_args = []
+        raw_link_args = []
+        # Library paths should be safe to de-dup
+        libpaths = OrderedSet()
+        raw_libpaths = OrderedSet()
+        # Track -lfoo libraries to avoid duplicate work
+        libs_found = OrderedSet()
+        # Track not-found libraries to know whether to add library paths
+        libs_notfound = []
+        libtype = 'static' if self.static else 'default'
+        # We always look for the file ourselves instead of depending on the
+        # compiler to find it with -lfoo or foo.lib (if possible) because:
+        # 1. We want to be able to select static or shared
+        # 2. We need the full path of the library to calculate RPATH values
+        #
+        # Libraries that are provided by the toolchain or are not found by
+        # find_library() will be added with -L -l pairs.
         for lib in self._convert_mingw_paths(shlex.split(out)):
-            # If we want to use only static libraries, we have to look for the
-            # file ourselves instead of depending on the compiler to find it
-            # with -lfoo or foo.lib. However, we can only do this if we already
-            # have some library paths gathered.
-            if self.static:
-                if lib.startswith('-L'):
-                    libpaths.append(lib[2:])
+            if lib.startswith(('-L-l', '-L-L')):
+                # These are D language arguments, add them as-is
+                pass
+            elif lib.startswith('-L'):
+                libpaths.add(lib[2:])
+                continue
+            elif lib.startswith('-l'):
+                # Don't resolve the same -lfoo argument again
+                if lib in libs_found:
                     continue
-                # FIXME: try to handle .la files in static mode too?
-                elif lib.startswith('-l'):
-                    args = self.compiler.find_library(lib[2:], self.env, libpaths, libtype='static')
-                    if not args or len(args) < 1:
-                        if lib in static_libs_notfound:
-                            continue
+                if self.clib_compiler:
+                    args = self.clib_compiler.find_library(lib[2:], self.env,
+                                                           list(libpaths), libtype)
+                # If the project only uses a non-clib language such as D, Rust,
+                # C#, Python, etc, all we can do is limp along by adding the
+                # arguments as-is and then adding the libpaths at the end.
+                else:
+                    args = None
+                if args:
+                    libs_found.add(lib)
+                    # Replace -l arg with full path to library if available
+                    # else, library is provided by the compiler and can't be resolved
+                    if not args[0].startswith('-l'):
+                        lib = args[0]
+                else:
+                    # Library wasn't found, maybe we're looking in the wrong
+                    # places or the library will be provided with LDFLAGS or
+                    # LIBRARY_PATH from the environment (on macOS), and many
+                    # other edge cases that we can't account for.
+                    #
+                    # Add all -L paths and use it as -lfoo
+                    if lib in libs_notfound:
+                        continue
+                    if self.static:
                         mlog.warning('Static library {!r} not found for dependency {!r}, may '
                                      'not be statically linked'.format(lib[2:], self.name))
-                        static_libs_notfound.append(lib)
-                    else:
-                        # Replace -l arg with full path to static library
-                        lib = args[0]
+                    libs_notfound.append(lib)
             elif lib.endswith(".la"):
                 shared_libname = self.extract_libtool_shlib(lib)
                 shared_lib = os.path.join(os.path.dirname(lib), shared_libname)
@@ -553,14 +671,24 @@ class PkgConfigDependency(ExternalDependency):
                     raise DependencyException('Got a libtools specific "%s" dependencies'
                                               'but we could not compute the actual shared'
                                               'library path' % lib)
-                lib = shared_lib
                 self.is_libtool = True
-            self.link_args.append(lib)
+                lib = shared_lib
+                if lib in link_args:
+                    continue
+            link_args.append(lib)
+        # Also store the raw link arguments, and store raw_libpaths
+        for lib in self._convert_mingw_paths(shlex.split(out_raw)):
+            if lib.startswith('-L') and not lib.startswith(('-L-l', '-L-L')):
+                raw_libpaths.add(lib[2:])
+            raw_link_args.append(lib)
+        # Set everything
+        self.link_args = link_args
+        self.raw_link_args = raw_link_args
         # Add all -Lbar args if we have -lfoo args in link_args
-        if static_libs_notfound:
+        if libs_notfound:
             # Order of -L flags doesn't matter with ld, but it might with other
             # linkers such as MSVC, so prepend them.
-            self.link_args = ['-L' + lp for lp in libpaths] + self.link_args
+            self.link_args = ['-L' + lp for lp in raw_libpaths] + self.link_args
 
     def get_pkgconfig_variable(self, variable_name, kwargs):
         options = ['--variable=' + variable_name, self.name]
@@ -664,6 +792,162 @@ class PkgConfigDependency(ExternalDependency):
         # a path rather than the raw dlname
         return os.path.basename(dlname)
 
+class DubDependency(ExternalDependency):
+    class_dubbin = None
+
+    def __init__(self, name, environment, kwargs):
+        super().__init__('dub', environment, 'd', kwargs)
+        self.name = name
+        self.compiler = super().get_compiler()
+
+        if 'required' in kwargs:
+            self.required = kwargs.get('required')
+
+        if DubDependency.class_dubbin is None:
+            self.dubbin = self.check_dub()
+            DubDependency.class_dubbin = self.dubbin
+        else:
+            self.dubbin = DubDependency.class_dubbin
+
+        if not self.dubbin:
+            if self.required:
+                raise DependencyException('DUB not found.')
+            self.is_found = False
+            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+            return
+
+        mlog.debug('Determining dependency {!r} with DUB executable '
+                   '{!r}'.format(name, self.dubbin.get_path()))
+
+        # Ask dub for the package
+        ret, res = self._call_dubbin(['describe', name])
+
+        if ret != 0:
+            if self.required:
+                raise DependencyException('Dependency {!r} not found'.format(name))
+            self.is_found = False
+            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+            return
+
+        j = json.loads(res)
+        comp = self.compiler.get_id().replace('llvm', 'ldc').replace('gcc', 'gdc')
+        for package in j['packages']:
+            if package['name'] == name:
+                if j['compiler'] != comp:
+                    msg = ['Dependency', mlog.bold(name), 'found but it was compiled with']
+                    msg += [mlog.bold(j['compiler']), 'and we are using', mlog.bold(comp)]
+                    mlog.error(*msg)
+                    if self.required:
+                        raise DependencyException('Dependency {!r} not found'.format(name))
+                    self.is_found = False
+                    mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+                    return
+
+                self.version = package['version']
+                self.pkg = package
+                break
+
+        # Check if package version meets the requirements
+        found_msg = ['Dependency', mlog.bold(name), 'found:']
+        if self.version_reqs is None:
+            self.is_found = True
+        else:
+            if not isinstance(self.version_reqs, (str, list)):
+                raise DependencyException('Version argument must be string or list.')
+            if isinstance(self.version_reqs, str):
+                self.version_reqs = [self.version_reqs]
+            (self.is_found, not_found, found) = \
+                version_compare_many(self.version, self.version_reqs)
+            if not self.is_found:
+                found_msg += [mlog.red('NO'),
+                              'found {!r} but need:'.format(self.version),
+                              ', '.join(["'{}'".format(e) for e in not_found])]
+                if found:
+                    found_msg += ['; matched:',
+                                  ', '.join(["'{}'".format(e) for e in found])]
+                if not self.silent:
+                    mlog.log(*found_msg)
+                if self.required:
+                    m = 'Invalid version of dependency, need {!r} {!r} found {!r}.'
+                    raise DependencyException(m.format(name, not_found, self.version))
+                return
+
+        found_msg += [mlog.green('YES'), self.version]
+
+        if self.pkg['targetFileName'].endswith('.a'):
+            self.static = True
+
+        self.compile_args = []
+        for flag in self.pkg['dflags']:
+            self.link_args.append(flag)
+        for path in self.pkg['importPaths']:
+            self.compile_args.append('-I' + os.path.join(self.pkg['path'], path))
+
+        self.link_args = []
+        for flag in self.pkg['lflags']:
+            self.link_args.append(flag)
+
+        search_paths = []
+        search_paths.append(os.path.join(self.pkg['path'], self.pkg['targetPath']))
+        found, res = self.__search_paths(search_paths, self.pkg['targetFileName'])
+        for file in res:
+            self.link_args.append(file)
+
+        if not found:
+            if self.required:
+                raise DependencyException('Dependency {!r} not found'.format(name))
+                self.is_found = False
+                mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+                return
+
+        if not self.silent:
+            mlog.log(*found_msg)
+
+    def get_compiler(self):
+        return self.compiler
+
+    def __search_paths(self, search_paths, target_file):
+        found = False
+        res = []
+        if target_file == '':
+            return True, res
+        for path in search_paths:
+                if os.path.isdir(path):
+                    for file in os.listdir(path):
+                        if file == target_file:
+                            res.append(os.path.join(path, file))
+                            found = True
+        return found, res
+
+    def _call_dubbin(self, args, env=None):
+        p, out = Popen_safe(self.dubbin.get_command() + args, env=env)[0:2]
+        return p.returncode, out.strip()
+
+    def check_dub(self):
+        dubbin = ExternalProgram('dub', silent=True)
+        if dubbin.found():
+            try:
+                p, out = Popen_safe(dubbin.get_command() + ['--version'])[0:2]
+                if p.returncode != 0:
+                    mlog.warning('Found dub {!r} but couldn\'t run it'
+                                 ''.format(' '.join(dubbin.get_command())))
+                    # Set to False instead of None to signify that we've already
+                    # searched for it and not found it
+                    dubbin = False
+            except (FileNotFoundError, PermissionError):
+                dubbin = False
+        else:
+            dubbin = False
+        if dubbin:
+            mlog.log('Found DUB:', mlog.bold(dubbin.get_path()),
+                     '(%s)' % out.strip())
+        else:
+            mlog.log('Found DUB:', mlog.red('NO'))
+        return dubbin
+
+    @staticmethod
+    def get_methods():
+        return [DependencyMethods.PKGCONFIG, DependencyMethods.DUB]
 
 class ExternalProgram:
     windows_exts = ('exe', 'msc', 'com', 'bat', 'cmd')
@@ -674,6 +958,17 @@ class ExternalProgram:
             self.command = listify(command)
         else:
             self.command = self._search(name, search_dir)
+
+        # Set path to be the last item that is actually a file (in order to
+        # skip options in something like ['python', '-u', 'file.py']. If we
+        # can't find any components, default to the last component of the path.
+        self.path = self.command[-1]
+        for i in range(len(self.command) - 1, -1, -1):
+            arg = self.command[i]
+            if arg is not None and os.path.isfile(arg):
+                self.path = arg
+                break
+
         if not silent:
             if self.found():
                 mlog.log('Program', mlog.bold(name), 'found:', mlog.green('YES'),
@@ -684,6 +979,24 @@ class ExternalProgram:
     def __repr__(self):
         r = '<{} {!r} -> {!r}>'
         return r.format(self.__class__.__name__, self.name, self.command)
+
+    @staticmethod
+    def from_cross_info(cross_info, name):
+        if name not in cross_info.config['binaries']:
+            return NonExistingExternalProgram()
+        command = cross_info.config['binaries'][name]
+        if not isinstance(command, (list, str)):
+            raise MesonException('Invalid type {!r} for binary {!r} in cross file'
+                                 ''.format(command, name))
+        if isinstance(command, list):
+            if len(command) == 1:
+                command = command[0]
+        # We cannot do any searching if the command is a list, and we don't
+        # need to search if the path is an absolute path.
+        if isinstance(command, list) or os.path.isabs(command):
+            return ExternalProgram(name, command=command, silent=True)
+        # Search for the command using the specified string!
+        return ExternalProgram(command, silent=True)
 
     @staticmethod
     def _shebang_to_cmd(script):
@@ -821,11 +1134,7 @@ class ExternalProgram:
         return self.command[:]
 
     def get_path(self):
-        if self.found():
-            # Assume that the last element is the full path to the script or
-            # binary being run
-            return self.command[-1]
-        return None
+        return self.path
 
     def get_name(self):
         return self.name
@@ -844,7 +1153,7 @@ class NonExistingExternalProgram(ExternalProgram):
 
 class ExternalLibrary(ExternalDependency):
     def __init__(self, name, link_args, environment, language, silent=False):
-        super().__init__('external', environment, language, {})
+        super().__init__('library', environment, language, {})
         self.name = name
         self.language = language
         self.is_found = False
@@ -857,7 +1166,7 @@ class ExternalLibrary(ExternalDependency):
             else:
                 mlog.log('Library', mlog.bold(name), 'found:', mlog.red('NO'))
 
-    def get_link_args(self, language=None):
+    def get_link_args(self, language=None, **kwargs):
         '''
         External libraries detected using a compiler must only be used with
         compatible code. For instance, Vala libraries (.vapi files) cannot be
@@ -870,7 +1179,16 @@ class ExternalLibrary(ExternalDependency):
         if (self.language == 'vala' and language != 'vala') or \
            (language == 'vala' and self.language != 'vala'):
             return []
-        return self.link_args
+        return super().get_link_args(**kwargs)
+
+    def get_partial_dependency(self, *, compile_args=False, link_args=False,
+                               links=False, includes=False, sources=False):
+        # External library only has link_args, so ignore the rest of the
+        # interface.
+        new = copy.copy(self)
+        if not link_args:
+            new.link_args = []
+        return new
 
 
 class ExtraFrameworkDependency(ExternalDependency):
@@ -880,6 +1198,8 @@ class ExtraFrameworkDependency(ExternalDependency):
         self.required = required
         self.detect(name, path)
         if self.found():
+            self.compile_args = ['-I' + os.path.join(self.path, self.name, 'Headers')]
+            self.link_args = ['-F' + self.path, '-framework', self.name.split('.')[0]]
             mlog.log('Dependency', mlog.bold(name), 'found:', mlog.green('YES'),
                      os.path.join(self.path, self.name))
         else:
@@ -894,7 +1214,7 @@ class ExtraFrameworkDependency(ExternalDependency):
         for p in paths:
             for d in os.listdir(p):
                 fullpath = os.path.join(p, d)
-                if lname != d.split('.')[0].lower():
+                if lname != d.rsplit('.', 1)[0].lower():
                     continue
                 if not stat.S_ISDIR(os.stat(fullpath).st_mode):
                     continue
@@ -904,16 +1224,6 @@ class ExtraFrameworkDependency(ExternalDependency):
                 return
         if not self.found() and self.required:
             raise DependencyException('Framework dependency %s not found.' % (name, ))
-
-    def get_compile_args(self):
-        if self.found():
-            return ['-I' + os.path.join(self.path, self.name, 'Headers')]
-        return []
-
-    def get_link_args(self):
-        if self.found():
-            return ['-F' + self.path, '-framework', self.name.split('.')[0]]
-        return []
 
     def get_version(self):
         return 'unknown'
@@ -945,6 +1255,7 @@ def find_external_dependency(name, env, kwargs):
         raise DependencyException('Keyword "required" must be a boolean.')
     if not isinstance(kwargs.get('method', ''), str):
         raise DependencyException('Keyword "method" must be a string.')
+    method = kwargs.get('method', '')
     lname = name.lower()
     if lname in packages:
         if lname not in _packages_accept_language and 'language' in kwargs:
@@ -961,6 +1272,11 @@ def find_external_dependency(name, env, kwargs):
     if 'language' in kwargs:
         # Remove check when PkgConfigDependency supports language.
         raise DependencyException('%s dependency does not accept "language" keyword argument' % (lname, ))
+    if 'dub' == method:
+        dubdep = DubDependency(name, env, kwargs)
+        if required and not dubdep.found():
+            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+        return dubdep
     pkg_exc = None
     pkgdep = None
     try:

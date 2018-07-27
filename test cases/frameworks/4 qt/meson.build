@@ -33,7 +33,7 @@ foreach qt : ['qt4', 'qt5']
   nocoredep = dependency(qt, modules : ['Gui'], required : qt == 'qt5', method : get_option('method'))
 
   # If qt4 modules are found, test that. qt5 is required.
-  qtdep = dependency(qt, modules : qt_modules, required : qt == 'qt5', method : get_option('method'))
+  qtdep = dependency(qt, modules : qt_modules, private_headers: true, required : qt == 'qt5', method : get_option('method'))
   if qtdep.found()
     qtmodule = import(qt)
 
@@ -56,7 +56,7 @@ foreach qt : ['qt4', 'qt5']
     endif
 
     # Test that setting a unique name with a positional argument works
-    qtmodule.preprocess(qt + 'teststuff', qresources : ['stuff.qrc', 'stuff2.qrc'], method : get_option('method'))
+    qtmodule.preprocess(qt + 'teststuff', qresources : files(['stuff.qrc', 'stuff2.qrc']), method : get_option('method'))
 
     qexe = executable(qt + 'app',
       sources : ['main.cpp', 'mainWindow.cpp', # Sources that don't need preprocessing.

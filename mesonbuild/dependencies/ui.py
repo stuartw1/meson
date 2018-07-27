@@ -42,14 +42,14 @@ class GLDependency(ExternalDependency):
                 self.is_found = True
                 # FIXME: Use AppleFrameworks dependency
                 self.link_args = ['-framework', 'OpenGL']
-                # FIXME: Detect version using self.compiler
+                # FIXME: Detect version using self.clib_compiler
                 self.version = '1'
                 return
             if mesonlib.is_windows():
                 self.is_found = True
-                # FIXME: Use self.compiler.find_library()
+                # FIXME: Use self.clib_compiler.find_library()
                 self.link_args = ['-lopengl32']
-                # FIXME: Detect version using self.compiler
+                # FIXME: Detect version using self.clib_compiler
                 self.version = '1'
                 return
 
@@ -147,6 +147,47 @@ class GnuStepDependency(ConfigToolDependency):
         return version
 
 
+def _qt_get_private_includes(mod_inc_dir, module, mod_version):
+    # usually Qt5 puts private headers in /QT_INSTALL_HEADERS/module/VERSION/module/private
+    # except for at least QtWebkit and Enginio where the module version doesn't match Qt version
+    # as an example with Qt 5.10.1 on linux you would get:
+    # /usr/include/qt5/QtCore/5.10.1/QtCore/private/
+    # /usr/include/qt5/QtWidgets/5.10.1/QtWidgets/private/
+    # /usr/include/qt5/QtWebKit/5.212.0/QtWebKit/private/
+
+    # on Qt4 when available private folder is directly in module folder
+    # like /usr/include/QtCore/private/
+    if int(mod_version.split('.')[0]) < 5:
+        return tuple()
+
+    private_dir = os.path.join(mod_inc_dir, mod_version)
+    # fallback, let's try to find a directory with the latest version
+    if not os.path.exists(private_dir):
+        dirs = [filename for filename in os.listdir(mod_inc_dir)
+                if os.path.isdir(os.path.join(mod_inc_dir, filename))]
+        dirs.sort(reverse=True)
+
+        for dirname in dirs:
+            if len(dirname.split('.')) == 3:
+                private_dir = dirname
+                break
+    return (private_dir,
+            os.path.join(private_dir, 'Qt' + module))
+
+class QtExtraFrameworkDependency(ExtraFrameworkDependency):
+    def __init__(self, name, required, path, env, lang, kwargs):
+        super().__init__(name, required, path, env, lang, kwargs)
+        self.mod_name = name[2:]
+
+    def get_compile_args(self, with_private_headers=False, qt_version="0"):
+        if self.found():
+            mod_inc_dir = os.path.join(self.path, self.name, 'Headers')
+            args = ['-I' + mod_inc_dir]
+            if with_private_headers:
+                args += ['-I' + dirname for dirname in _qt_get_private_includes(mod_inc_dir, self.mod_name, qt_version)]
+            return args
+        return []
+
 class QtBaseDependency(ExternalDependency):
     def __init__(self, name, env, kwargs):
         super().__init__(name, env, 'cpp', kwargs)
@@ -158,9 +199,8 @@ class QtBaseDependency(ExternalDependency):
             self.qtpkgname = self.qtname
         self.root = '/usr'
         self.bindir = None
-        mods = kwargs.get('modules', [])
-        if isinstance(mods, str):
-            mods = [mods]
+        self.private_headers = kwargs.get('private_headers', False)
+        mods = extract_as_list(kwargs, 'modules')
         if not mods:
             raise DependencyException('No ' + self.qtname + '  modules specified.')
         type_text = 'cross' if env.is_cross_build() else 'native'
@@ -197,7 +237,7 @@ class QtBaseDependency(ExternalDependency):
 
     def compilers_detect(self):
         "Detect Qt (4 or 5) moc, uic, rcc in the specified bindir or in PATH"
-        if self.bindir:
+        if self.bindir or for_windows(self.env.is_cross_build(), self.env):
             moc = ExternalProgram(os.path.join(self.bindir, 'moc'), silent=True)
             uic = ExternalProgram(os.path.join(self.bindir, 'uic'), silent=True)
             rcc = ExternalProgram(os.path.join(self.bindir, 'rcc'), silent=True)
@@ -219,11 +259,16 @@ class QtBaseDependency(ExternalDependency):
         for module in mods:
             modules[module] = PkgConfigDependency(self.qtpkgname + module, self.env,
                                                   kwargs, language=self.language)
-        for m in modules.values():
+        for m_name, m in modules.items():
             if not m.found():
                 self.is_found = False
                 return
             self.compile_args += m.get_compile_args()
+            if self.private_headers:
+                qt_inc_dir = m.get_pkgconfig_variable('includedir', dict())
+                mod_private_inc = _qt_get_private_includes(os.path.join(qt_inc_dir, 'Qt' + m_name), m_name, m.version)
+                for dir in mod_private_inc:
+                    self.compile_args.append('-I' + dir)
             self.link_args += m.get_link_args()
         self.is_found = True
         self.version = m.version
@@ -245,10 +290,10 @@ class QtBaseDependency(ExternalDependency):
                 self.bindir = os.path.join(prefix, 'bin')
 
     def _find_qmake(self, qmake):
-        # Even when cross-compiling, if we don't get a cross-info qmake, we
+        # Even when cross-compiling, if a cross-info qmake is not specified, we
         # fallback to using the qmake in PATH because that's what we used to do
-        if self.env.is_cross_build():
-            qmake = self.env.cross_info.config['binaries'].get('qmake', qmake)
+        if self.env.is_cross_build() and 'qmake' in self.env.cross_info.config['binaries']:
+            return ExternalProgram.from_cross_info(self.env.cross_info, 'qmake')
         return ExternalProgram(qmake, silent=True)
 
     def _qmake_detect(self, mods, kwargs):
@@ -296,8 +341,12 @@ class QtBaseDependency(ExternalDependency):
         for module in mods:
             mincdir = os.path.join(incdir, 'Qt' + module)
             self.compile_args.append('-I' + mincdir)
+            if self.private_headers:
+                priv_inc = self.get_private_includes(mincdir, module)
+                for dir in priv_inc:
+                    self.compile_args.append('-I' + dir)
             if for_windows(self.env.is_cross_build(), self.env):
-                is_debug = self.env.cmd_line_options.buildtype.startswith('debug')
+                is_debug = self.env.coredata.get_builtin_option('buildtype') == 'debug'
                 dbg = 'd' if is_debug else ''
                 if self.qtver == '4':
                     base_name = 'Qt' + module + dbg + '4'
@@ -327,11 +376,12 @@ class QtBaseDependency(ExternalDependency):
 
         for m in modules:
             fname = 'Qt' + m
-            fwdep = ExtraFrameworkDependency(fname, False, libdir, self.env,
-                                             self.language, fw_kwargs)
+            fwdep = QtExtraFrameworkDependency(fname, False, libdir, self.env,
+                                               self.language, fw_kwargs)
             self.compile_args.append('-F' + libdir)
             if fwdep.found():
-                self.compile_args += fwdep.get_compile_args()
+                self.compile_args += fwdep.get_compile_args(with_private_headers=self.private_headers,
+                                                            qt_version=self.version)
                 self.link_args += fwdep.get_link_args()
             else:
                 break
@@ -361,6 +411,9 @@ class QtBaseDependency(ExternalDependency):
         # for you, patches are welcome.
         return compiler.get_pic_args()
 
+    def get_private_includes(self, mod_inc_dir, module):
+        return tuple()
+
 
 class Qt4Dependency(QtBaseDependency):
     def __init__(self, env, kwargs):
@@ -386,6 +439,9 @@ class Qt5Dependency(QtBaseDependency):
     def get_pkgconfig_host_bins(self, core):
         return core.get_pkgconfig_variable('host_bins', {})
 
+    def get_private_includes(self, mod_inc_dir, module):
+        return _qt_get_private_includes(mod_inc_dir, module, self.version)
+
 
 # There are three different ways of depending on SDL2:
 # sdl2-config, pkg-config and OSX framework
@@ -409,7 +465,7 @@ class SDL2Dependency(ExternalDependency):
                     'sdl2', environment, None, kwargs, ['sdl2-config'], 'sdl2-config')
                 if ctdep.found():
                     ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
-                    ctdep.links_args = ctdep.get_config_value(['--libs'], 'link_args')
+                    ctdep.link_args = ctdep.get_config_value(['--libs'], 'link_args')
                     return ctdep
             except Exception as e:
                 mlog.debug('SDL 2 not found via sdl2-config. Trying next, error was:', str(e))
@@ -458,6 +514,7 @@ class WxDependency(ConfigToolDependency):
 
 
 class VulkanDependency(ExternalDependency):
+
     def __init__(self, environment, kwargs):
         super().__init__('vulkan', environment, None, kwargs)
 
@@ -488,7 +545,7 @@ class VulkanDependency(ExternalDependency):
                 inc_path = os.path.join(self.vulkan_sdk, inc_dir)
                 header = os.path.join(inc_path, 'vulkan', 'vulkan.h')
                 lib_path = os.path.join(self.vulkan_sdk, lib_dir)
-                find_lib = self.compiler.find_library(lib_name, environment, lib_path)
+                find_lib = self.clib_compiler.find_library(lib_name, environment, lib_path)
 
                 if not find_lib:
                     raise DependencyException('VULKAN_SDK point to invalid directory (no lib)')
@@ -508,8 +565,8 @@ class VulkanDependency(ExternalDependency):
                 return
             else:
                 # simply try to guess it, usually works on linux
-                libs = self.compiler.find_library('vulkan', environment, [])
-                if libs is not None and self.compiler.has_header('vulkan/vulkan.h', '', environment):
+                libs = self.clib_compiler.find_library('vulkan', environment, [])
+                if libs is not None and self.clib_compiler.has_header('vulkan/vulkan.h', '', environment):
                     self.type_name = 'system'
                     self.is_found = True
                     self.version = 1 # TODO

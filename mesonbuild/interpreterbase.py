@@ -31,29 +31,111 @@ def check_stringlist(a, msg='Arguments must be strings.'):
         mlog.debug('Element not a string:', str(a))
         raise InvalidArguments(msg)
 
+def _get_callee_args(wrapped_args, want_subproject=False):
+    s = wrapped_args[0]
+    n = len(wrapped_args)
+    # Raise an error if the codepaths are not there
+    subproject = None
+    if want_subproject and n == 2:
+        if hasattr(s, 'subproject'):
+            # Interpreter base types have 2 args: self, node
+            node_or_state = wrapped_args[1]
+            # args and kwargs are inside the node
+            args = None
+            kwargs = None
+            subproject = s.subproject
+        elif hasattr(wrapped_args[1], 'subproject'):
+            # Module objects have 2 args: self, interpreter
+            node_or_state = wrapped_args[1]
+            # args and kwargs are inside the node
+            args = None
+            kwargs = None
+            subproject = wrapped_args[1].subproject
+        else:
+            raise AssertionError('Unknown args: {!r}'.format(wrapped_args))
+    elif n == 3:
+        # Methods on objects (*Holder, MesonMain, etc) have 3 args: self, args, kwargs
+        node_or_state = None # FIXME
+        args = wrapped_args[1]
+        kwargs = wrapped_args[2]
+        if want_subproject:
+            if hasattr(s, 'subproject'):
+                subproject = s.subproject
+            elif hasattr(s, 'interpreter'):
+                subproject = s.interpreter.subproject
+    elif n == 4:
+        # Meson functions have 4 args: self, node, args, kwargs
+        # Module functions have 4 args: self, state, args, kwargs; except,
+        # PythonInstallation methods have self, interpreter, args, kwargs
+        node_or_state = wrapped_args[1]
+        args = wrapped_args[2]
+        kwargs = wrapped_args[3]
+        if want_subproject:
+            if isinstance(s, InterpreterBase):
+                subproject = s.subproject
+            else:
+                subproject = node_or_state.subproject
+    elif n == 5:
+        # Module snippets have 5 args: self, interpreter, state, args, kwargs
+        node_or_state = wrapped_args[2]
+        args = wrapped_args[3]
+        kwargs = wrapped_args[4]
+        if want_subproject:
+            subproject = node_or_state.subproject
+    else:
+        raise AssertionError('Unknown args: {!r}'.format(wrapped_args))
+    # Sometimes interpreter methods are called internally with None instead of
+    # empty list/dict
+    args = args if args is not None else []
+    kwargs = kwargs if kwargs is not None else {}
+    return s, node_or_state, args, kwargs, subproject
+
+def flatten(args):
+    if isinstance(args, mparser.StringNode):
+        return args.value
+    if isinstance(args, (int, str, mesonlib.File, InterpreterObject)):
+        return args
+    result = []
+    for a in args:
+        if isinstance(a, list):
+            rest = flatten(a)
+            result = result + rest
+        elif isinstance(a, mparser.StringNode):
+            result.append(a.value)
+        else:
+            result.append(a)
+    return result
+
 def noPosargs(f):
     @wraps(f)
-    def wrapped(self, node, args, kwargs):
+    def wrapped(*wrapped_args, **wrapped_kwargs):
+        args = _get_callee_args(wrapped_args)[2]
         if args:
             raise InvalidArguments('Function does not take positional arguments.')
-        return f(self, node, args, kwargs)
+        return f(*wrapped_args, **wrapped_kwargs)
     return wrapped
 
 def noKwargs(f):
     @wraps(f)
-    def wrapped(self, node, args, kwargs):
+    def wrapped(*wrapped_args, **wrapped_kwargs):
+        kwargs = _get_callee_args(wrapped_args)[3]
         if kwargs:
             raise InvalidArguments('Function does not take keyword arguments.')
-        return f(self, node, args, kwargs)
+        return f(*wrapped_args, **wrapped_kwargs)
     return wrapped
 
 def stringArgs(f):
     @wraps(f)
-    def wrapped(self, node, args, kwargs):
+    def wrapped(*wrapped_args, **wrapped_kwargs):
+        args = _get_callee_args(wrapped_args)[2]
         assert(isinstance(args, list))
         check_stringlist(args)
-        return f(self, node, args, kwargs)
+        return f(*wrapped_args, **wrapped_kwargs)
     return wrapped
+
+def noArgsFlattening(f):
+    setattr(f, 'no-args-flattening', True)
+    return f
 
 class permittedKwargs:
 
@@ -62,12 +144,13 @@ class permittedKwargs:
 
     def __call__(self, f):
         @wraps(f)
-        def wrapped(s, node_or_state, args, kwargs):
+        def wrapped(*wrapped_args, **wrapped_kwargs):
+            s, node_or_state, args, kwargs, _ = _get_callee_args(wrapped_args)
             loc = types.SimpleNamespace()
             if hasattr(s, 'subdir'):
                 loc.subdir = s.subdir
                 loc.lineno = s.current_lineno
-            elif hasattr(node_or_state, 'subdir'):
+            elif node_or_state and hasattr(node_or_state, 'subdir'):
                 loc.subdir = node_or_state.subdir
                 loc.lineno = node_or_state.current_lineno
             else:
@@ -76,24 +159,122 @@ class permittedKwargs:
                 if k not in self.permitted:
                     mlog.warning('''Passed invalid keyword argument "{}".'''.format(k), location=loc)
                     mlog.warning('This will become a hard error in the future.')
-            return f(s, node_or_state, args, kwargs)
+            return f(*wrapped_args, **wrapped_kwargs)
         return wrapped
 
 
-class permittedMethodKwargs:
+class FeatureCheckBase:
+    "Base class for feature version checks"
 
-    def __init__(self, permitted):
-        self.permitted = permitted
+    def __init__(self, feature_name, version):
+        self.feature_name = feature_name
+        self.feature_version = version
+
+    @staticmethod
+    def get_target_version(subproject):
+        return mesonlib.project_meson_versions[subproject]
+
+    def use(self, subproject):
+        tv = self.get_target_version(subproject)
+        # No target version
+        if tv == '':
+            return
+        # Target version is new enough
+        if mesonlib.version_compare_condition_with_min(tv, self.feature_version):
+            return
+        # Feature is too new for target version, register it
+        if subproject not in self.feature_registry:
+            self.feature_registry[subproject] = {self.feature_version: set()}
+        register = self.feature_registry[subproject]
+        if self.feature_version not in register:
+            register[self.feature_version] = set()
+        if self.feature_name in register[self.feature_version]:
+            # Don't warn about the same feature multiple times
+            # FIXME: This is needed to prevent duplicate warnings, but also
+            # means we won't warn about a feature used in multiple places.
+            return
+        register[self.feature_version].add(self.feature_name)
+        self.log_usage_warning(tv)
+
+    @classmethod
+    def report(cls, subproject):
+        if subproject not in cls.feature_registry:
+            return
+        warning_str = cls.get_warning_str_prefix(cls.get_target_version(subproject))
+        fv = cls.feature_registry[subproject]
+        for version in sorted(fv.keys()):
+            warning_str += '\n * {}: {}'.format(version, fv[version])
+        mlog.warning(warning_str)
 
     def __call__(self, f):
         @wraps(f)
-        def wrapped(obj, args, kwargs):
-            for k in kwargs:
-                if k not in self.permitted:
-                    mlog.warning('''Passed invalid keyword argument "{}".'''.format(k))
-                    mlog.warning('This will become a hard error in the future.')
-            return f(obj, args, kwargs)
+        def wrapped(*wrapped_args, **wrapped_kwargs):
+            subproject = _get_callee_args(wrapped_args, want_subproject=True)[4]
+            if subproject is None:
+                raise AssertionError('{!r}'.format(wrapped_args))
+            self.use(subproject)
+            return f(*wrapped_args, **wrapped_kwargs)
         return wrapped
+
+class FeatureNew(FeatureCheckBase):
+    """Checks for new features"""
+    # Class variable, shared across all instances
+    #
+    # Format: {subproject: {feature_version: set(feature_names)}}
+    feature_registry = {}
+
+    @staticmethod
+    def get_warning_str_prefix(tv):
+        return 'Project specifies a minimum meson_version \'{}\' which conflicts with:'.format(tv)
+
+    def log_usage_warning(self, tv):
+        mlog.warning('Project targetting \'{}\' but tried to use feature introduced '
+                     'in \'{}\': {}'.format(tv, self.feature_version, self.feature_name))
+
+class FeatureDeprecated(FeatureCheckBase):
+    """Checks for deprecated features"""
+    # Class variable, shared across all instances
+    #
+    # Format: {subproject: {feature_version: set(feature_names)}}
+    feature_registry = {}
+
+    @staticmethod
+    def get_warning_str_prefix(tv):
+        return 'Deprecated features used:'
+
+    def log_usage_warning(self, tv):
+        mlog.deprecation('Project targetting \'{}\' but tried to use feature '
+                         'deprecated since \'{}\': {}'
+                         ''.format(tv, self.feature_version, self.feature_name))
+
+
+class FeatureCheckKwargsBase:
+    def __init__(self, feature_name, feature_version, kwargs):
+        self.feature_name = feature_name
+        self.feature_version = feature_version
+        self.kwargs = kwargs
+
+    def __call__(self, f):
+        @wraps(f)
+        def wrapped(*wrapped_args, **wrapped_kwargs):
+            # Which FeatureCheck class to invoke
+            FeatureCheckClass = self.feature_check_class
+            kwargs, subproject = _get_callee_args(wrapped_args, want_subproject=True)[3:5]
+            if subproject is None:
+                raise AssertionError('{!r}'.format(wrapped_args))
+            for arg in self.kwargs:
+                if arg not in kwargs:
+                    continue
+                name = arg + ' arg in ' + self.feature_name
+                FeatureCheckClass(name, self.feature_version).use(subproject)
+            return f(*wrapped_args, **wrapped_kwargs)
+        return wrapped
+
+class FeatureNewKwargs(FeatureCheckKwargsBase):
+    feature_check_class = FeatureNew
+
+class FeatureDeprecatedKwargs(FeatureCheckKwargsBase):
+    feature_check_class = FeatureDeprecated
 
 
 class InterpreterException(mesonlib.MesonException):
@@ -114,7 +295,10 @@ class InterpreterObject:
 
     def method_call(self, method_name, args, kwargs):
         if method_name in self.methods:
-            return self.methods[method_name](args, kwargs)
+            method = self.methods[method_name]
+            if not getattr(method, 'no-args-flattening', False):
+                args = flatten(args)
+            return method(args, kwargs)
         raise InvalidCode('Unknown method "%s" in object.' % method_name)
 
 class MutableInterpreterObject(InterpreterObject):
@@ -189,7 +373,10 @@ class InterpreterBase:
     def run(self):
         # Evaluate everything after the first line, which is project() because
         # we already parsed that in self.parse_project()
-        self.evaluate_codeblock(self.ast, start=1)
+        try:
+            self.evaluate_codeblock(self.ast, start=1)
+        except SubdirDoneRequest:
+            pass
 
     def evaluate_codeblock(self, node, start=0, end=None):
         if node is None:
@@ -206,10 +393,8 @@ class InterpreterBase:
             try:
                 self.current_lineno = cur.lineno
                 self.evaluate_statement(cur)
-            except SubdirDoneRequest:
-                break
             except Exception as e:
-                if not(hasattr(e, 'lineno')):
+                if not hasattr(e, 'lineno'):
                     e.lineno = cur.lineno
                     e.colno = cur.colno
                     e.file = os.path.join(self.subdir, 'meson.build')
@@ -235,6 +420,8 @@ class InterpreterBase:
             return self.evaluate_comparison(cur)
         elif isinstance(cur, mparser.ArrayNode):
             return self.evaluate_arraystatement(cur)
+        elif isinstance(cur, mparser.DictNode):
+            return self.evaluate_dictstatement(cur)
         elif isinstance(cur, mparser.NumberNode):
             return cur.value
         elif isinstance(cur, mparser.AndNode):
@@ -265,6 +452,12 @@ class InterpreterBase:
         if len(kwargs) > 0:
             raise InvalidCode('Keyword arguments are invalid in array construction.')
         return arguments
+
+    @FeatureNew('dict', '0.47.0')
+    def evaluate_dictstatement(self, cur):
+        (arguments, kwargs) = self.reduce_arguments(cur.args)
+        assert (not arguments)
+        return kwargs
 
     def evaluate_notstatement(self, cur):
         v = self.evaluate_statement(cur.value)
@@ -414,15 +607,28 @@ The result of this is undefined and will become a hard error in a future Meson r
 
     def evaluate_foreach(self, node):
         assert(isinstance(node, mparser.ForeachClauseNode))
-        varname = node.varname.value
         items = self.evaluate_statement(node.items)
-        if is_disabler(items):
-            return items
-        if not isinstance(items, list):
-            raise InvalidArguments('Items of foreach loop is not an array')
-        for item in items:
-            self.set_variable(varname, item)
-            self.evaluate_codeblock(node.block)
+
+        if isinstance(items, list):
+            if len(node.varnames) != 1:
+                raise InvalidArguments('Foreach on array does not unpack')
+            varname = node.varnames[0].value
+            if is_disabler(items):
+                return items
+            for item in items:
+                self.set_variable(varname, item)
+                self.evaluate_codeblock(node.block)
+        elif isinstance(items, dict):
+            if len(node.varnames) != 2:
+                raise InvalidArguments('Foreach on dict unpacks key and value')
+            if is_disabler(items):
+                return items
+            for key, value in items.items():
+                self.set_variable(node.varnames[0].value, key)
+                self.set_variable(node.varnames[1].value, value)
+                self.evaluate_codeblock(node.block)
+        else:
+            raise InvalidArguments('Items of foreach loop must be an array or a dict')
 
     def evaluate_plusassign(self, node):
         assert(isinstance(node, mparser.PlusAssignmentNode))
@@ -461,12 +667,21 @@ The result of this is undefined and will become a hard error in a future Meson r
             raise InterpreterException(
                 'Tried to index an object that doesn\'t support indexing.')
         index = self.evaluate_statement(node.index)
-        if not isinstance(index, int):
-            raise InterpreterException('Index value is not an integer.')
-        try:
-            return iobject[index]
-        except IndexError:
-            raise InterpreterException('Index %d out of bounds of array of size %d.' % (index, len(iobject)))
+
+        if isinstance(iobject, dict):
+            if not isinstance(index, str):
+                raise InterpreterException('Key is not a string')
+            try:
+                return iobject[index]
+            except KeyError:
+                raise InterpreterException('Key %s is not in dict' % index)
+        else:
+            if not isinstance(index, int):
+                raise InterpreterException('Index value is not an integer.')
+            try:
+                return iobject[index]
+            except IndexError:
+                raise InterpreterException('Index %d out of bounds of array of size %d.' % (index, len(iobject)))
 
     def function_call(self, node):
         func_name = node.func_name
@@ -474,7 +689,11 @@ The result of this is undefined and will become a hard error in a future Meson r
         if is_disabled(posargs, kwargs):
             return Disabler()
         if func_name in self.funcs:
-            return self.funcs[func_name](node, self.flatten(posargs), kwargs)
+            func = self.funcs[func_name]
+            if not getattr(func, 'no-args-flattening', False):
+                posargs = flatten(posargs)
+
+            return func(node, posargs, kwargs)
         else:
             self.unknown_function_called(func_name)
 
@@ -495,6 +714,8 @@ The result of this is undefined and will become a hard error in a future Meson r
             return self.int_method_call(obj, method_name, args)
         if isinstance(obj, list):
             return self.array_method_call(obj, method_name, args)
+        if isinstance(obj, dict):
+            return self.dict_method_call(obj, method_name, args)
         if isinstance(obj, mesonlib.File):
             raise InvalidArguments('File object "%s" is not callable.' % obj)
         if not isinstance(obj, InterpreterObject):
@@ -508,7 +729,7 @@ The result of this is undefined and will become a hard error in a future Meson r
             return Disabler()
         if method_name == 'extract_objects':
             self.validate_extraction(obj.held_object)
-        return obj.method_call(method_name, self.flatten(args), kwargs)
+        return obj.method_call(method_name, args, kwargs)
 
     def bool_method_call(self, obj, method_name, args):
         (posargs, kwargs) = self.reduce_arguments(args)
@@ -653,6 +874,43 @@ The result of this is undefined and will become a hard error in a future Meson r
         m = 'Arrays do not have a method called {!r}.'
         raise InterpreterException(m.format(method_name))
 
+    def dict_method_call(self, obj, method_name, args):
+        (posargs, kwargs) = self.reduce_arguments(args)
+        if is_disabled(posargs, kwargs):
+            return Disabler()
+
+        if method_name in ('has_key', 'get'):
+            if method_name == 'has_key':
+                if len(posargs) != 1:
+                    raise InterpreterException('has_key() takes exactly one argument.')
+            else:
+                if len(posargs) not in (1, 2):
+                    raise InterpreterException('get() takes one or two arguments.')
+
+            key = posargs[0]
+            if not isinstance(key, (str)):
+                raise InvalidArguments('Dictionary key must be a string.')
+
+            has_key = key in obj
+
+            if method_name == 'has_key':
+                return has_key
+
+            if has_key:
+                return obj[key]
+
+            if len(posargs) == 2:
+                return posargs[1]
+
+            raise InterpreterException('Key {!r} is not in the dictionary.'.format(key))
+
+        if method_name == 'keys':
+            if len(posargs) != 0:
+                raise InterpreterException('keys() takes no arguments.')
+            return list(obj.keys())
+
+        raise InterpreterException('Dictionaries do not have a method called "%s".' % method_name)
+
     def reduce_arguments(self, args):
         assert(isinstance(args, mparser.ArgumentNode))
         if args.incorrect_order():
@@ -667,22 +925,6 @@ The result of this is undefined and will become a hard error in a future Meson r
             reduced_kw[key] = self.evaluate_statement(a)
         self.argument_depth -= 1
         return reduced_pos, reduced_kw
-
-    def flatten(self, args):
-        if isinstance(args, mparser.StringNode):
-            return args.value
-        if isinstance(args, (int, str, mesonlib.File, InterpreterObject)):
-            return args
-        result = []
-        for a in args:
-            if isinstance(a, list):
-                rest = self.flatten(a)
-                result = result + rest
-            elif isinstance(a, mparser.StringNode):
-                result.append(a.value)
-            else:
-                result.append(a)
-        return result
 
     def assignment(self, node):
         assert(isinstance(node, mparser.AssignmentNode))
@@ -723,7 +965,7 @@ To specify a keyword argument, use : instead of =.''')
 
     def is_assignable(self, value):
         return isinstance(value, (InterpreterObject, dependencies.Dependency,
-                                  str, int, list, mesonlib.File))
+                                  str, int, list, dict, mesonlib.File))
 
     def is_elementary_type(self, v):
         return isinstance(v, (int, float, str, bool, list))

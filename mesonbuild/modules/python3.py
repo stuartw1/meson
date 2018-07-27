@@ -17,20 +17,16 @@ from .. import mesonlib, dependencies
 
 from . import ExtensionModule
 from mesonbuild.modules import ModuleReturnValue
-from . import permittedSnippetKwargs
-from ..interpreterbase import noKwargs
-from ..interpreter import shlib_kwargs
-
-mod_kwargs = set()
-mod_kwargs.update(shlib_kwargs)
+from ..interpreterbase import noKwargs, permittedKwargs
+from ..build import known_shmod_kwargs
 
 
 class Python3Module(ExtensionModule):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.snippets.add('extension_module')
 
-    @permittedSnippetKwargs(mod_kwargs)
+    @permittedKwargs(known_shmod_kwargs)
     def extension_module(self, interpreter, state, args, kwargs):
         if 'name_prefix' in kwargs:
             raise mesonlib.MesonException('Name_prefix is set automatically, specifying it is forbidden.')
@@ -72,5 +68,5 @@ class Python3Module(ExtensionModule):
         return ModuleReturnValue(path, [])
 
 
-def initialize():
-    return Python3Module()
+def initialize(*args, **kwargs):
+    return Python3Module(*args, **kwargs)

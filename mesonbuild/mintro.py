@@ -21,6 +21,7 @@ project files and don't need this info."""
 
 import json
 from . import build, mtest, coredata as cdata
+from . import mesonlib
 from .backend import ninjabackend
 import argparse
 import sys, os
@@ -46,20 +47,18 @@ def buildparser():
                         help='List external dependencies.')
     parser.add_argument('--projectinfo', action='store_true', dest='projectinfo', default=False,
                         help='Information about projects.')
-    parser.add_argument('builddir', nargs='?', help='The build directory')
+    parser.add_argument('builddir', nargs='?', default='.', help='The build directory')
     return parser
 
 def determine_installed_path(target, installdata):
     install_target = None
     for i in installdata.targets:
-        if os.path.basename(i[0]) == target.get_filename(): # FIXME, might clash due to subprojects.
+        if os.path.basename(i.fname) == target.get_filename(): # FIXME, might clash due to subprojects.
             install_target = i
             break
     if install_target is None:
         raise RuntimeError('Something weird happened. File a bug.')
-    fname = i[0]
-    outdir = i[1]
-    outname = os.path.join(installdata.prefix, outdir, os.path.basename(fname))
+    outname = os.path.join(installdata.prefix, i.outdir, os.path.basename(i.fname))
     # Normalize the path by using os.path.sep consistently, etc.
     # Does not change the effective path.
     return str(pathlib.PurePath(outname))
@@ -68,13 +67,14 @@ def determine_installed_path(target, installdata):
 def list_installed(installdata):
     res = {}
     if installdata is not None:
-        for path, installdir, aliases, unknown1, unknown2 in installdata.targets:
-            res[os.path.join(installdata.build_dir, path)] = os.path.join(installdata.prefix, installdir, os.path.basename(path))
+        for t in installdata.targets:
+            res[os.path.join(installdata.build_dir, t.fname)] = \
+                os.path.join(installdata.prefix, t.outdir, os.path.basename(t.fname))
         for path, installpath, unused_prefix in installdata.data:
             res[path] = os.path.join(installdata.prefix, installpath)
-        for path, installdir in installdata.headers:
+        for path, installdir, unused_custom_install_mode in installdata.headers:
             res[path] = os.path.join(installdata.prefix, installdir, os.path.basename(path))
-        for path, installpath in installdata.man:
+        for path, installpath, unused_custom_install_mode in installdata.man:
             res[path] = os.path.join(installdata.prefix, installpath)
     print(json.dumps(res))
 
@@ -118,8 +118,12 @@ def list_target_files(target_name, coredata, builddata):
     except KeyError:
         print("Unknown target %s." % target_name)
         sys.exit(1)
-    sources = [os.path.join(i.subdir, i.fname) for i in sources]
-    print(json.dumps(sources))
+    out = []
+    for i in sources:
+        if isinstance(i, mesonlib.File):
+            i = os.path.join(i.subdir, i.fname)
+        out.append(i)
+    print(json.dumps(out))
 
 def list_buildoptions(coredata, builddata):
     optlist = []

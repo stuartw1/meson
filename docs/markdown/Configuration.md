@@ -39,6 +39,7 @@ use a single `configuration_data` object as many times as you like,
 but it becomes immutable after being passed to the `configure_file`
 function. That is, after it has been used once to generate output the
 `set` function becomes unusable and trying to call it causes an error.
+Copy of immutable `configuration_data` is still immutable.
 
 For more complex configuration file generation Meson provides a second
 form. To use it, put a line like this in your configuration file.
@@ -111,6 +112,14 @@ Will produce:
 /* Set BAR if it is available */
 #define BAR
 ```
+
+## Dealing with file encodings
+
+The default meson file encoding to configure files is utf-8. If you need to
+configure a file that is not utf-8 encoded the encoding keyword will allow
+you to specify which file encoding to use. It is however strongly advised to
+convert your non utf-8 file to utf-8 whenever possible. Supported file
+encodings are those of python3, see [standard-encodings](https://docs.python.org/3/library/codecs.html#standard-encodings).
 
 # A full example
 

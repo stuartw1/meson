@@ -14,17 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from glob import glob
 import itertools
-import os, subprocess, shutil, sys, signal
+import os
+import subprocess
+import shutil
+import sys
+import signal
 from io import StringIO
 from ast import literal_eval
 from enum import Enum
 import tempfile
-from mesonbuild import mtest
+from pathlib import Path, PurePath
+from mesonbuild import build
 from mesonbuild import environment
 from mesonbuild import mesonlib
 from mesonbuild import mlog
+from mesonbuild import mtest
 from mesonbuild.mesonlib import stringlistify, Popen_safe
 from mesonbuild.coredata import backendlist
 import argparse
@@ -33,8 +38,7 @@ import time
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import re
-from run_unittests import get_fake_options, run_configure
-
+from run_tests import get_fake_options, run_configure, get_meson_script
 from run_tests import get_backend_commands, get_backend_args_for_dir, Backend
 from run_tests import ensure_backend_detects_changes
 
@@ -82,12 +86,6 @@ do_debug = under_ci or print_debug
 no_meson_log_msg = 'No meson-log.txt found.'
 
 system_compiler = None
-
-meson_command = os.path.join(os.getcwd(), 'meson')
-if not os.path.exists(meson_command):
-    meson_command += '.py'
-    if not os.path.exists(meson_command):
-        raise RuntimeError('Could not find main Meson script to run.')
 
 class StopException(Exception):
     def __init__(self):
@@ -137,9 +135,9 @@ def get_relative_files_list_from_dir(fromdir):
             paths.append(path)
     return paths
 
-def platform_fix_name(fname, compiler):
+def platform_fix_name(fname, compiler, env):
     if '?lib' in fname:
-        if mesonlib.is_cygwin():
+        if mesonlib.for_cygwin(env.is_cross_build(), env):
             fname = re.sub(r'lib/\?lib(.*)\.so$', r'bin/cyg\1.dll', fname)
             fname = re.sub(r'\?lib(.*)\.dll$', r'cyg\1.dll', fname)
         else:
@@ -147,7 +145,7 @@ def platform_fix_name(fname, compiler):
 
     if fname.endswith('?exe'):
         fname = fname[:-4]
-        if mesonlib.is_windows() or mesonlib.is_cygwin():
+        if mesonlib.for_windows(env.is_cross_build(), env) or mesonlib.for_cygwin(env.is_cross_build(), env):
             return fname + '.exe'
 
     if fname.startswith('?msvc:'):
@@ -162,7 +160,7 @@ def platform_fix_name(fname, compiler):
 
     return fname
 
-def validate_install(srcdir, installdir, compiler):
+def validate_install(srcdir, installdir, compiler, env):
     # List of installed files
     info_file = os.path.join(srcdir, 'installed_files.txt')
     # If this exists, the test does not install any other files
@@ -175,7 +173,7 @@ def validate_install(srcdir, installdir, compiler):
     elif os.path.exists(info_file):
         with open(info_file) as f:
             for line in f:
-                line = platform_fix_name(line.strip(), compiler)
+                line = platform_fix_name(line.strip(), compiler, env)
                 if line:
                     expected[line] = False
     # Check if expected files were found
@@ -201,14 +199,22 @@ def validate_install(srcdir, installdir, compiler):
 
 def log_text_file(logfile, testdir, stdo, stde):
     global stop, executor, futures
-    logfile.write('%s\nstdout\n\n---\n' % testdir)
+    logfile.write('%s\nstdout\n\n---\n' % testdir.as_posix())
     logfile.write(stdo)
     logfile.write('\n\n---\n\nstderr\n\n---\n')
     logfile.write(stde)
     logfile.write('\n\n---\n\n')
     if print_debug:
-        print(stdo)
-        print(stde, file=sys.stderr)
+        try:
+            print(stdo)
+        except UnicodeError:
+            sanitized_out = stdo.encode('ascii', errors='replace').decode()
+            print(sanitized_out)
+        try:
+            print(stde, file=sys.stderr)
+        except UnicodeError:
+            sanitized_err = stde.encode('ascii', errors='replace').decode()
+            print(sanitized_err, file=sys.stderr)
     if stop:
         print("Aborting..")
         for f in futures:
@@ -240,11 +246,11 @@ def run_test_inprocess(testdir):
     sys.stderr = mystderr = StringIO()
     old_cwd = os.getcwd()
     os.chdir(testdir)
-    test_log_fname = 'meson-logs/testlog.txt'
+    test_log_fname = Path('meson-logs', 'testlog.txt')
     try:
         returncode_test = mtest.run(['--no-rebuild'])
-        if os.path.exists(test_log_fname):
-            test_log = open(test_log_fname, errors='ignore').read()
+        if test_log_fname.exists():
+            test_log = test_log_fname.open(errors='ignore').read()
         else:
             test_log = ''
         returncode_benchmark = mtest.run(['--no-rebuild', '--benchmark', '--logbase', 'benchmarklog'])
@@ -297,6 +303,8 @@ def pass_libdir_to_test(dirname):
         return False
     if '39 libdir' in dirname:
         return False
+    if '201 install_mode' in dirname:
+        return False
     return True
 
 def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backend, flags, commands, should_fail):
@@ -311,11 +319,10 @@ def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backen
     if pass_libdir_to_test(testdir):
         gen_args += ['--libdir', 'lib']
     gen_args += [testdir, test_build_dir] + flags + test_args + extra_args
-    (returncode, stdo, stde) = run_configure(meson_command, gen_args)
+    (returncode, stdo, stde) = run_configure(gen_args)
     try:
-        logfile = os.path.join(test_build_dir, 'meson-logs/meson-log.txt')
-        with open(logfile, errors='ignore') as f:
-            mesonlog = f.read()
+        logfile = Path(test_build_dir, 'meson-logs', 'meson-log.txt')
+        mesonlog = logfile.open(errors='ignore', encoding='utf-8').read()
     except Exception:
         mesonlog = no_meson_log_msg
     gen_time = time.time() - gen_start
@@ -328,6 +335,7 @@ def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backen
             return TestResult('Test that should have failed succeeded', BuildStep.configure, stdo, stde, mesonlog, gen_time)
     if returncode != 0:
         return TestResult('Generating the build system failed.', BuildStep.configure, stdo, stde, mesonlog, gen_time)
+    builddata = build.load(test_build_dir)
     # Touch the meson.build file to force a regenerate so we can test that
     # regeneration works before a build is run.
     ensure_backend_detects_changes(backend)
@@ -381,13 +389,14 @@ def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backen
         return TestResult('Running clean failed.', BuildStep.clean, stdo, stde, mesonlog, gen_time, build_time, test_time)
     if not install_commands:
         return TestResult('', BuildStep.install, '', '', mesonlog, gen_time, build_time, test_time)
-    return TestResult(validate_install(testdir, install_dir, compiler), BuildStep.validate, stdo, stde, mesonlog, gen_time, build_time, test_time)
+    return TestResult(validate_install(testdir, install_dir, compiler, builddata.environment),
+                      BuildStep.validate, stdo, stde, mesonlog, gen_time, build_time, test_time)
 
-def gather_tests(testdir):
-    tests = [t.replace('\\', '/').split('/', 2)[2] for t in glob(testdir + '/*')]
+def gather_tests(testdir: Path):
+    tests = [t.name for t in testdir.glob('*')]
     testlist = [(int(t.split()[0]), t) for t in tests]
     testlist.sort()
-    tests = [os.path.join(testdir, t[1]) for t in testlist]
+    tests = [testdir / t[1] for t in testlist]
     return tests
 
 def have_d_compiler():
@@ -403,7 +412,7 @@ def have_d_compiler():
 
 def have_objc_compiler():
     with AutoDeletedDir(tempfile.mkdtemp(prefix='b ', dir='.')) as build_dir:
-        env = environment.Environment(None, build_dir, None, get_fake_options('/'), [])
+        env = environment.Environment(None, build_dir, get_fake_options('/'))
         try:
             objc_comp = env.detect_objc_compiler(False)
         except mesonlib.MesonException:
@@ -418,7 +427,7 @@ def have_objc_compiler():
 
 def have_objcpp_compiler():
     with AutoDeletedDir(tempfile.mkdtemp(prefix='b ', dir='.')) as build_dir:
-        env = environment.Environment(None, build_dir, None, get_fake_options('/'), [])
+        env = environment.Environment(None, build_dir, get_fake_options('/'))
         try:
             objcpp_comp = env.detect_objcpp_compiler(False)
         except mesonlib.MesonException:
@@ -491,7 +500,7 @@ def detect_tests_to_run():
         ('common', 'common', False),
         ('failing-meson', 'failing', False),
         ('failing-build', 'failing build', False),
-        ('failing-tests', 'failing tests', False),
+        ('failing-test',  'failing test', False),
 
         ('platform-osx', 'osx', not mesonlib.is_osx()),
         ('platform-windows', 'windows', not mesonlib.is_windows() and not mesonlib.is_cygwin()),
@@ -509,14 +518,15 @@ def detect_tests_to_run():
         ('python3', 'python3', backend is not Backend.ninja),
         ('fpga', 'fpga', shutil.which('yosys') is None),
         ('frameworks', 'frameworks', False),
+        ('nasm', 'nasm', False),
     ]
-    gathered_tests = [(name, gather_tests('test cases/' + subdir), skip) for name, subdir, skip in all_tests]
+    gathered_tests = [(name, gather_tests(Path('test cases', subdir)), skip) for name, subdir, skip in all_tests]
     return gathered_tests
 
 def run_tests(all_tests, log_name_base, extra_args):
     global logfile
     txtname = log_name_base + '.txt'
-    with open(txtname, 'w', encoding="utf_8") as lf:
+    with open(txtname, 'w', encoding='utf-8', errors='ignore') as lf:
         logfile = lf
         return _run_tests(all_tests, log_name_base, extra_args)
 
@@ -559,18 +569,18 @@ def _run_tests(all_tests, log_name_base, extra_args):
         for t in test_cases:
             # Jenkins screws us over by automatically sorting test cases by name
             # and getting it wrong by not doing logical number sorting.
-            (testnum, testbase) = os.path.split(t)[-1].split(' ', 1)
+            (testnum, testbase) = t.name.split(' ', 1)
             testname = '%.3d %s' % (int(testnum), testbase)
             should_fail = False
             if name.startswith('failing'):
                 should_fail = name.split('failing-')[1]
-            result = executor.submit(run_test, skipped, t, extra_args, system_compiler, backend, backend_flags, commands, should_fail)
+            result = executor.submit(run_test, skipped, t.as_posix(), extra_args, system_compiler, backend, backend_flags, commands, should_fail)
             futures.append((testname, t, result))
         for (testname, t, result) in futures:
             sys.stdout.flush()
             result = result.result()
-            if (result is None) or (('MESON_SKIP_TEST' in result.stdo) and (skippable(name, t))):
-                print(yellow('Skipping:'), t)
+            if (result is None) or (('MESON_SKIP_TEST' in result.stdo) and (skippable(name, t.as_posix()))):
+                print(yellow('Skipping:'), t.as_posix())
                 current_test = ET.SubElement(current_suite, 'testcase', {'name': testname,
                                                                          'classname': name})
                 ET.SubElement(current_test, 'skipped', {})
@@ -578,7 +588,7 @@ def _run_tests(all_tests, log_name_base, extra_args):
             else:
                 without_install = "" if len(install_commands) > 0 else " (without install)"
                 if result.msg != '':
-                    print(red('Failed test{} during {}: {!r}'.format(without_install, result.step.name, t)))
+                    print(red('Failed test{} during {}: {!r}'.format(without_install, result.step.name, t.as_posix())))
                     print('Reason:', result.msg)
                     failing_tests += 1
                     if result.step == BuildStep.configure and result.mlog != no_meson_log_msg:
@@ -590,7 +600,7 @@ def _run_tests(all_tests, log_name_base, extra_args):
                         failing_logs.append(result.stdo)
                     failing_logs.append(result.stde)
                 else:
-                    print('Succeeded test%s: %s' % (without_install, t))
+                    print('Succeeded test%s: %s' % (without_install, t.as_posix()))
                     passing_tests += 1
                 conf_time += result.conftime
                 build_time += result.buildtime
@@ -633,11 +643,12 @@ def check_format():
                 check_file(fullname)
 
 def check_meson_commands_work():
-    global backend, meson_command, compile_commands, test_commands, install_commands
-    testdir = 'test cases/common/1 trivial'
+    global backend, compile_commands, test_commands, install_commands
+    testdir = PurePath('test cases', 'common', '1 trivial').as_posix()
+    meson_commands = mesonlib.python_command + [get_meson_script()]
     with AutoDeletedDir(tempfile.mkdtemp(prefix='b ', dir='.')) as build_dir:
         print('Checking that configuring works...')
-        gen_cmd = mesonlib.meson_command + [testdir, build_dir] + backend_flags
+        gen_cmd = meson_commands + [testdir, build_dir] + backend_flags
         pc, o, e = Popen_safe(gen_cmd)
         if pc.returncode != 0:
             raise RuntimeError('Failed to configure {!r}:\n{}\n{}'.format(testdir, e, o))
@@ -694,9 +705,12 @@ if __name__ == '__main__':
     if failing_tests > 0:
         print('\nMesonlogs of failing tests\n')
         for l in failing_logs:
-            print(l, '\n')
+            try:
+                print(l, '\n')
+            except UnicodeError:
+                print(l.encode('ascii', errors='replace').decode(), '\n')
     for name, dirs, skip in all_tests:
-        dirs = (os.path.basename(x) for x in dirs)
+        dirs = (x.name for x in dirs)
         for k, g in itertools.groupby(dirs, key=lambda x: x.split()[0]):
             tests = list(g)
             if len(tests) != 1:

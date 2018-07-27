@@ -5,6 +5,7 @@ index.md
 	Manual.md
 		Overview.md
 		Running-Meson.md
+		Builtin-options.md
 		Using-with-Visual-Studio.md
 		Meson-sample.md
 		Syntax.md
@@ -32,12 +33,14 @@ index.md
 			i18n-module.md
 			Icestorm-module.md
 			Pkgconfig-module.md
+			Python-module.md
 			Python-3-module.md
 			Qt4-module.md
 			Qt5-module.md
 			RPM-module.md
 			Simd-module.md
 			Windows-module.md
+			Dlang-module.md
 		Java.md
 		Vala.md
 		D.md
@@ -65,6 +68,8 @@ index.md
 		Shipping-prebuilt-binaries-as-wraps.md
 		fallback-wraptool.md
 	Release-notes.md
+		Release-notes-for-0.48.0.md
+		Release-notes-for-0.47.0.md
 		Release-notes-for-0.46.0.md
 		Release-notes-for-0.45.0.md
 		Release-notes-for-0.44.0.md

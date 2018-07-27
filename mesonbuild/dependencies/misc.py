@@ -33,6 +33,7 @@ from .base import (
 
 
 class MPIDependency(ExternalDependency):
+
     def __init__(self, environment, kwargs):
         language = kwargs.get('language', 'c')
         super().__init__('mpi', environment, language, kwargs)
@@ -237,6 +238,44 @@ class MPIDependency(ExternalDependency):
                     [os.path.join(libdir, 'msmpi.lib')])
 
 
+class OpenMPDependency(ExternalDependency):
+    # Map date of specification release (which is the macro value) to a version.
+    VERSIONS = {
+        '201511': '4.5',
+        '201307': '4.0',
+        '201107': '3.1',
+        '200805': '3.0',
+        '200505': '2.5',
+        '200203': '2.0',
+        '199810': '1.0',
+    }
+
+    def __init__(self, environment, kwargs):
+        language = kwargs.get('language')
+        super().__init__('openmp', environment, language, kwargs)
+        self.is_found = False
+        try:
+            openmp_date = self.clib_compiler.get_define('_OPENMP', '', self.env, [], [self])
+        except mesonlib.EnvironmentException as e:
+            mlog.debug('OpenMP support not available in the compiler')
+            mlog.debug(e)
+            openmp_date = False
+
+        if openmp_date:
+            self.version = self.VERSIONS[openmp_date]
+            if self.clib_compiler.has_header('omp.h', '', self.env, dependencies=[self]):
+                self.is_found = True
+            else:
+                mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but omp.h missing.')
+        if self.is_found:
+            mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.green('YES'), self.version)
+        else:
+            mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.red('NO'))
+
+    def need_openmp(self):
+        return True
+
+
 class ThreadDependency(ExternalDependency):
     def __init__(self, environment, kwargs):
         super().__init__('threads', environment, None, {})
@@ -390,6 +429,7 @@ class Python3Dependency(ExternalDependency):
 
 
 class PcapDependency(ExternalDependency):
+
     def __init__(self, environment, kwargs):
         super().__init__('pcap', environment, None, kwargs)
 
@@ -426,8 +466,8 @@ class PcapDependency(ExternalDependency):
 
     @staticmethod
     def get_pcap_lib_version(ctdep):
-        return ctdep.compiler.get_return_value('pcap_lib_version', 'string',
-                                               '#include <pcap.h>', ctdep.env, [], [ctdep])
+        return ctdep.clib_compiler.get_return_value('pcap_lib_version', 'string',
+                                                    '#include <pcap.h>', ctdep.env, [], [ctdep])
 
 
 class CupsDependency(ExternalDependency):

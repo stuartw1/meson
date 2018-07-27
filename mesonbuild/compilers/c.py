@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess, os.path, tempfile
+import re
+import glob
+import os.path
+import subprocess
 
 from .. import mlog
 from .. import coredata
 from . import compilers
 from ..mesonlib import (
     EnvironmentException, version_compare, Popen_safe, listify,
-    for_windows, for_darwin, for_cygwin, for_haiku,
+    for_windows, for_darwin, for_cygwin, for_haiku, for_openbsd,
 )
 
 from .compilers import (
@@ -31,17 +34,24 @@ from .compilers import (
     msvc_winlibs,
     vs32_instruction_set_args,
     vs64_instruction_set_args,
+    ArmCompiler,
+    ArmclangCompiler,
     ClangCompiler,
     Compiler,
     CompilerArgs,
     CrossNoRunException,
     GnuCompiler,
+    ElbrusCompiler,
     IntelCompiler,
     RunResult,
 )
 
 
 class CCompiler(Compiler):
+    library_dirs_cache = {}
+    program_dirs_cache = {}
+    find_library_cache = {}
+
     def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
         # If a child ObjC or CPP class has already set it, don't set it ourselves
         if not hasattr(self, 'language'):
@@ -54,6 +64,9 @@ class CCompiler(Compiler):
             self.exe_wrapper = [exe_wrapper]
         else:
             self.exe_wrapper = exe_wrapper
+
+        # Set to None until we actually need to check this
+        self.has_fatal_warnings_link_arg = None
 
     def needs_static_linker(self):
         return True # When compiling static libraries, so yes.
@@ -84,7 +97,7 @@ class CCompiler(Compiler):
         # Almost every compiler uses this for disabling warnings
         return ['-w']
 
-    def get_soname_args(self, prefix, shlib_name, suffix, path, soversion, is_shared_module):
+    def get_soname_args(self, *args):
         return []
 
     def split_shlib_to_parts(self, fname):
@@ -155,15 +168,43 @@ class CCompiler(Compiler):
     def get_std_shared_lib_link_args(self):
         return ['-shared']
 
-    def get_library_dirs(self):
+    def get_library_dirs_real(self):
         env = os.environ.copy()
         env['LC_ALL'] = 'C'
         stdo = Popen_safe(self.exelist + ['--print-search-dirs'], env=env)[1]
+        paths = []
         for line in stdo.split('\n'):
             if line.startswith('libraries:'):
                 libstr = line.split('=', 1)[1]
-                return libstr.split(':')
-        return []
+                paths = [os.path.realpath(p) for p in libstr.split(':') if os.path.exists(os.path.realpath(p))]
+        return paths
+
+    def get_library_dirs(self):
+        key = tuple(self.exelist)
+        if key not in self.library_dirs_cache:
+            self.library_dirs_cache[key] = self.get_library_dirs_real()
+        return self.library_dirs_cache[key][:]
+
+    def get_program_dirs_real(self):
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C'
+        stdo = Popen_safe(self.exelist + ['--print-search-dirs'], env=env)[1]
+        paths = []
+        for line in stdo.split('\n'):
+            if line.startswith('programs:'):
+                libstr = line.split('=', 1)[1]
+                paths = [os.path.realpath(p) for p in libstr.split(':')]
+        return paths
+
+    def get_program_dirs(self):
+        '''
+        Programs used by the compiler. Also where toolchain DLLs such as
+        libstdc++-6.dll are found with MinGW.
+        '''
+        key = tuple(self.exelist)
+        if key not in self.program_dirs_cache:
+            self.program_dirs_cache[key] = self.get_program_dirs_real()
+        return self.program_dirs_cache[key][:]
 
     def get_pic_args(self):
         return ['-fPIC']
@@ -244,7 +285,10 @@ class CCompiler(Compiler):
         else:
             cmdlist = [binary_name]
         mlog.debug('Running test binary command: ' + ' '.join(cmdlist))
-        pe = subprocess.Popen(cmdlist)
+        try:
+            pe = subprocess.Popen(cmdlist)
+        except Exception as e:
+            raise EnvironmentException('Could not invoke sanity test executable: %s.' % str(e))
         pe.wait()
         if pe.returncode != 0:
             raise EnvironmentException('Executables created by {0} compiler {1} are not runnable.'.format(self.language, self.name_string()))
@@ -252,6 +296,12 @@ class CCompiler(Compiler):
     def sanity_check(self, work_dir, environment):
         code = 'int main(int argc, char **argv) { int class=0; return class; }\n'
         return self.sanity_check_impl(work_dir, environment, 'sanitycheckc.c', code)
+
+    def check_header(self, hname, prefix, env, extra_args=None, dependencies=None):
+        fargs = {'prefix': prefix, 'header': hname}
+        code = '''{prefix}
+        #include <{header}>'''
+        return self.compiles(code.format(**fargs), env, extra_args, dependencies)
 
     def has_header(self, hname, prefix, env, extra_args=None, dependencies=None):
         fargs = {'prefix': prefix, 'header': hname}
@@ -294,6 +344,8 @@ class CCompiler(Compiler):
             args += d.get_compile_args()
             if d.need_threads():
                 args += self.thread_flags(env)
+            elif d.need_openmp():
+                args += self.openmp_flags()
             if mode == 'link':
                 # Add link flags needed to find dependencies
                 args += d.get_link_args()
@@ -307,37 +359,33 @@ class CCompiler(Compiler):
         if not self.is_cross:
             if mode == 'preprocess':
                 # Add CPPFLAGS from the env.
-                args += env.coredata.external_preprocess_args[self.language]
+                args += env.coredata.get_external_preprocess_args(self.language)
             elif mode == 'compile':
                 # Add CFLAGS/CXXFLAGS/OBJCFLAGS/OBJCXXFLAGS from the env
-                args += env.coredata.external_args[self.language]
+                args += env.coredata.get_external_args(self.language)
             elif mode == 'link':
                 # Add LDFLAGS from the env
-                args += env.coredata.external_link_args[self.language]
+                args += env.coredata.get_external_link_args(self.language)
         args += self.get_compiler_check_args()
         # extra_args must override all other arguments, so we add them last
         args += extra_args
         return args
 
     def compiles(self, code, env, extra_args=None, dependencies=None, mode='compile'):
-        args = self._get_compiler_check_args(env, extra_args, dependencies, mode)
-        # We only want to compile; not link
-        with self.compile(code, args.to_native(), mode) as p:
+        with self._build_wrapper(code, env, extra_args, dependencies, mode) as p:
             return p.returncode == 0
 
-    def _links_wrapper(self, code, env, extra_args, dependencies):
-        "Shares common code between self.links and self.run"
-        args = self._get_compiler_check_args(env, extra_args, dependencies, mode='link')
-        return self.compile(code, args)
+    def _build_wrapper(self, code, env, extra_args, dependencies=None, mode='compile', want_output=False):
+        args = self._get_compiler_check_args(env, extra_args, dependencies, mode)
+        return self.compile(code, args, mode, want_output=want_output)
 
     def links(self, code, env, extra_args=None, dependencies=None):
-        with self._links_wrapper(code, env, extra_args, dependencies) as p:
-            return p.returncode == 0
+        return self.compiles(code, env, extra_args, dependencies, mode='link')
 
     def run(self, code, env, extra_args=None, dependencies=None):
         if self.is_cross and self.exe_wrapper is None:
             raise CrossNoRunException('Can not run test applications in this cross environment.')
-        with self._links_wrapper(code, env, extra_args, dependencies) as p:
+        with self._build_wrapper(code, env, extra_args, dependencies, mode='link', want_output=True) as p:
             if p.returncode != 0:
                 mlog.debug('Could not compile test file %s: %d\n' % (
                     p.input_name,
@@ -367,24 +415,52 @@ class CCompiler(Compiler):
         return self.compiles(t.format(**fargs), env, extra_args, dependencies)
 
     def cross_compute_int(self, expression, low, high, guess, prefix, env, extra_args, dependencies):
+        # Try user's guess first
         if isinstance(guess, int):
             if self._compile_int('%s == %d' % (expression, guess), prefix, env, extra_args, dependencies):
                 return guess
 
-        cur = low
-        while low < high:
-            cur = int((low + high) / 2)
-            if cur == low:
-                break
-
-            if self._compile_int('%s >= %d' % (expression, cur), prefix, env, extra_args, dependencies):
-                low = cur
-            else:
+        # If no bounds are given, compute them in the limit of int32
+        maxint = 0x7fffffff
+        minint = -0x80000000
+        if not isinstance(low, int) or not isinstance(high, int):
+            if self._compile_int('%s >= 0' % (expression), prefix, env, extra_args, dependencies):
+                low = cur = 0
+                while self._compile_int('%s > %d' % (expression, cur), prefix, env, extra_args, dependencies):
+                    low = cur + 1
+                    if low > maxint:
+                        raise EnvironmentException('Cross-compile check overflowed')
+                    cur = cur * 2 + 1
+                    if cur > maxint:
+                        cur = maxint
                 high = cur
+            else:
+                low = cur = -1
+                while self._compile_int('%s < %d' % (expression, cur), prefix, env, extra_args, dependencies):
+                    high = cur - 1
+                    if high < minint:
+                        raise EnvironmentException('Cross-compile check overflowed')
+                    cur = cur * 2
+                    if cur < minint:
+                        cur = minint
+                low = cur
+        else:
+            # Sanity check limits given by user
+            if high < low:
+                raise EnvironmentException('high limit smaller than low limit')
+            condition = '%s <= %d && %s >= %d' % (expression, high, expression, low)
+            if not self._compile_int(condition, prefix, env, extra_args, dependencies):
+                raise EnvironmentException('Value out of given range')
 
-        if self._compile_int('%s == %d' % (expression, cur), prefix, env, extra_args, dependencies):
-            return cur
-        raise EnvironmentException('Cross-compile check overflowed')
+        # Binary search
+        while low != high:
+            cur = low + int((high - low) / 2)
+            if self._compile_int('%s <= %d' % (expression, cur), prefix, env, extra_args, dependencies):
+                high = cur
+            else:
+                low = cur + 1
+
+        return low
 
     def compute_int(self, expression, low, high, guess, prefix, env, extra_args=None, dependencies=None):
         if extra_args is None:
@@ -416,7 +492,7 @@ class CCompiler(Compiler):
         }}'''
         if not self.compiles(t.format(**fargs), env, extra_args, dependencies):
             return -1
-        return self.cross_compute_int('sizeof(%s)' % typename, 1, 1024, None, prefix, env, extra_args, dependencies)
+        return self.cross_compute_int('sizeof(%s)' % typename, None, None, None, prefix, env, extra_args, dependencies)
 
     def sizeof(self, typename, prefix, env, extra_args=None, dependencies=None):
         if extra_args is None:
@@ -454,7 +530,7 @@ class CCompiler(Compiler):
             char c;
             {type} target;
         }};'''
-        return self.cross_compute_int('offsetof(struct tmp, target)', 1, 1024, None, t.format(**fargs), env, extra_args, dependencies)
+        return self.cross_compute_int('offsetof(struct tmp, target)', None, None, None, t.format(**fargs), env, extra_args, dependencies)
 
     def alignment(self, typename, prefix, env, extra_args=None, dependencies=None):
         if extra_args is None:
@@ -498,8 +574,9 @@ class CCompiler(Compiler):
             if p.returncode != 0:
                 raise EnvironmentException('Could not get define {!r}'.format(dname))
         # Get the preprocessed value after the delimiter,
-        # minus the extra newline at the end
-        return p.stdo.split(delim + '\n')[-1][:-1]
+        # minus the extra newline at the end and
+        # merge string literals.
+        return CCompiler.concatenate_string_literals(p.stdo.split(delim + '\n')[-1][:-1])
 
     def get_return_value(self, fname, rtype, prefix, env, extra_args, dependencies):
         if rtype == 'string':
@@ -708,7 +785,7 @@ class CCompiler(Compiler):
         args = self.get_cross_extra_flags(env, link=False)
         args += self.get_compiler_check_args()
         n = 'symbols_have_underscore_prefix'
-        with self.compile(code, args, 'compile') as p:
+        with self.compile(code, args, 'compile', want_output=True) as p:
             if p.returncode != 0:
                 m = 'BUG: Unable to compile {!r} check: {}'
                 raise RuntimeError(m.format(n, p.stdo))
@@ -726,7 +803,23 @@ class CCompiler(Compiler):
                         return False
         raise RuntimeError('BUG: {!r} check failed unexpectedly'.format(n))
 
-    def get_library_naming(self, env, libtype):
+    def _get_patterns(self, env, prefixes, suffixes, shared=False):
+        patterns = []
+        for p in prefixes:
+            for s in suffixes:
+                patterns.append(p + '{}.' + s)
+        if shared and for_openbsd(self.is_cross, env):
+            # Shared libraries on OpenBSD can be named libfoo.so.X.Y:
+            # https://www.openbsd.org/faq/ports/specialtopics.html#SharedLibs
+            #
+            # This globbing is probably the best matching we can do since regex
+            # is expensive. It's wrong in many edge cases, but it will match
+            # correctly-named libraries and hopefully no one on OpenBSD names
+            # their files libfoo.so.9a.7b.1.0
+            patterns.append('lib{}.so.[0-9]*.[0-9]*')
+        return patterns
+
+    def get_library_naming(self, env, libtype, strict=False):
         '''
         Get library prefixes and suffixes for the target platform ordered by
         priority
@@ -734,7 +827,10 @@ class CCompiler(Compiler):
         stlibext = ['a']
         # We've always allowed libname to be both `foo` and `libfoo`,
         # and now people depend on it
-        prefixes = ['lib', '']
+        if strict and self.id != 'msvc': # lib prefix is not usually used with msvc
+            prefixes = ['lib']
+        else:
+            prefixes = ['lib', '']
         # Library suffixes and prefixes
         if for_darwin(env.is_cross_build(), env):
             shlibext = ['dylib']
@@ -753,48 +849,116 @@ class CCompiler(Compiler):
         else:
             # Linux/BSDs
             shlibext = ['so']
+        patterns = []
         # Search priority
         if libtype in ('default', 'shared-static'):
-            suffixes = shlibext + stlibext
+            patterns += self._get_patterns(env, prefixes, shlibext, True)
+            patterns += self._get_patterns(env, prefixes, stlibext, False)
         elif libtype == 'static-shared':
-            suffixes = stlibext + shlibext
+            patterns += self._get_patterns(env, prefixes, stlibext, False)
+            patterns += self._get_patterns(env, prefixes, shlibext, True)
         elif libtype == 'shared':
-            suffixes = shlibext
+            patterns += self._get_patterns(env, prefixes, shlibext, True)
         elif libtype == 'static':
-            suffixes = stlibext
+            patterns += self._get_patterns(env, prefixes, stlibext, False)
         else:
             raise AssertionError('BUG: unknown libtype {!r}'.format(libtype))
-        return prefixes, suffixes
+        return patterns
 
-    def find_library(self, libname, env, extra_dirs, libtype='default'):
-        # These libraries are either built-in or invalid
-        if libname in self.ignore_libs:
-            return []
+    @staticmethod
+    def _sort_shlibs_openbsd(libs):
+        filtered = []
+        for lib in libs:
+            # Validate file as a shared library of type libfoo.so.X.Y
+            ret = lib.rsplit('.so.', maxsplit=1)
+            if len(ret) != 2:
+                continue
+            try:
+                float(ret[1])
+            except ValueError:
+                continue
+            filtered.append(lib)
+        float_cmp = lambda x: float(x.rsplit('.so.', maxsplit=1)[1])
+        return sorted(filtered, key=float_cmp, reverse=True)
+
+    @classmethod
+    def _get_trials_from_pattern(cls, pattern, directory, libname):
+        f = os.path.join(directory, pattern.format(libname))
+        # Globbing for OpenBSD
+        if '*' in pattern:
+            # NOTE: globbing matches directories and broken symlinks
+            # so we have to do an isfile test on it later
+            return cls._sort_shlibs_openbsd(glob.glob(f))
+        return [f]
+
+    @staticmethod
+    def _get_file_from_list(files):
+        for f in files:
+            if os.path.isfile(f):
+                return f
+        return None
+
+    def find_library_real(self, libname, env, extra_dirs, code, libtype):
         # First try if we can just add the library as -l.
-        code = 'int main(int argc, char **argv) { return 0; }'
-        if extra_dirs and isinstance(extra_dirs, str):
-            extra_dirs = [extra_dirs]
         # Gcc + co seem to prefer builtin lib dirs to -L dirs.
         # Only try to find std libs if no extra dirs specified.
-        if not extra_dirs and libtype == 'default':
+        if not extra_dirs:
             args = ['-l' + libname]
             if self.links(code, env, extra_args=args):
                 return args
-        # Ensure that we won't modify the list that was passed to us
-        extra_dirs = extra_dirs[:]
-        # Search in the system libraries too
-        extra_dirs += self.get_library_dirs()
         # Not found or we want to use a specific libtype? Try to find the
         # library file itself.
-        prefixes, suffixes = self.get_library_naming(env, libtype)
-        # Triply-nested loop!
+        patterns = self.get_library_naming(env, libtype)
         for d in extra_dirs:
-            for suffix in suffixes:
-                for prefix in prefixes:
-                    trial = os.path.join(d, prefix + libname + '.' + suffix)
-                    if os.path.isfile(trial):
-                        return [trial]
+            for p in patterns:
+                trial = self._get_trials_from_pattern(p, d, libname)
+                if not trial:
+                    continue
+                trial = self._get_file_from_list(trial)
+                if not trial:
+                    continue
+                return [trial]
+        # Search in the system libraries too
+        for d in self.get_library_dirs():
+            for p in patterns:
+                trial = self._get_trials_from_pattern(p, d, libname)
+                if not trial:
+                    continue
+                trial = self._get_file_from_list(trial)
+                if not trial:
+                    continue
+                # When searching the system paths used by the compiler, we
+                # need to check linking with link-whole, as static libs
+                # (.a) need to be checked to ensure they are the right
+                # architecture, e.g. 32bit or 64-bit.
+                # Just a normal test link won't work as the .a file doesn't
+                # seem to be checked by linker if there are no unresolved
+                # symbols from the main C file.
+                extra_link_args = self.get_link_whole_for([trial])
+                extra_link_args = self.linker_to_compiler_args(extra_link_args)
+                if self.links(code, env, extra_args=extra_link_args):
+                    return [trial]
         return None
+
+    def find_library_impl(self, libname, env, extra_dirs, code, libtype):
+        # These libraries are either built-in or invalid
+        if libname in self.ignore_libs:
+            return []
+        if isinstance(extra_dirs, str):
+            extra_dirs = [extra_dirs]
+        key = (tuple(self.exelist), libname, tuple(extra_dirs), code, libtype)
+        if key not in self.find_library_cache:
+            value = self.find_library_real(libname, env, extra_dirs, code, libtype)
+            self.find_library_cache[key] = value
+        else:
+            value = self.find_library_cache[key]
+        if value is None:
+            return None
+        return value[:]
+
+    def find_library(self, libname, env, extra_dirs, libtype='default'):
+        code = 'int main(int argc, char **argv) { return 0; }'
+        return self.find_library_impl(libname, env, extra_dirs, code, libtype)
 
     def thread_flags(self, env):
         if for_haiku(self.is_cross, env):
@@ -806,16 +970,56 @@ class CCompiler(Compiler):
             return []
         return ['-pthread']
 
-    def has_multi_arguments(self, args, env):
-        for arg in args:
-            if arg.startswith('-Wl,'):
-                mlog.warning('''{} looks like a linker argument, but has_argument
-and other similar methods only support checking compiler arguments.
-Using them to check linker arguments are never supported, and results
-are likely to be wrong regardless of the compiler you are using.
-'''.format(arg))
-        return self.compiles('int i;\n', env, extra_args=args)
+    def linker_to_compiler_args(self, args):
+        return args
 
+    def has_arguments(self, args, env, code, mode):
+        return self.compiles(code, env, extra_args=args, mode=mode)
+
+    def has_multi_arguments(self, args, env):
+        for arg in args[:]:
+            # some compilers, e.g. GCC, don't warn for unsupported warning-disable
+            # flags, so when we are testing a flag like "-Wno-forgotten-towel", also
+            # check the equivalent enable flag too "-Wforgotten-towel"
+            if arg.startswith('-Wno-'):
+                    args.append('-W' + arg[5:])
+            if arg.startswith('-Wl,'):
+                mlog.warning('{} looks like a linker argument, '
+                             'but has_argument and other similar methods only '
+                             'support checking compiler arguments. Using them '
+                             'to check linker arguments are never supported, '
+                             'and results are likely to be wrong regardless of '
+                             'the compiler you are using. has_link_argument or '
+                             'other similar method can be used instead.'
+                             .format(arg))
+        code = 'int i;\n'
+        return self.has_arguments(args, env, code, mode='compile')
+
+    def has_multi_link_arguments(self, args, env):
+        # First time we check for link flags we need to first check if we have
+        # --fatal-warnings, otherwise some linker checks could give some
+        # false positive.
+        fatal_warnings_args = ['-Wl,--fatal-warnings']
+        if self.has_fatal_warnings_link_arg is None:
+            self.has_fatal_warnings_link_arg = False
+            self.has_fatal_warnings_link_arg = self.has_multi_link_arguments(fatal_warnings_args, env)
+
+        if self.has_fatal_warnings_link_arg:
+            args = fatal_warnings_args + args
+
+        args = self.linker_to_compiler_args(args)
+        code = 'int main(int argc, char **argv) { return 0; }'
+        return self.has_arguments(args, env, code, mode='link')
+
+    @staticmethod
+    def concatenate_string_literals(s):
+        pattern = re.compile(r'(?P<pre>.*([^\\]")|^")(?P<str1>([^\\"]|\\.)*)"\s+"(?P<str2>([^\\"]|\\.)*)(?P<post>".*)')
+        ret = s
+        m = pattern.match(ret)
+        while m:
+            ret = ''.join(m.group('pre', 'str1', 'str2', 'post'))
+            m = pattern.match(ret)
+        return ret
 
 class ClangCCompiler(ClangCompiler, CCompiler):
     def __init__(self, exelist, version, clang_type, is_cross, exe_wrapper=None, **kwargs):
@@ -827,10 +1031,12 @@ class ClangCCompiler(ClangCompiler, CCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     def get_options(self):
-        return {'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
-                                                  ['none', 'c89', 'c99', 'c11',
-                                                   'gnu89', 'gnu99', 'gnu11'],
-                                                  'none')}
+        opts = CCompiler.get_options(self)
+        opts.update({'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
+                                                       ['none', 'c89', 'c99', 'c11',
+                                                        'gnu89', 'gnu99', 'gnu11'],
+                                                       'none')})
+        return opts
 
     def get_option_compile_args(self, options):
         args = []
@@ -849,6 +1055,34 @@ class ClangCCompiler(ClangCompiler, CCompiler):
         return basic
 
 
+class ArmclangCCompiler(ArmclangCompiler, CCompiler):
+    def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
+        CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
+        ArmclangCompiler.__init__(self)
+        default_warn_args = ['-Wall', '-Winvalid-pch']
+        self.warn_args = {'1': default_warn_args,
+                          '2': default_warn_args + ['-Wextra'],
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
+
+    def get_options(self):
+        opts = CCompiler.get_options(self)
+        opts.update({'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
+                                                       ['none', 'c90', 'c99', 'c11',
+                                                        'gnu90', 'gnu99', 'gnu11'],
+                                                       'none')})
+        return opts
+
+    def get_option_compile_args(self, options):
+        args = []
+        std = options['c_std']
+        if std.value != 'none':
+            args.append('-std=' + std.value)
+        return args
+
+    def get_option_link_args(self, options):
+        return []
+
+
 class GnuCCompiler(GnuCompiler, CCompiler):
     def __init__(self, exelist, version, gcc_type, is_cross, exe_wrapper=None, defines=None, **kwargs):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
@@ -859,10 +1093,11 @@ class GnuCCompiler(GnuCompiler, CCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     def get_options(self):
-        opts = {'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
-                                                  ['none', 'c89', 'c99', 'c11',
-                                                   'gnu89', 'gnu99', 'gnu11'],
-                                                  'none')}
+        opts = CCompiler.get_options(self)
+        opts.update({'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
+                                                       ['none', 'c89', 'c99', 'c11',
+                                                        'gnu89', 'gnu99', 'gnu11'],
+                                                       'none')})
         if self.gcc_type == GCC_MINGW:
             opts.update({
                 'c_winlibs': coredata.UserArrayOption('c_winlibs', 'Standard Win libraries to link against',
@@ -888,6 +1123,30 @@ class GnuCCompiler(GnuCompiler, CCompiler):
         return ['-fpch-preprocess', '-include', os.path.basename(header)]
 
 
+class ElbrusCCompiler(GnuCCompiler, ElbrusCompiler):
+    def __init__(self, exelist, version, gcc_type, is_cross, exe_wrapper=None, defines=None, **kwargs):
+        GnuCCompiler.__init__(self, exelist, version, gcc_type, is_cross, exe_wrapper, defines, **kwargs)
+        ElbrusCompiler.__init__(self, gcc_type, defines)
+
+    # It does support some various ISO standards and c/gnu 90, 9x, 1x in addition to those which GNU CC supports.
+    def get_options(self):
+        opts = CCompiler.get_options(self)
+        opts.update({'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
+                                                       ['none', 'c89', 'c90', 'c9x', 'c99', 'c1x', 'c11',
+                                                        'gnu89', 'gnu90', 'gnu9x', 'gnu99', 'gnu1x', 'gnu11',
+                                                        'iso9899:2011', 'iso9899:1990', 'iso9899:199409', 'iso9899:1999'],
+                                                       'none')})
+        return opts
+
+    # Elbrus C compiler does not have lchmod, but there is only linker warning, not compiler error.
+    # So we should explicitly fail at this case.
+    def has_function(self, funcname, prefix, env, extra_args=None, dependencies=None):
+        if funcname == 'lchmod':
+            return False
+        else:
+            return super().has_function(funcname, prefix, env, extra_args, dependencies)
+
+
 class IntelCCompiler(IntelCompiler, CCompiler):
     def __init__(self, exelist, version, icc_type, is_cross, exe_wrapper=None, **kwargs):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
@@ -899,13 +1158,14 @@ class IntelCCompiler(IntelCompiler, CCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     def get_options(self):
+        opts = CCompiler.get_options(self)
         c_stds = ['c89', 'c99']
         g_stds = ['gnu89', 'gnu99']
         if version_compare(self.version, '>=16.0.0'):
             c_stds += ['c11']
-        opts = {'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
-                                                  ['none'] + c_stds + g_stds,
-                                                  'none')}
+        opts.update({'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
+                                                       ['none'] + c_stds + g_stds,
+                                                       'none')})
         return opts
 
     def get_option_compile_args(self, options):
@@ -918,8 +1178,8 @@ class IntelCCompiler(IntelCompiler, CCompiler):
     def get_std_shared_lib_link_args(self):
         return ['-shared']
 
-    def has_multi_arguments(self, args, env):
-        return super().has_multi_arguments(args + ['-diag-error', '10006'], env)
+    def has_arguments(self, args, env, code, mode):
+        return super().has_arguments(args + ['-diag-error', '10006'], env, code, mode)
 
 
 class VisualStudioCCompiler(CCompiler):
@@ -1003,6 +1263,9 @@ class VisualStudioCCompiler(CCompiler):
     def get_linker_search_args(self, dirname):
         return ['/LIBPATH:' + dirname]
 
+    def linker_to_compiler_args(self, args):
+        return ['/link'] + args
+
     def get_gui_app_args(self):
         return ['/SUBSYSTEM:WINDOWS']
 
@@ -1030,6 +1293,9 @@ class VisualStudioCCompiler(CCompiler):
     def build_rpath_args(self, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
         return []
 
+    def openmp_flags(self):
+        return ['/openmp']
+
     # FIXME, no idea what these should be.
     def thread_flags(self, env):
         return []
@@ -1038,10 +1304,11 @@ class VisualStudioCCompiler(CCompiler):
         return []
 
     def get_options(self):
-        return {'c_winlibs': coredata.UserArrayOption('c_winlibs',
-                                                      'Windows libs to link against.',
-                                                      msvc_winlibs)
-                }
+        opts = CCompiler.get_options(self)
+        opts.update({'c_winlibs': coredata.UserArrayOption('c_winlibs',
+                                                           'Windows libs to link against.',
+                                                           msvc_winlibs)})
+        return opts
 
     def get_option_link_args(self, options):
         return options['c_winlibs'].value[:]
@@ -1083,24 +1350,12 @@ class VisualStudioCCompiler(CCompiler):
     # Visual Studio is special. It ignores some arguments it does not
     # understand and you can't tell it to error out on those.
     # http://stackoverflow.com/questions/15259720/how-can-i-make-the-microsoft-c-compiler-treat-unknown-flags-as-errors-rather-t
-    def has_multi_arguments(self, args, env):
-        warning_text = '9002'
-        code = 'int i;\n'
-        (fd, srcname) = tempfile.mkstemp(suffix='.' + self.default_suffix)
-        os.close(fd)
-        with open(srcname, 'w') as ofile:
-            ofile.write(code)
-        # Read c_args/cpp_args/etc from the cross-info file (if needed)
-        extra_args = self.get_cross_extra_flags(env, link=False)
-        extra_args += self.get_compile_only_args()
-        commands = self.exelist + args + extra_args + [srcname]
-        mlog.debug('Running VS compile:')
-        mlog.debug('Command line: ', ' '.join(commands))
-        mlog.debug('Code:\n', code)
-        p, stdo, stde = Popen_safe(commands, cwd=os.path.dirname(srcname))
-        if p.returncode != 0:
-            return False
-        return not(warning_text in stde or warning_text in stdo)
+    def has_arguments(self, args, env, code, mode):
+        warning_text = '4044' if mode == 'link' else '9002'
+        with self._build_wrapper(code, env, extra_args=args, mode=mode) as p:
+            if p.returncode != 0:
+                return False
+            return not(warning_text in p.stde or warning_text in p.stdo)
 
     def get_compile_debugfile_args(self, rel_obj, pch=False):
         pdbarr = rel_obj.split('.')[:-1]
@@ -1166,3 +1421,23 @@ class VisualStudioCCompiler(CCompiler):
         if 'INCLUDE' not in os.environ:
             return []
         return os.environ['INCLUDE'].split(os.pathsep)
+
+
+class ArmCCompiler(ArmCompiler, CCompiler):
+    def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
+        CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
+        ArmCompiler.__init__(self)
+
+    def get_options(self):
+        opts = CCompiler.get_options(self)
+        opts.update({'c_std': coredata.UserComboOption('c_std', 'C language standard to use',
+                                                       ['none', 'c90', 'c99'],
+                                                       'none')})
+        return opts
+
+    def get_option_compile_args(self, options):
+        args = []
+        std = options['c_std']
+        if std.value != 'none':
+            args.append('--' + std.value)
+        return args

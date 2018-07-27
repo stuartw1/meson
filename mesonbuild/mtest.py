@@ -105,6 +105,32 @@ def buildparser():
     return parser
 
 
+def returncode_to_status(retcode):
+    # Note: We can't use `os.WIFSIGNALED(result.returncode)` and the related
+    # functions here because the status returned by subprocess is munged. It
+    # returns a negative value if the process was killed by a signal rather than
+    # the raw status returned by `wait()`. Also, If a shell sits between Meson
+    # the the actual unit test that shell is likely to convert a termination due
+    # to a signal into an exit status of 128 plus the signal number.
+    if retcode < 0:
+        signum = -retcode
+        try:
+            signame = signal.Signals(signum).name
+        except ValueError:
+            signame = 'SIGinvalid'
+        return '(killed by signal %d %s)' % (signum, signame)
+
+    if retcode <= 128:
+        return '(exit status %d)' % (retcode,)
+
+    signum = retcode - 128
+    try:
+        signame = signal.Signals(signum).name
+    except ValueError:
+        signame = 'SIGinvalid'
+    return '(exit status %d or signal %d %s)' % (retcode, signum, signame)
+
+
 class TestException(mesonlib.MesonException):
     pass
 
@@ -231,11 +257,27 @@ class SingleTestRunner:
                 self.test.timeout = None
             return self._run_cmd(wrap + cmd + self.test.cmd_args + self.options.test_args)
 
+    @staticmethod
+    def _substring_in_list(substr, strlist):
+        for s in strlist:
+            if substr in s:
+                return True
+        return False
+
     def _run_cmd(self, cmd):
         starttime = time.time()
 
         if len(self.test.extra_paths) > 0:
             self.env['PATH'] = os.pathsep.join(self.test.extra_paths + ['']) + self.env['PATH']
+            if self._substring_in_list('wine', cmd):
+                wine_paths = ['Z:' + p for p in self.test.extra_paths]
+                wine_path = ';'.join(wine_paths)
+                # Don't accidentally end with an `;` because that will add the
+                # current directory and might cause unexpected behaviour
+                if 'WINEPATH' in self.env:
+                    self.env['WINEPATH'] = wine_path + ';' + self.env['WINEPATH']
+                else:
+                    self.env['WINEPATH'] = wine_path
 
         # If MALLOC_PERTURB_ is not set, or if it is set to an empty value,
         # (i.e., the test or the environment don't explicitly set it), set
@@ -304,7 +346,8 @@ class SingleTestRunner:
                 subprocess.call(['taskkill', '/F', '/T', '/PID', str(p.pid)])
             else:
                 try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    # Kill the process group that setsid() created.
+                    os.killpg(p.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     # Sometimes (e.g. with Wine) this happens.
                     # There's nothing we can do (maybe the process
@@ -404,11 +447,16 @@ class TestHarness:
         num = '%s%d/%d' % (startpad, i + 1, len(tests))
         padding1 = ' ' * (38 - len(name))
         padding2 = ' ' * (8 - len(result.res.value))
-        result_str = '%s %s  %s%s%s%5.2f s' % \
-            (num, name, padding1, result.res.value, padding2, result.duration)
+        status = ''
+
+        if result.res is TestResult.FAIL:
+            status = returncode_to_status(result.returncode)
+        result_str = '%s %s  %s%s%s%5.2f s %s' % \
+            (num, name, padding1, result.res.value, padding2, result.duration,
+             status)
         if not self.options.quiet or result.res is not TestResult.OK:
             if result.res is not TestResult.OK and mlog.colorize_console:
-                if result.res is TestResult.FAIL or result.res is TestResult.TIMEOUT:
+                if result.res in (TestResult.FAIL, TestResult.TIMEOUT):
                     decorator = mlog.red
                 elif result.res is TestResult.SKIP:
                     decorator = mlog.yellow
@@ -476,6 +524,25 @@ TIMEOUT: %4d
             (prj_match, st_match) = TestHarness.split_suite_string(suite)
             for prjst in test.suite:
                 (prj, st) = TestHarness.split_suite_string(prjst)
+
+                # the SUITE can be passed as
+                #     suite_name
+                # or
+                #     project_name:suite_name
+                # so we need to select only the test belonging to project_name
+
+                # this if hanlde the first case (i.e., SUITE == suite_name)
+
+                # in this way we can run tests belonging to different
+                # (sub)projects which share the same suite_name
+                if not st_match and st == prj_match:
+                    return True
+
+                # these two conditions are needed to handle the second option
+                # i.e., SUITE == project_name:suite_name
+
+                # in this way we select the only the tests of
+                # project_name with suite_name
                 if prj_match and prj != prj_match:
                     continue
                 if st_match and st != st_match:

@@ -89,9 +89,9 @@ class DCompiler(Compiler):
     def get_std_shared_lib_link_args(self):
         return ['-shared']
 
-    def get_soname_args(self, prefix, shlib_name, suffix, path, soversion, is_shared_module):
+    def get_soname_args(self, prefix, shlib_name, suffix, soversion, is_shared_module):
         # FIXME: Make this work for Windows, MacOS and cross-compiling
-        return get_gcc_soname_args(GCC_STANDARD, prefix, shlib_name, suffix, path, soversion, is_shared_module)
+        return get_gcc_soname_args(GCC_STANDARD, prefix, shlib_name, suffix, soversion, is_shared_module)
 
     def get_feature_args(self, kwargs, build_to_src):
         res = []
@@ -180,10 +180,10 @@ class DCompiler(Compiler):
 
         if mode == 'compile':
             # Add DFLAGS from the env
-            args += env.coredata.external_args[self.language]
+            args += env.coredata.get_external_args(self.language)
         elif mode == 'link':
             # Add LDFLAGS from the env
-            args += env.coredata.external_link_args[self.language]
+            args += env.coredata.get_external_link_args(self.language)
         # extra_args must override all other arguments, so we add them last
         args += extra_args
         return args
@@ -211,6 +211,14 @@ class DCompiler(Compiler):
                 linkargs = arg[arg.index(',') + 1:].split(',')
                 for la in linkargs:
                     dcargs.append('-L' + la.strip())
+                continue
+            elif arg.startswith('-link-defaultlib') or arg.startswith('-linker'):
+                # these are special arguments to the LDC linker call,
+                # arguments like "-link-defaultlib-shared" do *not*
+                # denote a library to be linked, but change the default
+                # Phobos/DRuntime linking behavior, while "-linker" sets the
+                # default linker.
+                dcargs.append(arg)
                 continue
             elif arg.startswith('-l'):
                 # translate library link flag

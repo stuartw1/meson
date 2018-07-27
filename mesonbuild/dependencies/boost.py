@@ -97,8 +97,7 @@ class BoostDependency(ExternalDependency):
     def __init__(self, environment, kwargs):
         super().__init__('boost', environment, 'cpp', kwargs)
         self.need_static_link = ['boost_exception', 'boost_test_exec_monitor']
-        # FIXME: is this the right way to find the build type?
-        self.is_debug = environment.cmd_line_options.buildtype.startswith('debug')
+        self.is_debug = environment.coredata.get_builtin_option('buildtype').startswith('debug')
         threading = kwargs.get("threading", "multi")
         self.is_multithreading = threading == "multi"
 
@@ -186,7 +185,7 @@ class BoostDependency(ExternalDependency):
 
     def detect_nix_roots(self):
         return [os.path.abspath(os.path.join(x, '..'))
-                for x in self.compiler.get_default_include_dirs()]
+                for x in self.clib_compiler.get_default_include_dirs()]
 
     def detect_win_roots(self):
         res = []
@@ -244,8 +243,8 @@ class BoostDependency(ExternalDependency):
         # and http://stackoverflow.com/questions/37218953/isystem-on-a-system-include-directory-causes-errors
         # for more details
 
-        if include_dir and include_dir not in self.compiler.get_default_include_dirs():
-            args.append("".join(self.compiler.get_include_args(include_dir, True)))
+        if include_dir and include_dir not in self.clib_compiler.get_default_include_dirs():
+            args.append("".join(self.clib_compiler.get_include_args(include_dir, True)))
         return args
 
     def get_requested(self, kwargs):
@@ -257,7 +256,7 @@ class BoostDependency(ExternalDependency):
 
     def detect_headers_and_version(self):
         try:
-            version = self.compiler.get_define('BOOST_LIB_VERSION', '#include <boost/version.hpp>', self.env, self.get_compile_args(), [])
+            version = self.clib_compiler.get_define('BOOST_LIB_VERSION', '#include <boost/version.hpp>', self.env, self.get_compile_args(), [])
         except mesonlib.EnvironmentException:
             return
         except TypeError:
@@ -362,7 +361,7 @@ class BoostDependency(ExternalDependency):
         for module in self.requested_modules:
             libname = 'boost_' + module + tag
 
-            args = self.compiler.find_library(libname, self.env, self.extra_lib_dirs())
+            args = self.clib_compiler.find_library(libname, self.env, self.extra_lib_dirs())
             if args is None:
                 mlog.debug("Couldn\'t find library '{}' for boost module '{}'  (ABI tag = '{}')".format(libname, module, tag))
                 all_found = False
@@ -474,10 +473,10 @@ class BoostDependency(ExternalDependency):
             return [os.path.join(self.boost_root, 'lib')]
         return []
 
-    def get_link_args(self):
+    def get_link_args(self, **kwargs):
         args = []
-        for dir in self.extra_lib_dirs():
-            args += self.compiler.get_linker_search_args(dir)
+        for d in self.extra_lib_dirs():
+            args += self.clib_compiler.get_linker_search_args(d)
         for lib in self.requested_modules:
             args += self.lib_modules['boost_' + lib]
         return args

@@ -58,6 +58,8 @@ def gtkdoc_run_check(cmd, cwd, library_path=None):
         if out:
             err_msg.append(out)
         raise MesonException('\n'.join(err_msg))
+    elif out:
+        print(out)
 
 def build_gtkdoc(source_root, build_root, doc_subdir, src_subdirs,
                  main_file, module,
@@ -91,9 +93,12 @@ def build_gtkdoc(source_root, build_root, doc_subdir, src_subdirs,
 
     # Copy files to build directory
     for f in content_files:
-        f_abs = os.path.join(doc_src, f)
-        shutil.copyfile(f_abs, os.path.join(
-            abs_out, os.path.basename(f_abs)))
+        # FIXME: Use mesonlib.File objects so we don't need to do this
+        if not os.path.isabs(f):
+            f = os.path.join(doc_src, f)
+        elif os.path.commonpath([f, build_root]) == build_root:
+            continue
+        shutil.copyfile(f, os.path.join(abs_out, os.path.basename(f)))
 
     shutil.rmtree(htmldir, ignore_errors=True)
     try:
@@ -112,12 +117,19 @@ def build_gtkdoc(source_root, build_root, doc_subdir, src_subdirs,
     scan_cmd += scan_args
     gtkdoc_run_check(scan_cmd, abs_out)
 
+    # Use the generated types file when available, otherwise gobject_typesfile
+    # would often be a path to source dir instead of build dir.
+    if '--rebuild-types' in scan_args:
+        gobject_typesfile = os.path.join(abs_out, module + '.types')
+
     if gobject_typesfile:
         scanobjs_cmd = ['gtkdoc-scangobj'] + scanobjs_args + ['--types=' + gobject_typesfile,
                                                               '--module=' + module,
                                                               '--cflags=' + cflags,
                                                               '--ldflags=' + ldflags,
-                                                              '--ld=' + ld]
+                                                              '--cc=' + cc,
+                                                              '--ld=' + ld,
+                                                              '--output-dir=' + abs_out]
 
         library_paths = []
         for ldflag in shlex.split(ldflags):
@@ -127,7 +139,7 @@ def build_gtkdoc(source_root, build_root, doc_subdir, src_subdirs,
             library_paths.append(os.environ['LD_LIBRARY_PATH'])
         library_path = ':'.join(library_paths)
 
-        gtkdoc_run_check(scanobjs_cmd, abs_out, library_path)
+        gtkdoc_run_check(scanobjs_cmd, build_root, library_path)
 
     # Make docbook files
     if mode == 'auto':

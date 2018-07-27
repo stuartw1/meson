@@ -38,7 +38,7 @@ class PackageGenerator:
         self.product_name = 'Meson Build System'
         self.manufacturer = 'The Meson Development Team'
         self.version = coredata.version.replace('dev', '')
-        self.guid = 'DF5B3ECA-4A31-43E3-8CE4-97FC8A97212E'
+        self.guid = '*'
         self.update_guid = '141527EE-E28A-4D14-97A4-92E6075D28B2'
         self.main_xml = 'meson.wxs'
         self.main_o = 'meson.wixobj'
@@ -85,6 +85,7 @@ class PackageGenerator:
         main_stage, ninja_stage = self.staging_dirs
         modules = [os.path.splitext(os.path.split(x)[1])[0] for x in glob(os.path.join('mesonbuild/modules/*'))]
         modules = ['mesonbuild.modules.' + x for x in modules if not x.startswith('_')]
+        modules += ['distutils.version']
         modulestr = ','.join(modules)
         python = shutil.which('python')
         cxfreeze = os.path.join(os.path.dirname(python), "Scripts", "cxfreeze")
@@ -129,6 +130,9 @@ class PackageGenerator:
             'Compressed': 'yes',
             'SummaryCodepage': '1252',
         })
+
+        ET.SubElement(product, 'MajorUpgrade',
+                      {'DowngradeErrorMessage': 'A newer version of Meson is already installed.'})
 
         if self.bytesize == 64:
             package.set('Platform', 'x64')

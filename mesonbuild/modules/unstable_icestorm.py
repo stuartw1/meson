@@ -13,22 +13,25 @@
 # limitations under the License.
 
 from .. import mesonlib
+from ..interpreterbase import flatten
+from ..interpreterbase import FeatureNew
 
 from . import ExtensionModule
 
 class IceStormModule(ExtensionModule):
 
-    def __init__(self):
-        super().__init__()
+    @FeatureNew('FPGA/Icestorm Module', '0.45.0')
+    def __init__(self, interpreter):
+        super().__init__(interpreter)
         self.snippets.add('project')
         self.yosys_bin = None
 
     def detect_binaries(self, interpreter):
-        self.yosys_bin = interpreter.func_find_program(None, ['yosys'], {})
-        self.arachne_bin = interpreter.func_find_program(None, ['arachne-pnr'], {})
-        self.icepack_bin = interpreter.func_find_program(None, ['icepack'], {})
-        self.iceprog_bin = interpreter.func_find_program(None, ['iceprog'], {})
-        self.icetime_bin = interpreter.func_find_program(None, ['icetime'], {})
+        self.yosys_bin = interpreter.find_program_impl(['yosys'])
+        self.arachne_bin = interpreter.find_program_impl(['arachne-pnr'])
+        self.icepack_bin = interpreter.find_program_impl(['icepack'])
+        self.iceprog_bin = interpreter.find_program_impl(['iceprog'])
+        self.icetime_bin = interpreter.find_program_impl(['icetime'])
 
     def project(self, interpreter, state, args, kwargs):
         if not self.yosys_bin:
@@ -42,7 +45,7 @@ class IceStormModule(ExtensionModule):
         kwarg_sources = kwargs.get('sources', [])
         if not isinstance(kwarg_sources, list):
             kwarg_sources = [kwarg_sources]
-        all_sources = interpreter.source_strings_to_files(interpreter.flatten(arg_sources + kwarg_sources))
+        all_sources = interpreter.source_strings_to_files(flatten(arg_sources + kwarg_sources))
         if 'constraint_file' not in kwargs:
             raise mesonlib.MesonException('Constraint file not specified.')
 
@@ -80,5 +83,5 @@ class IceStormModule(ExtensionModule):
         interpreter.func_run_target(None, [time_name], {
             'command': [self.icetime_bin, bin_target]})
 
-def initialize():
-    return IceStormModule()
+def initialize(*args, **kwargs):
+    return IceStormModule(*args, **kwargs)

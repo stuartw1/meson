@@ -23,6 +23,8 @@ from mesonbuild import mlog
 
 have_fcntl = False
 have_msvcrt = False
+# {subproject: project_meson_version}
+project_meson_versions = {}
 
 try:
     import fcntl
@@ -38,58 +40,12 @@ except Exception:
 
 from glob import glob
 
-def detect_meson_py_location():
-    c = sys.argv[0]
-    c_dir, c_fname = os.path.split(c)
-
-    # get the absolute path to the <mesontool> folder
-    m_dir = None
-    if os.path.isabs(c):
-        # $ /foo/<mesontool>.py <args>
-        m_dir = c_dir
-    elif c_dir == '':
-        # $ <mesontool> <args> (gets run from /usr/bin/<mesontool>)
-        in_path_exe = shutil.which(c_fname)
-        if in_path_exe:
-            if not os.path.isabs(in_path_exe):
-                m_dir = os.getcwd()
-                c_fname = in_path_exe
-            else:
-                m_dir, c_fname = os.path.split(in_path_exe)
-    else:
-        m_dir = os.path.abspath(c_dir)
-
-    # find meson in m_dir
-    if m_dir is not None:
-        for fname in ['meson', 'meson.py']:
-            m_path = os.path.join(m_dir, fname)
-            if os.path.exists(m_path):
-                return m_path
-
-    # No meson found, which means that either:
-    # a) meson is not installed
-    # b) meson is installed to a non-standard location
-    # c) the script that invoked mesonlib is not the one of meson tools (e.g. run_unittests.py)
-    fname = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'meson.py'))
-    if os.path.exists(fname):
-        return fname
-    # If meson is still not found, we might be imported by out-of-source tests
-    # https://github.com/mesonbuild/meson/issues/3015
-    exe = shutil.which('meson')
-    if exe is None:
-        exe = shutil.which('meson.py')
-    if exe is not None:
-        return exe
-    # Give up.
-    raise RuntimeError('Could not determine how to run Meson. Please file a bug with details.')
-
 if os.path.basename(sys.executable) == 'meson.exe':
     # In Windows and using the MSI installed executable.
-    meson_command = [sys.executable]
     python_command = [sys.executable, 'runpython']
 else:
     python_command = [sys.executable]
-    meson_command = python_command + [detect_meson_py_location()]
+meson_command = None
 
 def is_ascii_string(astring):
     try:
@@ -126,6 +82,13 @@ an_unpicklable_object = threading.Lock()
 
 class MesonException(Exception):
     '''Exceptions thrown by Meson'''
+
+    def get_msg_with_context(self):
+        s = ''
+        if hasattr(self, 'lineno') and hasattr(self, 'file'):
+            s = get_error_location_string(self.file, self.lineno) + ' '
+        s += str(self)
+        return s
 
 class EnvironmentException(MesonException):
     '''Exceptions thrown while processing and creating the build environment'''
@@ -308,6 +271,9 @@ def is_android():
 def is_haiku():
     return platform.system().lower() == 'haiku'
 
+def is_openbsd():
+    return platform.system().lower() == 'openbsd'
+
 def is_windows():
     platname = platform.system().lower()
     return platname == 'windows' or 'mingw' in platname
@@ -370,7 +336,7 @@ def for_darwin(is_cross, env):
     if not is_cross:
         return is_osx()
     elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'darwin'
+        return env.cross_info.config['host_machine']['system'] in ('darwin', 'ios')
     return False
 
 def for_android(is_cross, env):
@@ -395,6 +361,18 @@ def for_haiku(is_cross, env):
         return is_haiku()
     elif env.cross_info.has_host():
         return env.cross_info.config['host_machine']['system'] == 'haiku'
+    return False
+
+def for_openbsd(is_cross, env):
+    """
+    Host machine is OpenBSD?
+
+    Note: 'host' is the machine on which compiled binaries will run
+    """
+    if not is_cross:
+        return is_openbsd()
+    elif env.cross_info.has_host():
+        return env.cross_info.config['host_machine']['system'] == 'openbsd'
     return False
 
 def exe_exists(arglist):
@@ -437,6 +415,12 @@ def grab_leading_numbers(vstr, strict=False):
             break
     return result
 
+def make_same_len(listA, listB):
+    maxlen = max(len(listA), len(listB))
+    for i in listA, listB:
+        for n in range(len(i), maxlen):
+            i.append(0)
+
 numpart = re.compile('[0-9.]+')
 
 def version_compare(vstr1, vstr2, strict=False):
@@ -470,6 +454,7 @@ def version_compare(vstr1, vstr2, strict=False):
         cmpop = operator.eq
     varr1 = grab_leading_numbers(vstr1, strict)
     varr2 = grab_leading_numbers(vstr2, strict)
+    make_same_len(varr1, varr2)
     return cmpop(varr1, varr2)
 
 def version_compare_many(vstr1, conditions):
@@ -483,6 +468,76 @@ def version_compare_many(vstr1, conditions):
         else:
             found.append(req)
     return not_found == [], not_found, found
+
+
+def version_compare_condition_with_min(condition, minimum):
+    match = numpart.match(minimum.strip())
+    if match is None:
+        msg = 'Uncomparable version string {!r}.'
+        raise MesonException(msg.format(minimum))
+    minimum = match.group(0)
+    if condition.startswith('>='):
+        cmpop = operator.le
+        condition = condition[2:]
+    elif condition.startswith('<='):
+        return True
+        condition = condition[2:]
+    elif condition.startswith('!='):
+        return True
+        condition = condition[2:]
+    elif condition.startswith('=='):
+        cmpop = operator.le
+        condition = condition[2:]
+    elif condition.startswith('='):
+        cmpop = operator.le
+        condition = condition[1:]
+    elif condition.startswith('>'):
+        cmpop = operator.lt
+        condition = condition[1:]
+    elif condition.startswith('<'):
+        return True
+        condition = condition[2:]
+    else:
+        cmpop = operator.le
+    varr1 = grab_leading_numbers(minimum, True)
+    varr2 = grab_leading_numbers(condition, True)
+    make_same_len(varr1, varr2)
+    return cmpop(varr1, varr2)
+
+def version_compare_condition_with_max(condition, maximum):
+    match = numpart.match(maximum.strip())
+    if match is None:
+        msg = 'Uncomparable version string {!r}.'
+        raise MesonException(msg.format(maximum))
+    maximum = match.group(0)
+    if condition.startswith('>='):
+        return False
+        condition = condition[2:]
+    elif condition.startswith('<='):
+        cmpop = operator.ge
+        condition = condition[2:]
+    elif condition.startswith('!='):
+        return False
+        condition = condition[2:]
+    elif condition.startswith('=='):
+        cmpop = operator.ge
+        condition = condition[2:]
+    elif condition.startswith('='):
+        cmpop = operator.ge
+        condition = condition[1:]
+    elif condition.startswith('>'):
+        return False
+        condition = condition[1:]
+    elif condition.startswith('<'):
+        cmpop = operator.gt
+        condition = condition[2:]
+    else:
+        cmpop = operator.ge
+    varr1 = grab_leading_numbers(maximum, True)
+    varr2 = grab_leading_numbers(condition, True)
+    make_same_len(varr1, varr2)
+    return cmpop(varr1, varr2)
+
 
 def default_libdir():
     if is_debianlike():
@@ -541,8 +596,13 @@ def has_path_sep(name, sep='/\\'):
             return True
     return False
 
-def do_replacement(regex, line, confdata):
+def do_replacement(regex, line, format, confdata):
     missing_variables = set()
+    start_tag = '@'
+    backslash_tag = '\\@'
+    if format == 'cmake':
+        start_tag = '${'
+        backslash_tag = '\\${'
 
     def variable_replace(match):
         # Pairs of escape characters before '@' or '\@'
@@ -550,8 +610,8 @@ def do_replacement(regex, line, confdata):
             num_escapes = match.end(0) - match.start(0)
             return '\\' * (num_escapes // 2)
         # Single escape character and '@'
-        elif match.group(0) == '\\@':
-            return '@'
+        elif match.group(0) == backslash_tag:
+            return start_tag
         # Template variable to be replaced
         else:
             varname = match.group(1)
@@ -562,7 +622,9 @@ def do_replacement(regex, line, confdata):
                 elif isinstance(var, int):
                     var = str(var)
                 else:
-                    raise RuntimeError('Tried to replace a variable with something other than a string or int.')
+                    msg = 'Tried to replace variable {!r} value with ' \
+                          'something other than a string or int: {!r}'
+                    raise MesonException(msg.format(varname, var))
             else:
                 missing_variables.add(varname)
                 var = ''
@@ -572,7 +634,7 @@ def do_replacement(regex, line, confdata):
 def do_mesondefine(line, confdata):
     arr = line.split()
     if len(arr) != 2:
-        raise MesonException('#mesondefine does not contain exactly two tokens: %s', line.strip())
+        raise MesonException('#mesondefine does not contain exactly two tokens: %s' % line.strip())
     varname = arr[1]
     try:
         (v, desc) = confdata.get(varname)
@@ -591,53 +653,90 @@ def do_mesondefine(line, confdata):
         raise MesonException('#mesondefine argument "%s" is of unknown type.' % varname)
 
 
-def do_conf_file(src, dst, confdata):
+def do_conf_file(src, dst, confdata, format, encoding='utf-8'):
     try:
-        with open(src, encoding='utf-8') as f:
+        with open(src, encoding=encoding) as f:
             data = f.readlines()
     except Exception as e:
         raise MesonException('Could not read input file %s: %s' % (src, str(e)))
     # Only allow (a-z, A-Z, 0-9, _, -) as valid characters for a define
     # Also allow escaping '@' with '\@'
-    regex = re.compile(r'(?:\\\\)+(?=\\?@)|\\@|@([-a-zA-Z0-9_]+)@')
+    if format in ['meson', 'cmake@']:
+        regex = re.compile(r'(?:\\\\)+(?=\\?@)|\\@|@([-a-zA-Z0-9_]+)@')
+    elif format == 'cmake':
+        regex = re.compile(r'(?:\\\\)+(?=\\?\$)|\\\${|\${([-a-zA-Z0-9_]+)}')
+    else:
+        raise MesonException('Format "{}" not handled'.format(format))
+
+    search_token = '#mesondefine'
+    if format != 'meson':
+        search_token = '#cmakedefine'
+
     result = []
     missing_variables = set()
+    # Detect when the configuration data is empty and no tokens were found
+    # during substitution so we can warn the user to use the `copy:` kwarg.
+    confdata_useless = not confdata.keys()
     for line in data:
-        if line.startswith('#mesondefine'):
+        if line.startswith(search_token):
+            confdata_useless = False
             line = do_mesondefine(line, confdata)
         else:
-            line, missing = do_replacement(regex, line, confdata)
+            line, missing = do_replacement(regex, line, format, confdata)
             missing_variables.update(missing)
+            if missing:
+                confdata_useless = False
         result.append(line)
     dst_tmp = dst + '~'
-    with open(dst_tmp, 'w', encoding='utf-8') as f:
-        f.writelines(result)
+    try:
+        with open(dst_tmp, 'w', encoding=encoding) as f:
+            f.writelines(result)
+    except Exception as e:
+        raise MesonException('Could not write output file %s: %s' % (dst, str(e)))
     shutil.copymode(src, dst_tmp)
     replace_if_different(dst, dst_tmp)
-    return missing_variables
+    return missing_variables, confdata_useless
 
-def dump_conf_header(ofilename, cdata):
-    ofilename_tmp = ofilename + '~'
-    with open(ofilename_tmp, 'w', encoding='utf-8') as ofile:
-        ofile.write('''/*
+CONF_C_PRELUDE = '''/*
  * Autogenerated by the Meson build system.
  * Do not edit, your changes will be lost.
  */
 
 #pragma once
 
-''')
+'''
+
+CONF_NASM_PRELUDE = '''; Autogenerated by the Meson build system.
+; Do not edit, your changes will be lost.
+
+'''
+
+def dump_conf_header(ofilename, cdata, output_format):
+    if output_format == 'c':
+        prelude = CONF_C_PRELUDE
+        prefix = '#'
+    elif output_format == 'nasm':
+        prelude = CONF_NASM_PRELUDE
+        prefix = '%'
+
+    ofilename_tmp = ofilename + '~'
+    with open(ofilename_tmp, 'w', encoding='utf-8') as ofile:
+        ofile.write(prelude)
         for k in sorted(cdata.keys()):
             (v, desc) = cdata.get(k)
             if desc:
-                ofile.write('/* %s */\n' % desc)
+                if output_format == 'c':
+                    ofile.write('/* %s */\n' % desc)
+                elif output_format == 'nasm':
+                    for line in desc.split('\n'):
+                        ofile.write('; %s\n' % line)
             if isinstance(v, bool):
                 if v:
-                    ofile.write('#define %s\n\n' % k)
+                    ofile.write('%sdefine %s\n\n' % (prefix, k))
                 else:
-                    ofile.write('#undef %s\n\n' % k)
+                    ofile.write('%sundef %s\n\n' % (prefix, k))
             elif isinstance(v, (int, str)):
-                ofile.write('#define %s %s\n\n' % (k, v))
+                ofile.write('%sdefine %s %s\n\n' % (prefix, k, v))
             else:
                 raise MesonException('Unknown data type in configuration file entry: ' + k)
     replace_if_different(ofilename, ofilename_tmp)
@@ -733,20 +832,19 @@ def expand_arguments(args):
             return None
     return expended_args
 
-def Popen_safe(args, write=None, stderr=subprocess.PIPE, **kwargs):
-    if sys.version_info < (3, 6) or not sys.stdout.encoding:
-        return Popen_safe_legacy(args, write=write, stderr=stderr, **kwargs)
-    p = subprocess.Popen(args, universal_newlines=True,
-                         close_fds=False,
-                         stdout=subprocess.PIPE,
-                         stderr=stderr, **kwargs)
+def Popen_safe(args, write=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs):
+    import locale
+    encoding = locale.getpreferredencoding()
+    if sys.version_info < (3, 6) or not sys.stdout.encoding or encoding.upper() != 'UTF-8':
+        return Popen_safe_legacy(args, write=write, stdout=stdout, stderr=stderr, **kwargs)
+    p = subprocess.Popen(args, universal_newlines=True, close_fds=False,
+                         stdout=stdout, stderr=stderr, **kwargs)
     o, e = p.communicate(write)
     return p, o, e
 
-def Popen_safe_legacy(args, write=None, stderr=subprocess.PIPE, **kwargs):
+def Popen_safe_legacy(args, write=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs):
     p = subprocess.Popen(args, universal_newlines=False,
-                         stdout=subprocess.PIPE,
-                         stderr=stderr, **kwargs)
+                         stdout=stdout, stderr=stderr, **kwargs)
     if write is not None:
         write = write.encode('utf-8')
     o, e = p.communicate(write)
@@ -913,12 +1011,25 @@ def get_filenames_templates_dict(inputs, outputs):
     return values
 
 
+def _make_tree_writable(topdir):
+    # Ensure all files and directories under topdir are writable
+    # (and readable) by owner.
+    for d, _, files in os.walk(topdir):
+        os.chmod(d, os.stat(d).st_mode | stat.S_IWRITE | stat.S_IREAD)
+        for fname in files:
+            fpath = os.path.join(d, fname)
+            if os.path.isfile(fpath):
+                os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IWRITE | stat.S_IREAD)
+
+
 def windows_proof_rmtree(f):
     # On Windows if anyone is holding a file open you can't
     # delete it. As an example an anti virus scanner might
     # be scanning files you are trying to delete. The only
     # way to fix this is to try again and again.
     delays = [0.1, 0.1, 0.2, 0.2, 0.2, 0.5, 0.5, 1, 1, 1, 1, 2]
+    # Start by making the tree wriable.
+    _make_tree_writable(f)
     for d in delays:
         try:
             shutil.rmtree(f)
@@ -954,6 +1065,9 @@ def detect_subprojects(spdir_name, current_dir='', result=None):
             else:
                 result[basename] = [trial]
     return result
+
+def get_error_location_string(fname, lineno):
+    return '{}:{}:'.format(fname, lineno)
 
 class OrderedSet(collections.MutableSet):
     """A set that preserves the order in which items are added, by first

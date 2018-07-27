@@ -14,7 +14,6 @@
 
 import os.path
 
-from .. import mlog
 from .. import coredata
 from ..mesonlib import version_compare
 
@@ -25,7 +24,10 @@ from .compilers import (
     msvc_winlibs,
     ClangCompiler,
     GnuCompiler,
+    ElbrusCompiler,
     IntelCompiler,
+    ArmCompiler,
+    ArmclangCompiler,
 )
 
 class CPPCompiler(CCompiler):
@@ -76,10 +78,43 @@ class ClangCPPCompiler(ClangCompiler, CPPCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     def get_options(self):
-        return {'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
-                                                    ['none', 'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z',
-                                                     'gnu++11', 'gnu++14', 'gnu++17', 'gnu++1z'],
-                                                    'none')}
+        opts = CPPCompiler.get_options(self)
+        opts.update({'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
+                                                         ['none', 'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z',
+                                                          'gnu++11', 'gnu++14', 'gnu++17', 'gnu++1z'],
+                                                         'none')})
+        return opts
+
+    def get_option_compile_args(self, options):
+        args = []
+        std = options['cpp_std']
+        if std.value != 'none':
+            args.append('-std=' + std.value)
+        return args
+
+    def get_option_link_args(self, options):
+        return []
+
+    def language_stdlib_only_link_flags(self):
+        return ['-lstdc++']
+
+
+class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
+    def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
+        ArmclangCompiler.__init__(self)
+        default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
+        self.warn_args = {'1': default_warn_args,
+                          '2': default_warn_args + ['-Wextra'],
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
+
+    def get_options(self):
+        opts = CPPCompiler.get_options(self)
+        opts.update({'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
+                                                         ['none', 'c++98', 'c++03', 'c++11', 'c++14', 'c++17',
+                                                          'gnu++98', 'gnu++03', 'gnu++11', 'gnu++14', 'gnu++17'],
+                                                         'none')})
+        return opts
 
     def get_option_compile_args(self, options):
         args = []
@@ -102,13 +137,14 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     def get_options(self):
-        opts = {'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
-                                                    ['none', 'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z',
-                                                     'gnu++03', 'gnu++11', 'gnu++14', 'gnu++17', 'gnu++1z'],
-                                                    'none'),
-                'cpp_debugstl': coredata.UserBooleanOption('cpp_debugstl',
-                                                           'STL debug mode',
-                                                           False)}
+        opts = CPPCompiler.get_options(self)
+        opts.update({'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
+                                                         ['none', 'c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z',
+                                                          'gnu++03', 'gnu++11', 'gnu++14', 'gnu++17', 'gnu++1z'],
+                                                         'none'),
+                     'cpp_debugstl': coredata.UserBooleanOption('cpp_debugstl',
+                                                                'STL debug mode',
+                                                                False)})
         if self.gcc_type == GCC_MINGW:
             opts.update({
                 'cpp_winlibs': coredata.UserArrayOption('cpp_winlibs', 'Standard Win libraries to link against',
@@ -132,6 +168,32 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
     def get_pch_use_args(self, pch_dir, header):
         return ['-fpch-preprocess', '-include', os.path.basename(header)]
 
+    def language_stdlib_only_link_flags(self):
+        return ['-lstdc++']
+
+
+class ElbrusCPPCompiler(GnuCPPCompiler, ElbrusCompiler):
+    def __init__(self, exelist, version, gcc_type, is_cross, exe_wrapper=None, defines=None, **kwargs):
+        GnuCPPCompiler.__init__(self, exelist, version, gcc_type, is_cross, exe_wrapper, defines, **kwargs)
+        ElbrusCompiler.__init__(self, gcc_type, defines)
+
+    # It does not support c++/gnu++ 17 and 1z, but still does support 0x, 1y, and gnu++98.
+    def get_options(self):
+        opts = CPPCompiler.get_options(self)
+        opts['cpp_std'] = coredata.UserComboOption('cpp_std', 'C++ language standard to use',
+                                                   ['none', 'c++98', 'c++03', 'c++0x', 'c++11', 'c++14', 'c++1y',
+                                                    'gnu++98', 'gnu++03', 'gnu++0x', 'gnu++11', 'gnu++14', 'gnu++1y'],
+                                                   'none')
+        return opts
+
+    # Elbrus C++ compiler does not have lchmod, but there is only linker warning, not compiler error.
+    # So we should explicitly fail at this case.
+    def has_function(self, funcname, prefix, env, extra_args=None, dependencies=None):
+        if funcname == 'lchmod':
+            return False
+        else:
+            return super().has_function(funcname, prefix, env, extra_args, dependencies)
+
 
 class IntelCPPCompiler(IntelCompiler, CPPCompiler):
     def __init__(self, exelist, version, icc_type, is_cross, exe_wrap, **kwargs):
@@ -145,6 +207,7 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
     def get_options(self):
+        opts = CPPCompiler.get_options(self)
         c_stds = []
         g_stds = ['gnu++98']
         if version_compare(self.version, '>=15.0.0'):
@@ -154,12 +217,12 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
             c_stds += ['c++17']
         if version_compare(self.version, '>=17.0.0'):
             g_stds += ['gnu++14']
-        opts = {'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
-                                                    ['none'] + c_stds + g_stds,
-                                                    'none'),
-                'cpp_debugstl': coredata.UserBooleanOption('cpp_debugstl',
-                                                           'STL debug mode',
-                                                           False)}
+        opts.update({'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
+                                                         ['none'] + c_stds + g_stds,
+                                                         'none'),
+                     'cpp_debugstl': coredata.UserBooleanOption('cpp_debugstl',
+                                                                'STL debug mode',
+                                                                False)})
         return opts
 
     def get_option_compile_args(self, options):
@@ -174,32 +237,23 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
     def get_option_link_args(self, options):
         return []
 
-    def has_multi_arguments(self, args, env):
-        for arg in args:
-            if arg.startswith('-Wl,'):
-                mlog.warning('''{} looks like a linker argument, but has_argument
-and other similar methods only support checking compiler arguments.
-Using them to check linker arguments are never supported, and results
-are likely to be wrong regardless of the compiler you are using.
-'''.format(arg))
-        return super().has_multi_arguments(args + ['-diag-error', '10006'], env)
-
 
 class VisualStudioCPPCompiler(VisualStudioCCompiler, CPPCompiler):
     def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
-        self.language = 'cpp'
+        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, is_64)
         self.base_options = ['b_pch'] # FIXME add lto, pgo and the like
 
     def get_options(self):
-        return {'cpp_eh': coredata.UserComboOption('cpp_eh',
-                                                   'C++ exception handling type.',
-                                                   ['none', 'a', 's', 'sc'],
-                                                   'sc'),
-                'cpp_winlibs': coredata.UserArrayOption('cpp_winlibs',
-                                                        'Windows libs to link against.',
-                                                        msvc_winlibs)
-                }
+        opts = CPPCompiler.get_options(self)
+        opts.update({'cpp_eh': coredata.UserComboOption('cpp_eh',
+                                                        'C++ exception handling type.',
+                                                        ['none', 'a', 's', 'sc'],
+                                                        'sc'),
+                     'cpp_winlibs': coredata.UserArrayOption('cpp_winlibs',
+                                                             'Windows libs to link against.',
+                                                             msvc_winlibs)})
+        return opts
 
     def get_option_compile_args(self, options):
         args = []
@@ -214,4 +268,32 @@ class VisualStudioCPPCompiler(VisualStudioCCompiler, CPPCompiler):
     def get_compiler_check_args(self):
         # Visual Studio C++ compiler doesn't support -fpermissive,
         # so just use the plain C args.
-        return super(VisualStudioCCompiler, self).get_compiler_check_args()
+        return VisualStudioCCompiler.get_compiler_check_args(self)
+
+
+class ArmCPPCompiler(ArmCompiler, CPPCompiler):
+    def __init__(self, exelist, version, is_cross, exe_wrap=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, **kwargs)
+        ArmCompiler.__init__(self)
+
+    def get_options(self):
+        opts = CPPCompiler.get_options(self)
+        opts.update({'cpp_std': coredata.UserComboOption('cpp_std', 'C++ language standard to use',
+                                                         ['none', 'c++03', 'c++11'],
+                                                         'none')})
+        return opts
+
+    def get_option_compile_args(self, options):
+        args = []
+        std = options['cpp_std']
+        if std.value == 'c++11':
+            args.append('--cpp11')
+        elif std.value == 'c++03':
+            args.append('--cpp')
+        return args
+
+    def get_option_link_args(self, options):
+        return []
+
+    def get_compiler_check_args(self):
+        return []

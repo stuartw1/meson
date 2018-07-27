@@ -20,12 +20,12 @@ from ..mesonlib import EnvironmentException, version_compare
 from .compilers import Compiler
 
 class ValaCompiler(Compiler):
-    def __init__(self, exelist, version, is_cross):
+    def __init__(self, exelist, version):
         self.language = 'vala'
         super().__init__(exelist, version)
         self.version = version
         self.id = 'valac'
-        self.is_cross = is_cross
+        self.is_cross = False
         self.base_options = ['b_colorout']
 
     def name_string(self):
@@ -35,10 +35,10 @@ class ValaCompiler(Compiler):
         return False # Because compiles into C.
 
     def get_output_args(self, target):
-        return ['-o', target]
+        return [] # Because compiles into C.
 
     def get_compile_only_args(self):
-        return ['-C']
+        return [] # Because compiles into C.
 
     def get_pic_args(self):
         return []
@@ -70,6 +70,8 @@ class ValaCompiler(Compiler):
                 raise EnvironmentException(msg)
 
     def get_buildtype_args(self, buildtype):
+        if buildtype == 'debug' or buildtype == 'debugoptimized' or buildtype == 'minsize':
+            return ['--debug']
         return []
 
     def find_library(self, libname, env, extra_dirs):

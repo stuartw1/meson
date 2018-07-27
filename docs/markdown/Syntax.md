@@ -64,6 +64,13 @@ Hexadecimal literals are supported since version 0.45.0:
 int_255 = 0xFF
 ```
 
+Octal and binary literals are supported since version 0.47.0:
+
+```meson
+int_493 = 0o755
+int_1365 = 0b10101010101
+```
+
 Strings can be converted to a number like this:
 
 ```meson
@@ -90,8 +97,24 @@ single quote do it like this:
 single quote = 'contains a \' character'
 ```
 
-Similarly `\n` gets converted to a newline and `\\` to a single
-backslash.
+The full list of escape sequences is:
+
+* `\\` Backslash
+* `\'` Single quote
+* `\a` Bell
+* `\b` Backspace
+* `\f` Formfeed
+* `\n` Newline
+* `\r` Carriage Return
+* `\t` Horizontal Tab
+* `\v` Vertical Tab
+* `\ooo` Character with octal value ooo
+* `\xhh` Character with hex value hh
+* `\uxxxx` Character with 16-bit hex value xxxx
+* `\Uxxxxxxxx` Character with 32-bit hex value xxxxxxxx
+* `\N{name}` Character named name in Unicode database
+
+As in python and C, up to three octal digits are accepted in `\ooo`.
 
 #### String concatenation
 
@@ -115,7 +138,8 @@ int main (int argc, char ** argv) {
 }'''
 ```
 
-This can also be combined with the string formatting functionality
+These are raw strings that do not support the escape sequences listed above.
+These strings can also be combined with the string formatting functionality
 described below.
 
 #### String formatting
@@ -267,6 +291,31 @@ The following methods are defined for all arrays:
  - `contains`, returns `true` if the array contains the object given as argument, `false` otherwise
  - `get`, returns the object at the given index, negative indices count from the back of the array, indexing out of bounds is a fatal error. Provided for backwards-compatibility, it is identical to array indexing.
 
+Dictionaries
+--
+
+Dictionaries are delimited by curly braces. A dictionary can contain an
+arbitrary number of key value pairs. Keys are required to be literal
+strings, values can be objects of any type.
+
+```meson
+my_dict = {'foo': 42, 'bar': 'baz'}
+```
+
+Keys must be unique:
+
+```meson
+# This will fail
+my_dict = {'foo': 42, 'foo': 43}
+```
+
+Dictionaries are immutable.
+
+Dictionaries are available since 0.47.0.
+
+Visit the [Reference Manual](Reference-manual.md#dictionary-object) to read
+about the methods exposed by dictionaries.
+
 Function calls
 --
 
@@ -312,9 +361,17 @@ endif
 
 ## Foreach statements
 
-To do an operation on all elements of an array, use the `foreach`
-command. As an example, here's how you would define two executables
-with corresponding tests.
+To do an operation on all elements of an iterable, use the `foreach`
+command.
+
+> Note that Meson variables are immutable. Trying to assign a new value
+> to the iterated object inside a foreach loop will not affect foreach's
+> control flow.
+
+### Foreach with an array
+
+Here's an example of how you could define two executables
+with corresponding tests using arrays and foreach.
 
 ```meson
 progs = [['prog1', ['prog1.c', 'foo.c']],
@@ -326,9 +383,31 @@ foreach p : progs
 endforeach
 ```
 
-Note that Meson variables are immutable. Trying to assign a new value
-to `progs` inside a foreach loop will not affect foreach's control
-flow.
+### Foreach with a dictionary
+
+Here's an example of you could iterate a set of components that
+should be compiled in according to some configuration. This uses
+a [dictionary][dictionaries], which is available since 0.47.0.
+
+```meson
+components = {
+  'foo': ['foo.c'],
+  'bar': ['bar.c'],
+  'baz': ['baz.c'],
+}
+
+# compute a configuration based on system dependencies, custom logic
+conf = configuration_data()
+conf.set('USE_FOO', 1)
+
+# Determine the sources to compile
+sources_to_compile = []
+foreach name, sources : components
+  if conf.get('USE_@0@'.format(name.to_upper()), 0) == 1
+    sources_to_compile += sources
+  endif
+endforeach
+```
 
 Logical operations
 --

@@ -14,6 +14,7 @@
 
 
 import sys, struct
+import shutil, subprocess
 
 SHT_STRTAB = 3
 DT_NEEDED = 1
@@ -337,20 +338,89 @@ class Elf(DataSizes):
             entry.write(self.bf)
         return None
 
-def run(args):
-    if len(args) < 1 or len(args) > 2:
-        print('This application resets target rpath.')
-        print('Don\'t run this unless you know what you are doing.')
-        print('%s: <binary file> <prefix>' % sys.argv[0])
-        sys.exit(1)
-    with Elf(args[0]) as e:
-        if len(args) == 1:
+def fix_elf(fname, new_rpath, verbose=True):
+    with Elf(fname, verbose) as e:
+        if new_rpath is None:
             e.print_rpath()
             e.print_runpath()
         else:
-            new_rpath = args[1]
             e.fix_rpath(new_rpath)
-    return 0
 
-if __name__ == '__main__':
-    run(sys.argv[1:])
+def get_darwin_rpaths_to_remove(fname):
+    out = subprocess.check_output(['otool', '-l', fname],
+                                  universal_newlines=True,
+                                  stderr=subprocess.DEVNULL)
+    result = []
+    current_cmd = 'FOOBAR'
+    for line in out.split('\n'):
+        line = line.strip()
+        if ' ' not in line:
+            continue
+        key, value = line.strip().split(' ', 1)
+        if key == 'cmd':
+            current_cmd = value
+        if key == 'path' and current_cmd == 'LC_RPATH':
+            rp = value.split('(', 1)[0].strip()
+            result.append(rp)
+    return result
+
+def fix_darwin(fname, new_rpath, final_path, install_name_mappings):
+    try:
+        rpaths = get_darwin_rpaths_to_remove(fname)
+    except subprocess.CalledProcessError:
+        # Otool failed, which happens when invoked on a
+        # non-executable target. Just return.
+        return
+    try:
+        args = []
+        if rpaths:
+            for rp in rpaths:
+                args += ['-delete_rpath', rp]
+            subprocess.check_call(['install_name_tool', fname] + args,
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+        args = []
+        if new_rpath:
+            args += ['-add_rpath', new_rpath]
+        # Rewrite -install_name @rpath/libfoo.dylib to /path/to/libfoo.dylib
+        if fname.endswith('dylib'):
+            args += ['-id', final_path]
+        if install_name_mappings:
+            for old, new in install_name_mappings.items():
+                args += ['-change', old, new]
+        if args:
+            subprocess.check_call(['install_name_tool', fname] + args,
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+    except Exception as e:
+        raise
+        sys.exit(0)
+
+def fix_jar(fname):
+    subprocess.check_call(['jar', 'xfv', fname, 'META-INF/MANIFEST.MF'])
+    with open('META-INF/MANIFEST.MF', 'r+') as f:
+        lines = f.readlines()
+        f.seek(0)
+        for line in lines:
+            if not line.startswith('Class-Path:'):
+                f.write(line)
+        f.truncate()
+    subprocess.check_call(['jar', 'ufm', fname, 'META-INF/MANIFEST.MF'])
+
+def fix_rpath(fname, new_rpath, final_path, install_name_mappings, verbose=True):
+    # Static libraries never have rpaths
+    if fname.endswith('.a'):
+        return
+    try:
+        if fname.endswith('.jar'):
+            fix_jar(fname)
+            return
+        fix_elf(fname, new_rpath, verbose)
+        return
+    except SystemExit as e:
+        if isinstance(e.code, int) and e.code == 0:
+            pass
+        else:
+            raise
+    if shutil.which('install_name_tool'):
+        fix_darwin(fname, new_rpath, final_path, install_name_mappings)

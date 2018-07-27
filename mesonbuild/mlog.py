@@ -12,24 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys, os, platform, io
+import os
+import io
+import sys
+import time
+import platform
+from contextlib import contextmanager
 
 """This is (mostly) a standalone module used to write logging
 information about Meson runs. Some output goes to screen,
 some to logging dir and some goes to both."""
 
+def _windows_ansi():
+    from ctypes import windll, byref
+    from ctypes.wintypes import DWORD
+
+    kernel = windll.kernel32
+    stdout = kernel.GetStdHandle(-11)
+    mode = DWORD()
+    if not kernel.GetConsoleMode(stdout, byref(mode)):
+        return False
+    # ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0x4
+    # If the call to enable VT processing fails (returns 0), we fallback to
+    # original behavior
+    return kernel.SetConsoleMode(stdout, mode.value | 0x4) or os.environ.get('ANSICON')
+
 if platform.system().lower() == 'windows':
-    colorize_console = os.isatty(sys.stdout.fileno()) and os.environ.get('ANSICON')
+    colorize_console = os.isatty(sys.stdout.fileno()) and _windows_ansi()
 else:
     colorize_console = os.isatty(sys.stdout.fileno()) and os.environ.get('TERM') != 'dumb'
 log_dir = None
 log_file = None
 log_fname = 'meson-log.txt'
+log_depth = 0
+log_timestamp_start = None
 
 def initialize(logdir):
     global log_dir, log_file
     log_dir = logdir
     log_file = open(os.path.join(logdir, log_fname), 'w', encoding='utf8')
+
+def set_timestamp_start(start):
+    global log_timestamp_start
+    log_timestamp_start = start
 
 def shutdown():
     global log_file
@@ -41,17 +66,21 @@ def shutdown():
 class AnsiDecorator:
     plain_code = "\033[0m"
 
-    def __init__(self, text, code):
+    def __init__(self, text, code, quoted=False):
         self.text = text
         self.code = code
+        self.quoted = quoted
 
     def get_text(self, with_codes):
+        text = self.text
         if with_codes:
-            return self.code + self.text + AnsiDecorator.plain_code
-        return self.text
+            text = self.code + self.text + AnsiDecorator.plain_code
+        if self.quoted:
+            text = '"{}"'.format(text)
+        return text
 
-def bold(text):
-    return AnsiDecorator(text, "\033[1m")
+def bold(text, quoted=False):
+    return AnsiDecorator(text, "\033[1m", quoted=quoted)
 
 def red(text):
     return AnsiDecorator(text, "\033[1;31m")
@@ -67,6 +96,8 @@ def cyan(text):
 
 def process_markup(args, keep):
     arr = []
+    if log_timestamp_start is not None:
+        arr = ['[{:.3f}]'.format(time.monotonic() - log_timestamp_start)]
     for arg in args:
         if isinstance(arg, str):
             arr.append(arg)
@@ -77,15 +108,21 @@ def process_markup(args, keep):
     return arr
 
 def force_print(*args, **kwargs):
+    iostr = io.StringIO()
+    kwargs['file'] = iostr
+    print(*args, **kwargs)
+
+    raw = iostr.getvalue()
+    if log_depth > 0:
+        prepend = '|' * log_depth
+        raw = prepend + raw.replace('\n', '\n' + prepend, raw.count('\n') - 1)
+
     # _Something_ is going to get printed.
     try:
-        print(*args, **kwargs)
+        print(raw, end='')
     except UnicodeEncodeError:
-        iostr = io.StringIO()
-        kwargs['file'] = iostr
-        print(*args, **kwargs)
-        cleaned = iostr.getvalue().encode('ascii', 'replace').decode('ascii')
-        print(cleaned)
+        cleaned = raw.encode('ascii', 'replace').decode('ascii')
+        print(cleaned, end='')
 
 def debug(*args, **kwargs):
     arr = process_markup(args, False)
@@ -103,20 +140,21 @@ def log(*args, **kwargs):
     force_print(*arr, **kwargs)
 
 def _log_error(severity, *args, **kwargs):
-    from . import environment
+    from .mesonlib import get_error_location_string
+    from .environment import build_filename
     if severity == 'warning':
         args = (yellow('WARNING:'),) + args
     elif severity == 'error':
         args = (red('ERROR:'),) + args
+    elif severity == 'deprecation':
+        args = (red('DEPRECATION:'),) + args
     else:
         assert False, 'Invalid severity ' + severity
 
-    if 'location' in kwargs:
-        location = kwargs['location']
-        del kwargs['location']
-        location_str = '{}:{}:'.format(os.path.join(location.subdir,
-                                                    environment.build_filename),
-                                       location.lineno)
+    location = kwargs.pop('location', None)
+    if location is not None:
+        location_file = os.path.join(location.subdir, build_filename)
+        location_str = get_error_location_string(location_file, location.lineno)
         args = (location_str,) + args
 
     log(*args, **kwargs)
@@ -126,6 +164,9 @@ def error(*args, **kwargs):
 
 def warning(*args, **kwargs):
     return _log_error('warning', *args, **kwargs)
+
+def deprecation(*args, **kwargs):
+    return _log_error('deprecation', *args, **kwargs)
 
 def exception(e):
     log()
@@ -146,3 +187,12 @@ def format_list(list):
         return list[0]
     else:
         return ''
+
+@contextmanager
+def nested():
+    global log_depth
+    log_depth += 1
+    try:
+        yield
+    finally:
+        log_depth -= 1

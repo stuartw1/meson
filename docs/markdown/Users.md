@@ -4,10 +4,12 @@ title: Users
 
 # List of projects using Meson
 
-If you have a project that uses Meson that you want to add to this list, please [file a pull-request](https://github.com/mesonbuild/meson/edit/master/docs/markdown/Users.md) for it. All the software on this list is tested for regressions before release, so it's highly recommended that projects add themselves here.
+If you have a project that uses Meson that you want to add to this list, please [file a pull-request](https://github.com/mesonbuild/meson/edit/master/docs/markdown/Users.md) for it. All the software on this list is tested for regressions before release, so it's highly recommended that projects add themselves here. Some additional projects are
+listed in the [`meson` GitHub topic](https://github.com/topics/meson).
 
  - [AQEMU](https://github.com/tobimensch/aqemu), a Qt GUI for QEMU virtual machines, since version 0.9.3
  - [Arduino sample project](https://github.com/jpakkane/mesonarduino)
+ - [bolt](https://gitlab.freedesktop.org/bolt/bolt) Userpsace daemon to enable security levels for Thunderbolt™ 3 on Linux
  - [Budgie Desktop](https://github.com/budgie-desktop/budgie-desktop), a desktop environment built on GNOME technologies
  - [casync](https://github.com/systemd/casync), Content-Addressable Data Synchronization Tool
  - [cinnamon-desktop](https://github.com/linuxmint/cinnamon-desktop), the cinnamon desktop library
@@ -15,17 +17,19 @@ If you have a project that uses Meson that you want to add to this list, please 
  - [Dpdk](http://dpdk.org/browse/dpdk), Data plane development kit, a set of libraries and drivers for fast packet processing
  - [DXVK](https://github.com/doitsujin/dxvk), a Vulkan-based Direct3D 11 implementation for Linux using Wine
  - [Emeus](https://github.com/ebassi/emeus), Constraint based layout manager for GTK+
+ - [ESP8266 Arduino sample project](https://github.com/trilader/arduino-esp8266-meson) Sample project for using the ESP8266 Arduino port with Meson
+ - [Fractal](https://wiki.gnome.org/Apps/Fractal/), a Matrix messaging client for GNOME
  - [Frida](https://github.com/frida/frida-core), a dynamic binary instrumentation toolkit
  - [fwupd](https://github.com/hughsie/fwupd), a simple daemon to allow session software to update firmware
  - [Geary](https://wiki.gnome.org/Apps/Geary), an email application built around conversations, for the GNOME 3 desktop.
  - [GLib](https://gitlab.gnome.org/GNOME/glib), cross-platform C library used by GTK+ and GStreamer (not the default yet)
- - [Gnome Boxes](https://gitlab.gnome.org/GNOME/gnome-boxes), a Gnome hypervisor
- - [Gnome Builder](https://gitlab.gnome.org/GNOME/gnome-builder), an IDE for the Gnome platform
- - [Gnome MPV](https://github.com/gnome-mpv/gnome-mpv), Gnome frontend to the mpv video player
- - [Gnome Recipes](https://gitlab.gnome.org/GNOME/recipes), application for cooking recipes
- - [Gnome Software](https://gitlab.gnome.org/GNOME/gnome-software), an app store for Gnome
- - [Gnome Twitch](https://github.com/vinszent/gnome-twitch), an app for viewing Twitch streams on Gnome desktop
- - [Gnome Usage](https://gitlab.gnome.org/GNOME/gnome-usage), a Gnome application for visualizing system resources
+ - [GNOME Boxes](https://gitlab.gnome.org/GNOME/gnome-boxes), a GNOME hypervisor
+ - [GNOME Builder](https://gitlab.gnome.org/GNOME/gnome-builder), an IDE for the GNOME platform
+ - [GNOME MPV](https://github.com/gnome-mpv/gnome-mpv), GNOME frontend to the mpv video player
+ - [GNOME Recipes](https://gitlab.gnome.org/GNOME/recipes), application for cooking recipes
+ - [GNOME Software](https://gitlab.gnome.org/GNOME/gnome-software), an app store for GNOME
+ - [GNOME Twitch](https://github.com/vinszent/gnome-twitch), an app for viewing Twitch streams on GNOME desktop
+ - [GNOME Usage](https://gitlab.gnome.org/GNOME/gnome-usage), a GNOME application for visualizing system resources
  - [Graphene](https://ebassi.github.io/graphene/), a thin type library for graphics
  - [Grilo](https://git.gnome.org/browse/grilo) and [Grilo plugins](https://git.gnome.org/browse/grilo-plugins), the Grilo multimedia framework
  - [GStreamer](https://cgit.freedesktop.org/gstreamer/gstreamer/), multimedia framework (not the default yet)
@@ -43,14 +47,17 @@ If you have a project that uses Meson that you want to add to this list, please 
  - [libfuse](https://github.com/libfuse/libfuse), the reference implementation of the Linux FUSE (Filesystem in Userspace) interface
  - [Libgit2-glib](https://git.gnome.org/browse/libgit2-glib), a GLib wrapper for libgit2
  - [Libhttpseverywhere](https://git.gnome.org/browse/libhttpseverywhere), a library to enable httpseverywhere on any desktop app
+ - [libmodulemd](https://github.com/fedora-modularity/libmodulemd), a GObject Introspected library for managing [Fedora Project](https://getfedora.org/) module metadata.
  - [Libosmscout](https://github.com/Framstag/libosmscout), a C++ library for offline map rendering, routing and location  
 lookup based on OpenStreetMap data
+ - [libspng](https://gitlab.com/randy408/libspng), a C library for reading and writing Portable Network Graphics (PNG) 
+format files
  - [Libva](https://github.com/intel/libva), an implementation for the VA (VIdeo Acceleration) API
  - [Libzim](https://github.com/openzim/libzim), the reference implementation for the ZIM file format
  - [Kiwix libraries](https://github.com/kiwix/kiwix-lib)
  - [Mesa](https://cgit.freedesktop.org/mesa/mesa/), An open source graphics driver project
  - [MiracleCast](https://github.com/albfan/miraclecast), connect external monitors to your system via Wifi-Display specification aka Miracast
- - [Nautilus](https://gitlab.gnome.org/GNOME/nautilus), the Gnome file manager
+ - [Nautilus](https://gitlab.gnome.org/GNOME/nautilus), the GNOME file manager
  - [Nemo](https://github.com/linuxmint/nemo), the file manager for the Cinnamon desktop environment
  - [Orc](http://cgit.freedesktop.org/gstreamer/orc/), the Optimized Inner Loop Runtime Compiler (not the default yet)
  - [Outlier](https://github.com/kerolasa/outlier), a small Hello World style meson example project

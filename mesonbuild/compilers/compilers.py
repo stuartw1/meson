@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib, os.path, re, tempfile
+import contextlib, os.path, re, tempfile, shlex
 import subprocess
 
 from ..linkers import StaticLinker
@@ -45,31 +45,45 @@ lang_suffixes = {
     'swift': ('swift',),
     'java': ('java',),
 }
+all_languages = lang_suffixes.keys()
 cpp_suffixes = lang_suffixes['cpp'] + ('h',)
 c_suffixes = lang_suffixes['c'] + ('h',)
+# List of languages that by default consume and output libraries following the
+# C ABI; these can generally be used interchangebly
+clib_langs = ('objcpp', 'cpp', 'objc', 'c', 'fortran',)
 # List of languages that can be linked with C code directly by the linker
 # used in build.py:process_compilers() and build.py:get_dynamic_linker()
-clike_langs = ('d', 'objcpp', 'cpp', 'objc', 'c', 'fortran',)
-clike_suffixes = ()
-for _l in clike_langs:
-    clike_suffixes += lang_suffixes[_l]
-clike_suffixes += ('h', 'll', 's')
+# XXX: Add Rust to this?
+clink_langs = ('d',) + clib_langs
+clink_suffixes = ()
+for _l in clink_langs + ('vala',):
+    clink_suffixes += lang_suffixes[_l]
+clink_suffixes += ('h', 'll', 's')
 
-# XXX: Use this in is_library()?
 soregex = re.compile(r'.*\.so(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?$')
 
-# All these are only for C-like languages; see `clike_langs` above.
+# Environment variables that each lang uses.
+cflags_mapping = {'c': 'CFLAGS',
+                  'cpp': 'CXXFLAGS',
+                  'objc': 'OBJCFLAGS',
+                  'objcpp': 'OBJCXXFLAGS',
+                  'fortran': 'FFLAGS',
+                  'd': 'DFLAGS',
+                  'vala': 'VALAFLAGS',
+                  'rust': 'RUSTFLAGS'}
 
-def sort_clike(lang):
+# All these are only for C-linkable languages; see `clink_langs` above.
+
+def sort_clink(lang):
     '''
     Sorting function to sort the list of languages according to
-    reversed(compilers.clike_langs) and append the unknown langs in the end.
+    reversed(compilers.clink_langs) and append the unknown langs in the end.
     The purpose is to prefer C over C++ for files that can be compiled by
     both such as assembly, C, etc. Also applies to ObjC, ObjC++, etc.
     '''
-    if lang not in clike_langs:
+    if lang not in clink_langs:
         return 1
-    return -clike_langs.index(lang)
+    return -clink_langs.index(lang)
 
 def is_header(fname):
     if hasattr(fname, 'fname'):
@@ -81,7 +95,7 @@ def is_source(fname):
     if hasattr(fname, 'fname'):
         fname = fname.fname
     suffix = fname.split('.')[-1].lower()
-    return suffix in clike_suffixes
+    return suffix in clink_suffixes
 
 def is_assembly(fname):
     if hasattr(fname, 'fname'):
@@ -102,6 +116,10 @@ def is_object(fname):
 def is_library(fname):
     if hasattr(fname, 'fname'):
         fname = fname.fname
+
+    if soregex.match(fname):
+        return True
+
     suffix = fname.split('.')[-1]
     return suffix in lib_suffixes
 
@@ -112,6 +130,19 @@ gnulike_buildtype_args = {'plain': [],
                           'debugoptimized': ['-O2', '-g'],
                           'release': ['-O3'],
                           'minsize': ['-Os', '-g']}
+
+armclang_buildtype_args = {'plain': [],
+                           'debug': ['-O0', '-g'],
+                           'debugoptimized': ['-O1', '-g'],
+                           'release': ['-Os'],
+                           'minsize': ['-Oz']}
+
+arm_buildtype_args = {'plain': [],
+                      'debug': ['-O0', '--debug'],
+                      'debugoptimized': ['-O1', '--debug'],
+                      'release': ['-O3', '-Otime'],
+                      'minsize': ['-O3', '-Ospace'],
+                      }
 
 msvc_buildtype_args = {'plain': [],
                        'debug': ["/MDd", "/ZI", "/Ob0", "/Od", "/RTC1"],
@@ -133,6 +164,13 @@ gnulike_buildtype_linker_args = {'plain': [],
                                  'release': ['-Wl,-O1'],
                                  'minsize': [],
                                  }
+
+arm_buildtype_linker_args = {'plain': [],
+                             'debug': [],
+                             'debugoptimized': [],
+                             'release': [],
+                             'minsize': [],
+                             }
 
 msvc_buildtype_linker_args = {'plain': [],
                               'debug': [],
@@ -232,6 +270,9 @@ base_options = {'b_pch': coredata.UserBooleanOption('b_pch', 'Use precompiled he
                 'b_staticpic': coredata.UserBooleanOption('b_staticpic',
                                                           'Build static libraries as position independent',
                                                           True),
+                'b_bitcode': coredata.UserBooleanOption('b_bitcode',
+                                                        'Generate and embed bitcode (only macOS and iOS)',
+                                                        False),
                 }
 
 gnulike_instruction_set_args = {'mmx': ['-mmmx'],
@@ -270,7 +311,6 @@ vs64_instruction_set_args = {'mmx': ['/arch:AVX'],
                              'neon': None,
                              }
 
-
 def sanitizer_compile_args(value):
     if value == 'none':
         return []
@@ -284,6 +324,14 @@ def sanitizer_link_args(value):
         return []
     args = ['-fsanitize=' + value]
     return args
+
+def option_enabled(boptions, options, option):
+    try:
+        if option not in boptions:
+            return False
+        return options[option].value
+    except KeyError:
+        return False
 
 def get_base_compile_args(options, compiler):
     args = []
@@ -321,6 +369,9 @@ def get_base_compile_args(options, compiler):
             args += ['-DNDEBUG']
     except KeyError:
         pass
+    # This does not need a try...except
+    if option_enabled(compiler.base_options, options, 'b_bitcode'):
+        args.append('-fembed-bitcode')
     return args
 
 def get_base_link_args(options, linker, is_shared_module):
@@ -344,20 +395,22 @@ def get_base_link_args(options, linker, is_shared_module):
     except KeyError:
         pass
     try:
-        if not is_shared_module and 'b_lundef' in linker.base_options and options['b_lundef'].value:
-            args.append('-Wl,--no-undefined')
-    except KeyError:
-        pass
-    try:
-        if 'b_asneeded' in linker.base_options and options['b_asneeded'].value:
-            args.append(linker.get_asneeded_args())
-    except KeyError:
-        pass
-    try:
         if options['b_coverage'].value:
             args += linker.get_coverage_link_args()
     except KeyError:
         pass
+    # These do not need a try...except
+    if not is_shared_module and option_enabled(linker.base_options, options, 'b_lundef'):
+        args.append('-Wl,--no-undefined')
+    as_needed = option_enabled(linker.base_options, options, 'b_asneeded')
+    bitcode = option_enabled(linker.base_options, options, 'b_bitcode')
+    # Shared modules cannot be built with bitcode_bundle because
+    # -bitcode_bundle is incompatible with -undefined and -bundle
+    if bitcode and not is_shared_module:
+        args.append('-Wl,-bitcode_bundle')
+    elif as_needed:
+        # -Wl,-dead_strip_dylibs is incompatible with bitcode
+        args.append(linker.get_asneeded_args())
     return args
 
 class CrossNoRunException(MesonException):
@@ -526,15 +579,22 @@ class CompilerArgs(list):
     def append_direct(self, arg):
         '''
         Append the specified argument without any reordering or de-dup
+        except for absolute paths where the order of include search directories
+        is not relevant
         '''
-        super().append(arg)
+        if os.path.isabs(arg):
+            self.append(arg)
+        else:
+            super().append(arg)
 
     def extend_direct(self, iterable):
         '''
         Extend using the elements in the specified iterable without any
-        reordering or de-dup
+        reordering or de-dup except for absolute paths where the order of
+        include search directories is not relevant
         '''
-        super().extend(iterable)
+        for elem in iterable:
+            self.append_direct(elem)
 
     def __add__(self, args):
         new = CompilerArgs(self, self.compiler)
@@ -601,6 +661,8 @@ class Compiler:
     # Libraries to ignore in find_library() since they are provided by the
     # compiler or the C library. Currently only used for MSVC.
     ignore_libs = ()
+    # Cache for the result of compiler checks which can be cached
+    compiler_check_cache = {}
 
     def __init__(self, exelist, version, **kwargs):
         if isinstance(exelist, str):
@@ -647,6 +709,21 @@ class Compiler:
     def get_default_suffix(self):
         return self.default_suffix
 
+    def get_define(self, dname, prefix, env, extra_args, dependencies):
+        raise EnvironmentException('%s does not support get_define ' % self.get_id())
+
+    def compute_int(self, expression, low, high, guess, prefix, env, extra_args, dependencies):
+        raise EnvironmentException('%s does not support compute_int ' % self.get_id())
+
+    def has_members(self, typename, membernames, prefix, env, extra_args=None, dependencies=None):
+        raise EnvironmentException('%s does not support has_member(s) ' % self.get_id())
+
+    def has_type(self, typename, prefix, env, extra_args, dependencies=None):
+        raise EnvironmentException('%s does not support has_type ' % self.get_id())
+
+    def symbols_have_underscore_prefix(self, env):
+        raise EnvironmentException('%s does not support symbols_have_underscore_prefix ' % self.get_id())
+
     def get_exelist(self):
         return self.exelist[:]
 
@@ -659,6 +736,12 @@ class Compiler:
     def get_always_args(self):
         return []
 
+    def can_linker_accept_rsp(self):
+        """
+        Determines whether the linker can accept arguments using the @rsp syntax.
+        """
+        return mesonlib.is_windows()
+
     def get_linker_always_args(self):
         return []
 
@@ -669,14 +752,78 @@ class Compiler:
         """
         return []
 
+    def get_preproc_flags(self):
+        if self.get_language() in ('c', 'cpp', 'objc', 'objcpp'):
+            return os.environ.get('CPPFLAGS', '')
+        return ''
+
+    def get_args_from_envvars(self):
+        """
+        Returns a tuple of (compile_flags, link_flags) for the specified language
+        from the inherited environment
+        """
+        def log_var(var, val):
+            if val:
+                mlog.log('Appending {} from environment: {!r}'.format(var, val))
+
+        lang = self.get_language()
+        compiler_is_linker = False
+        if hasattr(self, 'get_linker_exelist'):
+            compiler_is_linker = (self.get_exelist() == self.get_linker_exelist())
+
+        if lang not in cflags_mapping:
+            return [], []
+
+        compile_flags = os.environ.get(cflags_mapping[lang], '')
+        log_var(cflags_mapping[lang], compile_flags)
+        compile_flags = shlex.split(compile_flags)
+
+        # Link flags (same for all languages)
+        link_flags = os.environ.get('LDFLAGS', '')
+        log_var('LDFLAGS', link_flags)
+        link_flags = shlex.split(link_flags)
+        if compiler_is_linker:
+            # When the compiler is used as a wrapper around the linker (such as
+            # with GCC and Clang), the compile flags can be needed while linking
+            # too. This is also what Autotools does. However, we don't want to do
+            # this when the linker is stand-alone such as with MSVC C/C++, etc.
+            link_flags = compile_flags + link_flags
+
+        # Pre-processor flags (not for fortran or D)
+        preproc_flags = self.get_preproc_flags()
+        log_var('CPPFLAGS', preproc_flags)
+        preproc_flags = shlex.split(preproc_flags)
+        compile_flags += preproc_flags
+
+        return compile_flags, link_flags
+
     def get_options(self):
-        return {} # build afresh every time
+        opts = {} # build afresh every time
+
+        # Take default values from env variables.
+        compile_args, link_args = self.get_args_from_envvars()
+        description = 'Extra arguments passed to the {}'.format(self.get_display_language())
+        opts.update({
+            self.language + '_args': coredata.UserArrayOption(
+                self.language + '_args',
+                description + ' compiler',
+                compile_args, shlex_split=True, user_input=True),
+            self.language + '_link_args': coredata.UserArrayOption(
+                self.language + '_link_args',
+                description + ' linker',
+                link_args, shlex_split=True, user_input=True),
+        })
+
+        return opts
 
     def get_option_compile_args(self, options):
         return []
 
     def get_option_link_args(self, options):
         return []
+
+    def check_header(self, *args, **kwargs):
+        raise EnvironmentException('Language %s does not support header checks.' % self.get_display_language())
 
     def has_header(self, *args, **kwargs):
         raise EnvironmentException('Language %s does not support header checks.' % self.get_display_language())
@@ -713,20 +860,15 @@ class Compiler:
     def get_library_dirs(self):
         return []
 
-    def has_argument(self, arg, env):
-        return self.has_multi_arguments([arg], env)
-
     def has_multi_arguments(self, args, env):
         raise EnvironmentException(
             'Language {} does not support has_multi_arguments.'.format(
                 self.get_display_language()))
 
-    def get_supported_arguments(self, args, env):
-        supported_args = []
-        for arg in args:
-            if self.has_argument(arg, env):
-                supported_args.append(arg)
-        return supported_args
+    def has_multi_link_arguments(self, args, env):
+        raise EnvironmentException(
+            'Language {} does not support has_multi_link_arguments.'.format(
+                self.get_display_language()))
 
     def get_cross_extra_flags(self, environment, link):
         extra_flags = []
@@ -753,9 +895,23 @@ class Compiler:
         return os.path.join(dirname, 'output.' + suffix)
 
     @contextlib.contextmanager
-    def compile(self, code, extra_args=None, mode='link'):
+    def compile(self, code, extra_args=None, mode='link', want_output=False):
         if extra_args is None:
+            textra_args = None
             extra_args = []
+        else:
+            textra_args = tuple(extra_args)
+        key = (code, textra_args, mode)
+        if not want_output:
+            if key in self.compiler_check_cache:
+                p = self.compiler_check_cache[key]
+                mlog.debug('Using cached compile:')
+                mlog.debug('Cached command line: ', ' '.join(p.commands), '\n')
+                mlog.debug('Code:\n', code)
+                mlog.debug('Cached compiler stdout:\n', p.stdo)
+                mlog.debug('Cached compiler stderr:\n', p.stde)
+                yield p
+                return
         try:
             with tempfile.TemporaryDirectory() as tmpdirname:
                 if isinstance(code, str):
@@ -765,12 +921,10 @@ class Compiler:
                         ofile.write(code)
                 elif isinstance(code, mesonlib.File):
                     srcname = code.fname
-                output = self._get_compile_output(tmpdirname, mode)
 
                 # Construct the compiler command-line
                 commands = CompilerArgs(self)
                 commands.append(srcname)
-                commands += extra_args
                 commands += self.get_always_args()
                 if mode == 'compile':
                     commands += self.get_compile_only_args()
@@ -778,7 +932,12 @@ class Compiler:
                 if mode == 'preprocess':
                     commands += self.get_preprocess_only_args()
                 else:
+                    output = self._get_compile_output(tmpdirname, mode)
                     commands += self.get_output_args(output)
+                # extra_args must be last because it could contain '/link' to
+                # pass args to VisualStudio's linker. In that case everything
+                # in the command line after '/link' is given to the linker.
+                commands += extra_args
                 # Generate full command-line with the exelist
                 commands = self.get_exelist() + commands.to_native()
                 mlog.debug('Running compile:')
@@ -788,8 +947,12 @@ class Compiler:
                 p, p.stdo, p.stde = Popen_safe(commands, cwd=tmpdirname)
                 mlog.debug('Compiler stdout:\n', p.stdo)
                 mlog.debug('Compiler stderr:\n', p.stde)
+                p.commands = commands
                 p.input_name = srcname
-                p.output_name = output
+                if want_output:
+                    p.output_name = output
+                else:
+                    self.compiler_check_cache[key] = p
                 yield p
         except (PermissionError, OSError):
             # On Windows antivirus programs and the like hold on to files so
@@ -811,7 +974,7 @@ class Compiler:
     def get_std_shared_lib_link_args(self):
         return []
 
-    def get_std_shared_module_link_args(self):
+    def get_std_shared_module_link_args(self, options):
         return self.get_std_shared_lib_link_args()
 
     def get_link_whole_for(self, args):
@@ -832,7 +995,9 @@ class Compiler:
         abs_rpaths = [os.path.join(build_dir, p) for p in rpath_paths]
         if build_rpath != '':
             abs_rpaths.append(build_rpath)
-        args = ['-Wl,-rpath,' + rp for rp in abs_rpaths]
+        # Ensure that there is enough space for large RPATHs
+        args = ['-Wl,-headerpad_max_install_names']
+        args += ['-Wl,-rpath,' + rp for rp in abs_rpaths]
         return args
 
     def build_unix_rpath_args(self, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
@@ -861,10 +1026,10 @@ class Compiler:
             else:
                 paths = paths + ':' + padding
         args = []
-        if mesonlib.is_dragonflybsd():
+        if mesonlib.is_dragonflybsd() or mesonlib.is_openbsd():
             # This argument instructs the compiler to record the value of
             # ORIGIN in the .dynamic section of the elf. On Linux this is done
-            # by default, but is not on dragonfly for some reason. Without this
+            # by default, but is not on dragonfly/openbsd for some reason. Without this
             # $ORIGIN in the runtime path will be undefined and any binaries
             # linked against local libraries will fail to resolve them.
             args.append('-Wl,-z,origin')
@@ -887,6 +1052,15 @@ class Compiler:
     def thread_flags(self, env):
         return []
 
+    def openmp_flags(self):
+        raise EnvironmentException('Language %s does not support OpenMP flags.' % self.get_display_language())
+
+    def language_stdlib_only_link_flags(self):
+        # The linker flags needed to link the standard library of the current
+        # language in. This is needed in cases where you e.g. combine D and C++
+        # and both of which need to link their runtime library in or otherwise
+        # building fails with undefined symbols.
+        return []
 
 GCC_STANDARD = 0
 GCC_OSX = 1
@@ -909,22 +1083,28 @@ ICC_WIN = 2
 GNU_LD_AS_NEEDED = '-Wl,--as-needed'
 APPLE_LD_AS_NEEDED = '-Wl,-dead_strip_dylibs'
 
-def get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, path, soversion, is_shared_module):
+def get_macos_dylib_install_name(prefix, shlib_name, suffix, soversion):
+    install_name = prefix + shlib_name
+    if soversion is not None:
+        install_name += '.' + soversion
+    install_name += '.dylib'
+    return '@rpath/' + install_name
+
+def get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, soversion, is_shared_module):
     if soversion is None:
         sostr = ''
     else:
         sostr = '.' + soversion
-    if gcc_type in (GCC_STANDARD, GCC_MINGW, GCC_CYGWIN):
-        # Might not be correct for mingw but seems to work.
+    if gcc_type == GCC_STANDARD:
         return ['-Wl,-soname,%s%s.%s%s' % (prefix, shlib_name, suffix, sostr)]
+    elif gcc_type in (GCC_MINGW, GCC_CYGWIN):
+        # For PE/COFF the soname argument has no effect with GNU LD
+        return []
     elif gcc_type == GCC_OSX:
         if is_shared_module:
             return []
-        install_name = prefix + shlib_name
-        if soversion is not None:
-            install_name += '.' + soversion
-        install_name += '.dylib'
-        return ['-install_name', os.path.join('@rpath', install_name)]
+        name = get_macos_dylib_install_name(prefix, shlib_name, suffix, soversion)
+        return ['-install_name', name]
     else:
         raise RuntimeError('Not implemented yet.')
 
@@ -980,7 +1160,7 @@ def gnulike_default_include_dirs(compiler, lang):
         stdout=subprocess.PIPE,
         env=env
     )
-    stderr = p.stderr.read().decode('utf-8')
+    stderr = p.stderr.read().decode('utf-8', errors='replace')
     parse_state = 0
     paths = []
     for line in stderr.split('\n'):
@@ -1009,7 +1189,9 @@ class GnuCompiler:
         self.defines = defines or {}
         self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage',
                              'b_colorout', 'b_ndebug', 'b_staticpic']
-        if self.gcc_type != GCC_OSX:
+        if self.gcc_type == GCC_OSX:
+            self.base_options.append('b_bitcode')
+        else:
             self.base_options.append('b_lundef')
         self.base_options.append('b_asneeded')
         # All GCC backends can do assembly
@@ -1062,8 +1244,8 @@ class GnuCompiler:
     def split_shlib_to_parts(self, fname):
         return os.path.dirname(fname), fname
 
-    def get_soname_args(self, prefix, shlib_name, suffix, path, soversion, is_shared_module):
-        return get_gcc_soname_args(self.gcc_type, prefix, shlib_name, suffix, path, soversion, is_shared_module)
+    def get_soname_args(self, prefix, shlib_name, suffix, soversion, is_shared_module):
+        return get_gcc_soname_args(self.gcc_type, prefix, shlib_name, suffix, soversion, is_shared_module)
 
     def get_std_shared_lib_link_args(self):
         return ['-shared']
@@ -1092,6 +1274,45 @@ class GnuCompiler:
     def get_default_include_dirs(self):
         return gnulike_default_include_dirs(self.exelist, self.language)
 
+    def openmp_flags(self):
+        return ['-fopenmp']
+
+
+class ElbrusCompiler(GnuCompiler):
+    # Elbrus compiler is nearly like GCC, but does not support
+    # PCH, LTO, sanitizers and color output as of version 1.21.x.
+    def __init__(self, gcc_type, defines):
+        GnuCompiler.__init__(self, gcc_type, defines)
+        self.id = 'lcc'
+        self.base_options = ['b_pgo', 'b_coverage',
+                             'b_ndebug', 'b_staticpic',
+                             'b_lundef', 'b_asneeded']
+
+    def get_library_dirs(self):
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C'
+        stdo = Popen_safe(self.exelist + ['--print-search-dirs'], env=env)[1]
+        paths = []
+        for line in stdo.split('\n'):
+            if line.startswith('libraries:'):
+                # lcc does not include '=' in --print-search-dirs output.
+                libstr = line.split(' ', 1)[1]
+                paths = [os.path.realpath(p) for p in libstr.split(':')]
+                break
+        return paths
+
+    def get_program_dirs(self):
+        env = os.environ.copy()
+        env['LC_ALL'] = 'C'
+        stdo = Popen_safe(self.exelist + ['--print-search-dirs'], env=env)[1]
+        paths = []
+        for line in stdo.split('\n'):
+            if line.startswith('programs:'):
+                # lcc does not include '=' in --print-search-dirs output.
+                libstr = line.split(' ', 1)[1]
+                paths = [os.path.realpath(p) for p in libstr.split(':')]
+                break
+        return paths
 
 class ClangCompiler:
     def __init__(self, clang_type):
@@ -1099,7 +1320,9 @@ class ClangCompiler:
         self.clang_type = clang_type
         self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage',
                              'b_ndebug', 'b_staticpic', 'b_colorout']
-        if self.clang_type != CLANG_OSX:
+        if self.clang_type == CLANG_OSX:
+            self.base_options.append('b_bitcode')
+        else:
             self.base_options.append('b_lundef')
         self.base_options.append('b_asneeded')
         # All Clang backends can do assembly and LLVM IR
@@ -1138,7 +1361,7 @@ class ClangCompiler:
         # so it might change semantics at any time.
         return ['-include-pch', os.path.join(pch_dir, self.get_pch_name(header))]
 
-    def get_soname_args(self, prefix, shlib_name, suffix, path, soversion, is_shared_module):
+    def get_soname_args(self, prefix, shlib_name, suffix, soversion, is_shared_module):
         if self.clang_type == CLANG_STANDARD:
             gcc_type = GCC_STANDARD
         elif self.clang_type == CLANG_OSX:
@@ -1147,7 +1370,7 @@ class ClangCompiler:
             gcc_type = GCC_MINGW
         else:
             raise MesonException('Unreachable code when converting clang type to gcc type.')
-        return get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, path, soversion, is_shared_module)
+        return get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, soversion, is_shared_module)
 
     def has_multi_arguments(self, args, env):
         myargs = ['-Werror=unknown-warning-option', '-Werror=unused-command-line-argument']
@@ -1168,7 +1391,7 @@ class ClangCompiler:
             extra_args.append('-Wl,-no_weak_imports')
         return super().has_function(funcname, prefix, env, extra_args, dependencies)
 
-    def get_std_shared_module_link_args(self):
+    def get_std_shared_module_link_args(self, options):
         if self.clang_type == CLANG_OSX:
             return ['-bundle', '-Wl,-undefined,dynamic_lookup']
         return ['-shared']
@@ -1186,6 +1409,89 @@ class ClangCompiler:
 
     def get_default_include_dirs(self):
         return gnulike_default_include_dirs(self.exelist, self.language)
+
+    def openmp_flags(self):
+        if version_compare(self.version, '>=3.8.0'):
+            return ['-fopenmp']
+        elif version_compare(self.version, '>=3.7.0'):
+            return ['-fopenmp=libomp']
+        else:
+            # Shouldn't work, but it'll be checked explicitly in the OpenMP dependency.
+            return []
+
+
+class ArmclangCompiler:
+    def __init__(self):
+        if not self.is_cross:
+            raise EnvironmentException('armclang supports only cross-compilation.')
+        # Check whether 'armlink.exe' is available in path
+        self.linker_exe = 'armlink.exe'
+        args = '--vsn'
+        try:
+            p, stdo, stderr = Popen_safe(self.linker_exe, args)
+        except OSError as e:
+            err_msg = 'Unknown linker\nRunning "{0}" gave \n"{1}"'.format(' '.join([self.linker_exe] + [args]), e)
+            raise EnvironmentException(err_msg)
+        # Verify the armlink version
+        ver_str = re.search('.*Component.*', stdo)
+        if ver_str:
+            ver_str = ver_str.group(0)
+        else:
+            EnvironmentException('armlink version string not found')
+        # Using the regular expression from environment.search_version,
+        # which is used for searching compiler version
+        version_regex = '(?<!(\d|\.))(\d{1,2}(\.\d+)+(-[a-zA-Z0-9]+)?)'
+        linker_ver = re.search(version_regex, ver_str)
+        if linker_ver:
+            linker_ver = linker_ver.group(0)
+        if not version_compare(self.version, '==' + linker_ver):
+            raise EnvironmentException('armlink version does not match with compiler version')
+        self.id = 'armclang'
+        self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage',
+                             'b_ndebug', 'b_staticpic', 'b_colorout']
+        # Assembly
+        self.can_compile_suffixes.update('s')
+
+    def can_linker_accept_rsp(self):
+        return False
+
+    def get_pic_args(self):
+        # PIC support is not enabled by default for ARM,
+        # if users want to use it, they need to add the required arguments explicitly
+        return []
+
+    def get_colorout_args(self, colortype):
+        return clang_color_args[colortype][:]
+
+    def get_buildtype_args(self, buildtype):
+        return armclang_buildtype_args[buildtype]
+
+    def get_buildtype_linker_args(self, buildtype):
+        return arm_buildtype_linker_args[buildtype]
+
+    # Override CCompiler.get_std_shared_lib_link_args
+    def get_std_shared_lib_link_args(self):
+        return []
+
+    def get_pch_suffix(self):
+        return 'gch'
+
+    def get_pch_use_args(self, pch_dir, header):
+        # Workaround for Clang bug http://llvm.org/bugs/show_bug.cgi?id=15136
+        # This flag is internal to Clang (or at least not documented on the man page)
+        # so it might change semantics at any time.
+        return ['-include-pch', os.path.join(pch_dir, self.get_pch_name(header))]
+
+    # Override CCompiler.get_dependency_gen_args
+    def get_dependency_gen_args(self, outtarget, outfile):
+        return []
+
+    # Override CCompiler.build_rpath_args
+    def build_rpath_args(self, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
+        return []
+
+    def get_linker_exelist(self):
+        return [self.linker_exe]
 
 
 # Tested on linux for ICC 14.0.3, 15.0.6, 16.0.4, 17.0.1
@@ -1221,7 +1527,7 @@ class IntelCompiler:
     def split_shlib_to_parts(self, fname):
         return os.path.dirname(fname), fname
 
-    def get_soname_args(self, prefix, shlib_name, suffix, path, soversion, is_shared_module):
+    def get_soname_args(self, prefix, shlib_name, suffix, soversion, is_shared_module):
         if self.icc_type == ICC_STANDARD:
             gcc_type = GCC_STANDARD
         elif self.icc_type == ICC_OSX:
@@ -1230,7 +1536,7 @@ class IntelCompiler:
             gcc_type = GCC_MINGW
         else:
             raise MesonException('Unreachable code when converting icc type to gcc type.')
-        return get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, path, soversion, is_shared_module)
+        return get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, soversion, is_shared_module)
 
     # TODO: centralise this policy more globally, instead
     # of fragmenting it into GnuCompiler and ClangCompiler
@@ -1248,3 +1554,82 @@ class IntelCompiler:
 
     def get_default_include_dirs(self):
         return gnulike_default_include_dirs(self.exelist, self.language)
+
+    def openmp_flags(self):
+        if version_compare(self.version, '>=15.0.0'):
+            return ['-qopenmp']
+        else:
+            return ['-openmp']
+
+    def get_link_whole_for(self, args):
+        return GnuCompiler.get_link_whole_for(self, args)
+
+
+class ArmCompiler:
+    # Functionality that is common to all ARM family compilers.
+    def __init__(self):
+        if not self.is_cross:
+            raise EnvironmentException('armcc supports only cross-compilation.')
+        self.id = 'arm'
+        default_warn_args = []
+        self.warn_args = {'1': default_warn_args,
+                          '2': default_warn_args + [],
+                          '3': default_warn_args + []}
+        # Assembly
+        self.can_compile_suffixes.add('s')
+
+    def can_linker_accept_rsp(self):
+        return False
+
+    def get_pic_args(self):
+        # FIXME: Add /ropi, /rwpi, /fpic etc. qualifiers to --apcs
+        return []
+
+    def get_buildtype_args(self, buildtype):
+        return arm_buildtype_args[buildtype]
+
+    def get_buildtype_linker_args(self, buildtype):
+        return arm_buildtype_linker_args[buildtype]
+
+    # Override CCompiler.get_always_args
+    def get_always_args(self):
+        return []
+
+    # Override CCompiler.get_dependency_gen_args
+    def get_dependency_gen_args(self, outtarget, outfile):
+        return []
+
+    # Override CCompiler.get_std_shared_lib_link_args
+    def get_std_shared_lib_link_args(self):
+        return []
+
+    def get_pch_use_args(self, pch_dir, header):
+        # FIXME: Add required arguments
+        # NOTE from armcc user guide:
+        # "Support for Precompiled Header (PCH) files is deprecated from ARM Compiler 5.05
+        # onwards on all platforms. Note that ARM Compiler on Windows 8 never supported
+        # PCH files."
+        return []
+
+    def get_pch_suffix(self):
+        # NOTE from armcc user guide:
+        # "Support for Precompiled Header (PCH) files is deprecated from ARM Compiler 5.05
+        # onwards on all platforms. Note that ARM Compiler on Windows 8 never supported
+        # PCH files."
+        return 'pch'
+
+    def thread_flags(self, env):
+        return []
+
+    def thread_link_flags(self, env):
+        return []
+
+    def get_linker_exelist(self):
+        args = ['armlink']
+        return args
+
+    def get_coverage_args(self):
+        return []
+
+    def get_coverage_link_args(self):
+        return []

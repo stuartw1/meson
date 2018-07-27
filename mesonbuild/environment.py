@@ -38,6 +38,10 @@ from .compilers import (
     is_source,
 )
 from .compilers import (
+    ArmCCompiler,
+    ArmCPPCompiler,
+    ArmclangCCompiler,
+    ArmclangCPPCompiler,
     ClangCCompiler,
     ClangCPPCompiler,
     ClangObjCCompiler,
@@ -48,6 +52,9 @@ from .compilers import (
     GnuFortranCompiler,
     GnuObjCCompiler,
     GnuObjCPPCompiler,
+    ElbrusCCompiler,
+    ElbrusCPPCompiler,
+    ElbrusFortranCompiler,
     IntelCCompiler,
     IntelCPPCompiler,
     IntelFortranCompiler,
@@ -67,14 +74,22 @@ from .compilers import (
 
 build_filename = 'meson.build'
 
-# Environment variables that each lang uses.
-cflags_mapping = {'c': 'CFLAGS',
-                  'cpp': 'CXXFLAGS',
-                  'objc': 'OBJCFLAGS',
-                  'objcpp': 'OBJCXXFLAGS',
-                  'fortran': 'FFLAGS',
-                  'd': 'DFLAGS',
-                  'vala': 'VALAFLAGS'}
+known_cpu_families = (
+    'aarch64',
+    'arm',
+    'e2k',
+    'ia64',
+    'mips',
+    'mips64',
+    'parisc',
+    'ppc',
+    'ppc64',
+    'riscv32',
+    'riscv64',
+    'sparc64',
+    'x86',
+    'x86_64'
+)
 
 def detect_gcovr(version='3.1', log=False):
     gcovr_exe = 'gcovr'
@@ -166,9 +181,17 @@ def detect_windows_arch(compilers):
     for compiler in compilers.values():
         # Check if we're using and inside an MSVC toolchain environment
         if compiler.id == 'msvc' and 'VCINSTALLDIR' in os.environ:
-            # 'Platform' is only set when the target arch is not 'x86'.
-            # It's 'x64' when targeting x86_64 and 'arm' when targeting ARM.
-            platform = os.environ.get('Platform', 'x86').lower()
+            if float(compiler.get_toolset_version()) < 10.0:
+                # On MSVC 2008 and earlier, check 'BUILD_PLAT', where
+                # 'Win32' means 'x86'
+                platform = os.environ.get('BUILD_PLAT', 'x86')
+                if platform == 'Win32':
+                    return 'x86'
+            else:
+                # On MSVC 2010 and later 'Platform' is only set when the
+                # target arch is not 'x86'.  It's 'x64' when targeting
+                # x86_64 and 'arm' when targeting ARM.
+                platform = os.environ.get('Platform', 'x86').lower()
             if platform == 'x86':
                 return platform
         if compiler.id == 'gcc' and compiler.has_builtin_define('__i386__'):
@@ -190,6 +213,8 @@ def detect_cpu_family(compilers):
         return 'x86'
     if trial.startswith('arm'):
         return 'arm'
+    if trial.startswith('ppc64'):
+        return 'ppc64'
     if trial in ('amd64', 'x64'):
         trial = 'x86_64'
     if trial == 'x86_64':
@@ -205,6 +230,12 @@ def detect_cpu_family(compilers):
                 pass
         return 'x86_64'
     # Add fixes here as bugs are reported.
+
+    if trial not in known_cpu_families:
+        mlog.warning('Unknown CPU family {!r}, please report this at '
+                     'https://github.com/mesonbuild/meson/issues/new with the'
+                     'output of `uname -a` and `cat /proc/cpuinfo`'.format(trial))
+
     return trial
 
 def detect_cpu(compilers):
@@ -223,6 +254,9 @@ def detect_cpu(compilers):
             except mesonlib.MesonException:
                 pass
         return 'x86_64'
+    if trial == 'e2k':
+        # Make more precise CPU detection for Elbrus platform.
+        trial = platform.processor().lower()
     # Add fixes here as bugs are reported.
     return trial
 
@@ -231,6 +265,11 @@ def detect_system():
     if system.startswith('cygwin'):
         return 'cygwin'
     return system
+
+def detect_msys2_arch():
+    if 'MSYSTEM_CARCH' in os.environ:
+        return os.environ['MSYSTEM_CARCH']
+    return None
 
 def search_version(text):
     # Usually of the type 4.1.4 but compiler output may contain
@@ -253,12 +292,10 @@ def search_version(text):
 class Environment:
     private_dir = 'meson-private'
     log_dir = 'meson-logs'
-    coredata_file = os.path.join(private_dir, 'coredata.dat')
 
-    def __init__(self, source_dir, build_dir, main_script_launcher, options, original_cmd_line_args):
+    def __init__(self, source_dir, build_dir, options):
         self.source_dir = source_dir
         self.build_dir = build_dir
-        self.meson_script_launcher = main_script_launcher
         self.scratch_dir = os.path.join(build_dir, Environment.private_dir)
         self.log_dir = os.path.join(build_dir, Environment.log_dir)
         os.makedirs(self.scratch_dir, exist_ok=True)
@@ -271,14 +308,14 @@ class Environment:
             # re-initialized with project options by the interpreter during
             # build file parsing.
             self.coredata = coredata.CoreData(options)
-            self.coredata.meson_script_launcher = self.meson_script_launcher
+            # Used by the regenchecker script, which runs meson
+            self.coredata.meson_command = mesonlib.meson_command
             self.first_invocation = True
         if self.coredata.cross_file:
             self.cross_info = CrossBuildInfo(self.coredata.cross_file)
         else:
             self.cross_info = None
-        self.cmd_line_options = options
-        self.original_cmd_line_args = original_cmd_line_args
+        self.cmd_line_options = options.cmd_line_options.copy()
 
         # List of potential compilers.
         if mesonlib.is_windows():
@@ -294,7 +331,6 @@ class Environment:
         self.default_objc = ['cc']
         self.default_objcpp = ['c++']
         self.default_fortran = ['gfortran', 'g95', 'f95', 'f90', 'f77', 'ifort']
-        self.default_vala = ['valac']
         self.default_rust = ['rustc']
         self.default_static_linker = ['ar']
         self.vs_static_linker = ['lib']
@@ -320,7 +356,7 @@ class Environment:
             self.object_suffix = 'o'
             self.win_libdir_layout = False
         if 'STRIP' in os.environ:
-            self.native_strip_bin = shlex.split('STRIP')
+            self.native_strip_bin = shlex.split(os.environ['STRIP'])
         else:
             self.native_strip_bin = ['strip']
 
@@ -328,8 +364,7 @@ class Environment:
         return self.cross_info is not None
 
     def dump_coredata(self):
-        coredata.save(self.coredata, self.get_build_dir())
-        return os.path.join(self.get_build_dir(), Environment.coredata_file)
+        return coredata.save(self.coredata, self.get_build_dir())
 
     def get_script_dir(self):
         import mesonbuild.scripts
@@ -364,27 +399,6 @@ class Environment:
 
     def is_library(self, fname):
         return is_library(fname)
-
-    def had_argument_for(self, option):
-        trial1 = '--' + option
-        trial2 = '-D' + option
-        previous_is_plaind = False
-        for i in self.original_cmd_line_args:
-            if i.startswith(trial1) or i.startswith(trial2):
-                return True
-            if previous_is_plaind and i.startswith(option):
-                return True
-            previous_is_plaind = i == '-D'
-        return False
-
-    def merge_options(self, options):
-        for (name, value) in options.items():
-            if name not in self.coredata.user_options:
-                self.coredata.user_options[name] = value
-            else:
-                oldval = self.coredata.user_options[name]
-                if type(oldval) != type(value):
-                    self.coredata.user_options[name] = value
 
     @staticmethod
     def get_gnu_compiler_defines(compiler):
@@ -422,6 +436,15 @@ class Environment:
         return dot.join((major, minor, patch))
 
     @staticmethod
+    def get_lcc_version_from_defines(defines):
+        dot = '.'
+        generation_and_major = defines.get('__LCC__', '100')
+        generation = generation_and_major[:1]
+        major = generation_and_major[1:]
+        minor = defines.get('__LCC_MINOR__', '0')
+        return dot.join((generation, major, minor))
+
+    @staticmethod
     def get_gnu_compiler_type(defines):
         # Detect GCC type (Apple, MinGW, Cygwin, Unix)
         if '__APPLE__' in defines:
@@ -432,12 +455,20 @@ class Environment:
             return GCC_CYGWIN
         return GCC_STANDARD
 
+    def warn_about_lang_pointing_to_cross(self, compiler_exe, evar):
+        evar_str = os.environ.get(evar, 'WHO_WOULD_CALL_THEIR_COMPILER_WITH_THIS_NAME')
+        if evar_str == compiler_exe:
+            mlog.warning('''Env var %s seems to point to the cross compiler.
+This is probably wrong, it should always point to the native compiler.''' % evar)
+
     def _get_compilers(self, lang, evar, want_cross):
         '''
         The list of compilers is detected in the exact same way for
         C, C++, ObjC, ObjC++, Fortran, CS so consolidate it here.
         '''
         if self.is_cross_build() and want_cross:
+            if lang not in self.cross_info.config['binaries']:
+                raise EnvironmentException('{!r} compiler binary not defined in cross file'.format(lang))
             compilers = mesonlib.stringlistify(self.cross_info.config['binaries'][lang])
             # Ensure ccache exists and remove it if it doesn't
             if compilers[0] == 'ccache':
@@ -445,6 +476,7 @@ class Environment:
                 ccache = self.detect_ccache()
             else:
                 ccache = []
+            self.warn_about_lang_pointing_to_cross(compilers[0], evar)
             # Return value has to be a list of compiler 'choices'
             compilers = [compilers]
             is_cross = True
@@ -505,6 +537,8 @@ class Environment:
                     if found_cl in watcom_cls:
                         continue
                 arg = '/?'
+            elif 'armcc' in compiler[0]:
+                arg = '--vsn'
             else:
                 arg = '--version'
             try:
@@ -514,15 +548,43 @@ class Environment:
                 continue
             version = search_version(out)
             full_version = out.split('\n', 1)[0]
+
+            guess_gcc_or_lcc = False
             if 'Free Software Foundation' in out:
+                guess_gcc_or_lcc = 'gcc'
+            if 'e2k' in out and 'lcc' in out:
+                guess_gcc_or_lcc = 'lcc'
+
+            if guess_gcc_or_lcc:
                 defines = self.get_gnu_compiler_defines(compiler)
                 if not defines:
                     popen_exceptions[' '.join(compiler)] = 'no pre-processor defines'
                     continue
                 gtype = self.get_gnu_compiler_type(defines)
-                version = self.get_gnu_version_from_defines(defines)
-                cls = GnuCCompiler if lang == 'c' else GnuCPPCompiler
+                if guess_gcc_or_lcc == 'lcc':
+                    version = self.get_lcc_version_from_defines(defines)
+                    cls = ElbrusCCompiler if lang == 'c' else ElbrusCPPCompiler
+                else:
+                    version = self.get_gnu_version_from_defines(defines)
+                    cls = GnuCCompiler if lang == 'c' else GnuCPPCompiler
                 return cls(ccache + compiler, version, gtype, is_cross, exe_wrap, defines, full_version=full_version)
+
+            if 'armclang' in out:
+                # The compiler version is not present in the first line of output,
+                # instead it is present in second line, startswith 'Component:'.
+                # So, searching for the 'Component' in out although we know it is
+                # present in second line, as we are not sure about the
+                # output format in future versions
+                arm_ver_str = re.search('.*Component.*', out)
+                if arm_ver_str is None:
+                    popen_exceptions[' '.join(compiler)] = 'version string not found'
+                    continue
+                arm_ver_str = arm_ver_str.group(0)
+                # Override previous values
+                version = search_version(arm_ver_str)
+                full_version = arm_ver_str
+                cls = ArmclangCCompiler if lang == 'c' else ArmclangCPPCompiler
+                return cls(ccache + compiler, version, is_cross, exe_wrap, full_version=full_version)
             if 'clang' in out:
                 if 'Apple' in out or mesonlib.for_darwin(want_cross, self):
                     cltype = CLANG_OSX
@@ -551,6 +613,9 @@ class Environment:
                 inteltype = ICC_STANDARD
                 cls = IntelCCompiler if lang == 'c' else IntelCPPCompiler
                 return cls(ccache + compiler, version, inteltype, is_cross, exe_wrap, full_version=full_version)
+            if 'ARM' in out:
+                cls = ArmCCompiler if lang == 'c' else ArmCPPCompiler
+                return cls(ccache + compiler, version, is_cross, exe_wrap, full_version=full_version)
         self._handle_exceptions(popen_exceptions, compilers)
 
     def detect_c_compiler(self, want_cross):
@@ -575,14 +640,25 @@ class Environment:
                 version = search_version(out)
                 full_version = out.split('\n', 1)[0]
 
+                guess_gcc_or_lcc = False
                 if 'GNU Fortran' in out:
+                    guess_gcc_or_lcc = 'gcc'
+                if 'e2k' in out and 'lcc' in out:
+                    guess_gcc_or_lcc = 'lcc'
+
+                if guess_gcc_or_lcc:
                     defines = self.get_gnu_compiler_defines(compiler)
                     if not defines:
                         popen_exceptions[' '.join(compiler)] = 'no pre-processor defines'
                         continue
                     gtype = self.get_gnu_compiler_type(defines)
-                    version = self.get_gnu_version_from_defines(defines)
-                    return GnuFortranCompiler(compiler, version, gtype, is_cross, exe_wrap, defines, full_version=full_version)
+                    if guess_gcc_or_lcc == 'lcc':
+                        version = self.get_lcc_version_from_defines(defines)
+                        cls = ElbrusFortranCompiler
+                    else:
+                        version = self.get_gnu_version_from_defines(defines)
+                        cls = GnuFortranCompiler
+                    return cls(compiler, version, gtype, is_cross, exe_wrap, defines, full_version=full_version)
 
                 if 'G95' in out:
                     return G95FortranCompiler(compiler, version, is_cross, exe_wrap, full_version=full_version)
@@ -610,10 +686,6 @@ class Environment:
     def get_scratch_dir(self):
         return self.scratch_dir
 
-    def get_depfixer(self):
-        path = os.path.dirname(__file__)
-        return os.path.join(path, 'depfixer.py')
-
     def detect_objc_compiler(self, want_cross):
         popen_exceptions = {}
         compilers, ccache, is_cross, exe_wrap = self._get_compilers('objc', 'OBJC', want_cross)
@@ -627,7 +699,7 @@ class Environment:
                 popen_exceptions[' '.join(compiler + arg)] = e
                 continue
             version = search_version(out)
-            if 'Free Software Foundation' in out:
+            if 'Free Software Foundation' in out or ('e2k' in out and 'lcc' in out):
                 defines = self.get_gnu_compiler_defines(compiler)
                 if not defines:
                     popen_exceptions[' '.join(compiler)] = 'no pre-processor defines'
@@ -654,7 +726,7 @@ class Environment:
                 popen_exceptions[' '.join(compiler + arg)] = e
                 continue
             version = search_version(out)
-            if 'Free Software Foundation' in out:
+            if 'Free Software Foundation' in out or ('e2k' in out and 'lcc' in out):
                 defines = self.get_gnu_compiler_defines(compiler)
                 if not defines:
                     popen_exceptions[' '.join(compiler)] = 'no pre-processor defines'
@@ -675,7 +747,7 @@ class Environment:
         except OSError:
             raise EnvironmentException('Could not execute Java compiler "%s"' % ' '.join(exelist))
         version = search_version(err)
-        if 'javac' in err:
+        if 'javac' in out or 'javac' in err:
             return JavaCompiler(exelist, version)
         raise EnvironmentException('Unknown compiler "' + ' '.join(exelist) + '"')
 
@@ -699,25 +771,19 @@ class Environment:
 
         self._handle_exceptions(popen_exceptions, compilers)
 
-    def detect_vala_compiler(self, want_cross):
-        popen_exceptions = {}
-        compilers, ccache, is_cross, exe_wrap = self._get_compilers('vala', 'VALAC', want_cross)
-        for compiler in compilers:
-            if isinstance(compiler, str):
-                compiler = [compiler]
-            arg = ['--version']
-            try:
-                p, out = Popen_safe(compiler + arg)[0:2]
-            except OSError as e:
-                popen_exceptions[' '.join(compiler + arg)] = e
-                continue
-
-            version = search_version(out)
-
-            if 'Vala' in out:
-                return ValaCompiler(compiler, version, is_cross)
-
-        self._handle_exceptions(popen_exceptions, compilers)
+    def detect_vala_compiler(self):
+        if 'VALAC' in os.environ:
+            exelist = shlex.split(os.environ['VALAC'])
+        else:
+            exelist = ['valac']
+        try:
+            p, out = Popen_safe(exelist + ['--version'])[0:2]
+        except OSError:
+            raise EnvironmentException('Could not execute Vala compiler "%s"' % ' '.join(exelist))
+        version = search_version(out)
+        if 'Vala' in out:
+            return ValaCompiler(exelist, version)
+        raise EnvironmentException('Unknown compiler "' + ' '.join(exelist) + '"')
 
     def detect_rust_compiler(self, want_cross):
         popen_exceptions = {}
@@ -907,50 +973,6 @@ class Environment:
         out = out.split('\n')[index].lstrip('libraries: =').split(':')
         return [os.path.normpath(p) for p in out]
 
-def get_args_from_envvars(compiler):
-    """
-    @compiler: Compiler to fetch environment flags for
-
-    Returns a tuple of (compile_flags, link_flags) for the specified language
-    from the inherited environment
-    """
-    def log_var(var, val):
-        if val:
-            mlog.log('Appending {} from environment: {!r}'.format(var, val))
-
-    lang = compiler.get_language()
-    compiler_is_linker = False
-    if hasattr(compiler, 'get_linker_exelist'):
-        compiler_is_linker = (compiler.get_exelist() == compiler.get_linker_exelist())
-
-    if lang not in cflags_mapping:
-        return [], [], []
-
-    compile_flags = os.environ.get(cflags_mapping[lang], '')
-    log_var(cflags_mapping[lang], compile_flags)
-    compile_flags = shlex.split(compile_flags)
-
-    # Link flags (same for all languages)
-    link_flags = os.environ.get('LDFLAGS', '')
-    log_var('LDFLAGS', link_flags)
-    link_flags = shlex.split(link_flags)
-    if compiler_is_linker:
-        # When the compiler is used as a wrapper around the linker (such as
-        # with GCC and Clang), the compile flags can be needed while linking
-        # too. This is also what Autotools does. However, we don't want to do
-        # this when the linker is stand-alone such as with MSVC C/C++, etc.
-        link_flags = compile_flags + link_flags
-
-    # Pre-processor flags (not for fortran or D)
-    preproc_flags = ''
-    if lang in ('c', 'cpp', 'objc', 'objcpp'):
-        preproc_flags = os.environ.get('CPPFLAGS', '')
-    log_var('CPPFLAGS', preproc_flags)
-    preproc_flags = shlex.split(preproc_flags)
-    compile_flags += preproc_flags
-
-    return preproc_flags, compile_flags, link_flags
-
 class CrossBuildInfo:
     def __init__(self, filename):
         self.config = {'properties': {}}
@@ -983,6 +1005,10 @@ class CrossBuildInfo:
                     res = eval(value, {'__builtins__': None}, {'true': True, 'false': False})
                 except Exception:
                     raise EnvironmentException('Malformed value in cross file variable %s.' % entry)
+
+                if entry == 'cpu_family' and res not in known_cpu_families:
+                    mlog.warning('Unknown CPU family %s, please report this at https://github.com/mesonbuild/meson/issues/new' % value)
+
                 if self.ok_type(res):
                     self.config[s][entry] = res
                 elif isinstance(res, list):
@@ -1005,11 +1031,14 @@ class CrossBuildInfo:
     def get_stdlib(self, language):
         return self.config['properties'][language + '_stdlib']
 
-    def get_binaries(self):
-        return self.config['binaries']
-
     def get_properties(self):
         return self.config['properties']
+
+    def get_root(self):
+        return self.get_properties().get('root', None)
+
+    def get_sys_root(self):
+        return self.get_properties().get('sys_root', None)
 
     # When compiling a cross compiler we use the native compiler for everything.
     # But not when cross compiling a cross compiler.

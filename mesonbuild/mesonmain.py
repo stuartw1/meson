@@ -12,71 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 import sys, stat, traceback, argparse
 import datetime
 import os.path
+import platform
+import cProfile as profile
+
 from . import environment, interpreter, mesonlib
 from . import build
-from . import mconf, mintro, mtest, rewriter, minit
-import platform
 from . import mlog, coredata
 from .mesonlib import MesonException
-from .wrap import WrapMode, wraptool
+from .environment import detect_msys2_arch
+from .wrap import WrapMode
 
 default_warning = '1'
 
-def add_builtin_argument(p, name, **kwargs):
-    k = kwargs.get('dest', name.replace('-', '_'))
-    c = coredata.get_builtin_option_choices(k)
-    b = kwargs.get('action', None) in ['store_true', 'store_false']
-    h = coredata.get_builtin_option_description(k)
-    if not b:
-        h = h.rstrip('.') + ' (default: %s).' % coredata.get_builtin_option_default(k)
-    if c and not b:
-        kwargs['choices'] = c
-    default = coredata.get_builtin_option_default(k, noneIfSuppress=True)
-    if default is not None:
-        kwargs['default'] = default
-    else:
-        kwargs['default'] = argparse.SUPPRESS
-    p.add_argument('--' + name, help=h, **kwargs)
-
 def create_parser():
     p = argparse.ArgumentParser(prog='meson')
-    add_builtin_argument(p, 'prefix')
-    add_builtin_argument(p, 'libdir')
-    add_builtin_argument(p, 'libexecdir')
-    add_builtin_argument(p, 'bindir')
-    add_builtin_argument(p, 'sbindir')
-    add_builtin_argument(p, 'includedir')
-    add_builtin_argument(p, 'datadir')
-    add_builtin_argument(p, 'mandir')
-    add_builtin_argument(p, 'infodir')
-    add_builtin_argument(p, 'localedir')
-    add_builtin_argument(p, 'sysconfdir')
-    add_builtin_argument(p, 'localstatedir')
-    add_builtin_argument(p, 'sharedstatedir')
-    add_builtin_argument(p, 'backend')
-    add_builtin_argument(p, 'buildtype')
-    add_builtin_argument(p, 'strip', action='store_true')
-    add_builtin_argument(p, 'unity')
-    add_builtin_argument(p, 'werror', action='store_true')
-    add_builtin_argument(p, 'layout')
-    add_builtin_argument(p, 'default-library')
-    add_builtin_argument(p, 'warnlevel', dest='warning_level')
-    add_builtin_argument(p, 'stdsplit', action='store_false')
-    add_builtin_argument(p, 'errorlogs', action='store_false')
+    coredata.register_builtin_arguments(p)
     p.add_argument('--cross-file', default=None,
                    help='File describing cross compilation environment.')
-    p.add_argument('-D', action='append', dest='projectoptions', default=[], metavar="option",
-                   help='Set the value of an option, can be used several times to set multiple options.')
     p.add_argument('-v', '--version', action='version',
                    version=coredata.version)
     # See the mesonlib.WrapMode enum for documentation
     p.add_argument('--wrap-mode', default=WrapMode.default,
                    type=wrapmodetype, choices=WrapMode,
                    help='Special wrap mode to use')
-    p.add_argument('directories', nargs='*')
+    p.add_argument('--profile-self', action='store_true', dest='profile',
+                   help=argparse.SUPPRESS)
+    p.add_argument('builddir', nargs='?', default=None)
+    p.add_argument('sourcedir', nargs='?', default=None)
     return p
 
 def wrapmodetype(string):
@@ -89,11 +55,9 @@ def wrapmodetype(string):
 
 class MesonApp:
 
-    def __init__(self, dir1, dir2, script_launcher, handshake, options, original_cmd_line_args):
+    def __init__(self, dir1, dir2, handshake, options):
         (self.source_dir, self.build_dir) = self.validate_dirs(dir1, dir2, handshake)
-        self.meson_script_launcher = script_launcher
         self.options = options
-        self.original_cmd_line_args = original_cmd_line_args
 
     def has_build_file(self, dirname):
         fname = os.path.join(dirname, environment.build_filename)
@@ -145,8 +109,10 @@ class MesonApp:
             env.coredata.pkgconf_envvar = curvar
 
     def generate(self):
-        env = environment.Environment(self.source_dir, self.build_dir, self.meson_script_launcher, self.options, self.original_cmd_line_args)
+        env = environment.Environment(self.source_dir, self.build_dir, self.options)
         mlog.initialize(env.get_log_dir())
+        if self.options.profile:
+            mlog.set_timestamp_start(time.monotonic())
         with mesonlib.BuildDirLock(self.build_dir):
             self._generate(env)
 
@@ -164,30 +130,8 @@ class MesonApp:
         else:
             mlog.log('Build type:', mlog.bold('native build'))
         b = build.Build(env)
-        if self.options.backend == 'ninja':
-            from .backend import ninjabackend
-            g = ninjabackend.NinjaBackend(b)
-        elif self.options.backend == 'vs':
-            from .backend import vs2010backend
-            g = vs2010backend.autodetect_vs_version(b)
-            env.coredata.set_builtin_option('backend', g.name)
-            mlog.log('Auto detected Visual Studio backend:', mlog.bold(g.name))
-        elif self.options.backend == 'vs2010':
-            from .backend import vs2010backend
-            g = vs2010backend.Vs2010Backend(b)
-        elif self.options.backend == 'vs2015':
-            from .backend import vs2015backend
-            g = vs2015backend.Vs2015Backend(b)
-        elif self.options.backend == 'vs2017':
-            from .backend import vs2017backend
-            g = vs2017backend.Vs2017Backend(b)
-        elif self.options.backend == 'xcode':
-            from .backend import xcodebackend
-            g = xcodebackend.XCodeBackend(b)
-        else:
-            raise RuntimeError('Unknown backend "%s".' % self.options.backend)
 
-        intr = interpreter.Interpreter(b, g)
+        intr = interpreter.Interpreter(b)
         if env.is_cross_build():
             mlog.log('Host machine cpu family:', mlog.bold(intr.builtin['host_machine'].cpu_family_method([], {})))
             mlog.log('Host machine cpu:', mlog.bold(intr.builtin['host_machine'].cpu_method([], {})))
@@ -195,7 +139,16 @@ class MesonApp:
             mlog.log('Target machine cpu:', mlog.bold(intr.builtin['target_machine'].cpu_method([], {})))
         mlog.log('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
         mlog.log('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
-        intr.run()
+        if self.options.profile:
+            fname = os.path.join(self.build_dir, 'meson-private', 'profile-interpreter.log')
+            profile.runctx('intr.run()', globals(), locals(), filename=fname)
+        else:
+            intr.run()
+        # Print all default option values that don't match the current value
+        for def_opt_name, def_opt_value, cur_opt_value in intr.get_non_matching_default_options():
+            mlog.log('Option', mlog.bold(def_opt_name), 'is:',
+                     mlog.bold(str(cur_opt_value)),
+                     '[default: {}]'.format(str(def_opt_value)))
         try:
             dumpfile = os.path.join(env.get_scratch_dir(), 'build.dat')
             # We would like to write coredata as late as possible since we use the existence of
@@ -205,12 +158,22 @@ class MesonApp:
             # sync with the time that gets applied to any files. Thus, we dump this file as late as
             # possible, but before build files, and if any error occurs, delete it.
             cdf = env.dump_coredata()
-            g.generate(intr)
+            if self.options.profile:
+                fname = 'profile-{}-backend.log'.format(intr.backend.name)
+                fname = os.path.join(self.build_dir, 'meson-private', fname)
+                profile.runctx('intr.backend.generate(intr)', globals(), locals(), filename=fname)
+            else:
+                intr.backend.generate(intr)
             build.save(b, dumpfile)
             # Post-conf scripts must be run after writing coredata or else introspection fails.
-            g.run_postconf_scripts()
+            intr.backend.run_postconf_scripts()
         except:
-            os.unlink(cdf)
+            if 'cdf' in locals():
+                old_cdf = cdf + '.prev'
+                if os.path.exists(old_cdf):
+                    os.replace(old_cdf, cdf)
+                else:
+                    os.unlink(cdf)
             raise
 
 def run_script_command(args):
@@ -222,17 +185,11 @@ def run_script_command(args):
     elif cmdname == 'cleantrees':
         import mesonbuild.scripts.cleantrees as abc
         cmdfunc = abc.run
-    elif cmdname == 'install':
-        import mesonbuild.scripts.meson_install as abc
-        cmdfunc = abc.run
     elif cmdname == 'commandrunner':
         import mesonbuild.scripts.commandrunner as abc
         cmdfunc = abc.run
     elif cmdname == 'delsuffix':
         import mesonbuild.scripts.delwithsuffix as abc
-        cmdfunc = abc.run
-    elif cmdname == 'depfixer':
-        import mesonbuild.scripts.depfixer as abc
         cmdfunc = abc.run
     elif cmdname == 'dirchanger':
         import mesonbuild.scripts.dirchanger as abc
@@ -274,12 +231,36 @@ def run_script_command(args):
         raise MesonException('Unknown internal command {}.'.format(cmdname))
     return cmdfunc(cmdargs)
 
-def run(original_args, mainfile=None):
+def set_meson_command(mainfile):
+    if mainfile.endswith('.exe'):
+        mesonlib.meson_command = [mainfile]
+    elif os.path.isabs(mainfile) and mainfile.endswith('mesonmain.py'):
+        # Can't actually run meson with an absolute path to mesonmain.py, it must be run as -m mesonbuild.mesonmain
+        mesonlib.meson_command = mesonlib.python_command + ['-m', 'mesonbuild.mesonmain']
+    else:
+        mesonlib.meson_command = mesonlib.python_command + [mainfile]
+    # This won't go into the log file because it's not initialized yet, and we
+    # need this value for unit tests.
+    if 'MESON_COMMAND_TESTS' in os.environ:
+        mlog.log('meson_command is {!r}'.format(mesonlib.meson_command))
+
+def run(original_args, mainfile):
     if sys.version_info < (3, 5):
         print('Meson works correctly only with python 3.5+.')
         print('You have python %s.' % sys.version)
         print('Please update your environment')
         return 1
+    # https://github.com/mesonbuild/meson/issues/3653
+    if sys.platform.lower() == 'msys':
+        mlog.error('This python3 seems to be msys/python on MSYS2 Windows, which is known to have path semantics incompatible with Meson')
+        msys2_arch = detect_msys2_arch()
+        if msys2_arch:
+            mlog.error('Please install and use mingw-w64-i686-python3 and/or mingw-w64-x86_64-python3 with Pacman')
+        else:
+            mlog.error('Please download and use Python as detailed at: https://mesonbuild.com/Getting-meson.html')
+        return 2
+    # Set the meson command that will be used to run scripts and so on
+    set_meson_command(mainfile)
     args = original_args[:]
     if len(args) > 0:
         # First check if we want to run a subcommand.
@@ -293,23 +274,32 @@ def run(original_args, mainfile=None):
             args = remaining_args
             cmd_name = args[0]
         if cmd_name == 'test':
+            from . import mtest
             return mtest.run(remaining_args)
         elif cmd_name == 'setup':
             args = remaining_args
             # FALLTHROUGH like it's 1972.
+        elif cmd_name == 'install':
+            from . import minstall
+            return minstall.run(remaining_args)
         elif cmd_name == 'introspect':
+            from . import mintro
             return mintro.run(remaining_args)
         elif cmd_name == 'rewrite':
+            from . import rewriter
             return rewriter.run(remaining_args)
         elif cmd_name == 'configure':
             try:
+                from . import mconf
                 return mconf.run(remaining_args)
             except MesonException as e:
                 mlog.exception(e)
                 sys.exit(1)
         elif cmd_name == 'wrap':
+            from .wrap import wraptool
             return wraptool.run(remaining_args)
         elif cmd_name == 'init':
+            from . import minit
             return minit.run(remaining_args)
         elif cmd_name == 'runpython':
             import runpy
@@ -337,28 +327,20 @@ def run(original_args, mainfile=None):
 
     args = mesonlib.expand_arguments(args)
     options = parser.parse_args(args)
-    args = options.directories
-    if not args or len(args) > 2:
-        # if there's a meson.build in the dir above, and not in the current
-        # directory, assume we're in the build directory
-        if not args and not os.path.exists('meson.build') and os.path.exists('../meson.build'):
-            dir1 = '..'
-            dir2 = '.'
-        else:
-            print('{} <source directory> <build directory>'.format(sys.argv[0]))
-            print('If you omit either directory, the current directory is substituted.')
-            print('Run {} --help for more information.'.format(sys.argv[0]))
-            return 1
-    else:
-        dir1 = args[0]
-        if len(args) > 1:
-            dir2 = args[1]
-        else:
-            dir2 = '.'
+    coredata.parse_cmd_line_options(options)
+    dir1 = options.builddir
+    dir2 = options.sourcedir
     try:
-        if mainfile is None:
-            raise AssertionError('I iz broken. Sorry.')
-        app = MesonApp(dir1, dir2, mainfile, handshake, options, original_args)
+        if dir1 is None:
+            if dir2 is None:
+                if not os.path.exists('meson.build') and os.path.exists('../meson.build'):
+                    dir2 = '..'
+                else:
+                    raise MesonException('Must specify at least one directory name.')
+            dir1 = os.getcwd()
+        if dir2 is None:
+            dir2 = os.getcwd()
+        app = MesonApp(dir1, dir2, handshake, options)
     except Exception as e:
         # Log directory does not exist, so just print
         # to stdout.
@@ -386,3 +368,15 @@ def run(original_args, mainfile=None):
         mlog.shutdown()
 
     return 0
+
+def main():
+    # Always resolve the command path so Ninja can find it for regen, tests, etc.
+    if 'meson.exe' in sys.executable:
+        assert(os.path.isabs(sys.executable))
+        launcher = sys.executable
+    else:
+        launcher = os.path.realpath(sys.argv[0])
+    return run(sys.argv[1:], launcher)
+
+if __name__ == '__main__':
+    sys.exit(main())

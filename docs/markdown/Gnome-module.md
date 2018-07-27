@@ -40,8 +40,8 @@ file called `foobar.h`, which you can then include in your sources.
 * `install_dir`: (*Added 0.37.0*) location to install the header or
   bundle depending on previous options
 * `install_header`: (*Added 0.37.0*) if true, install the header file
-* `source_dir`: a list of subdirectories where the resource compiler
-  should look up the files, relative to the location of the XML file
+* `source_dir`: a list of directories where the resource compiler
+  should look up the files
 
 Returns an array containing: `[c_source, header_file]` or
 `[gresource_bundle]`
@@ -227,17 +227,33 @@ useful when running the application locally for example during tests.
 ### gnome.gdbus_codegen()
 
 Compiles the given XML schema into gdbus source code. Takes two
-positional arguments, the first one specifies the name of the source
-files and the second specifies the XML file name.
+positional arguments, the first one specifies the base name to use
+while creating the output source and header and the second specifies
+one XML file.
 
+* `sources`: list of XML files
 * `interface_prefix`: prefix for the interface
 * `namespace`: namespace of the interface
+* `extra_args`: (*Added 0.47.0*) additional command line arguments to pass
+* `autocleanup`: *(Added 0.47.0)* if set generates autocleanup code. Can be one of `none`, `objects` or `all`
 * `object_manager`: *(Added 0.40.0)* if true generates object manager code
 * `annotations`: *(Added 0.43.0)* list of lists of 3 strings for the annotation for `'ELEMENT', 'KEY', 'VALUE'`
 * `docbook`: *(Added 0.43.0)* prefix to generate `'PREFIX'-NAME.xml` docbooks
+* `build_by_default`: causes, when set to true, to have this target be
+  built by default, that is, when invoking plain `ninja`, the default
+  value is true for all built target types
+* `install_dir`: (*Added 0.46.0*) location to install the header or
+  bundle depending on previous options
+* `install_header`: (*Added 0.46.0*) if true, install the header file
 
-Returns an opaque object containing the source files. Add it to a top
-level target's source list.
+Starting *0.46.0*, this function returns a list of at least two custom targets
+(in order): one for the source code and one for the header. The list will
+contain a third custom target for the generated docbook files if that keyword
+argument is passed.
+
+Earlier versions return a single custom target representing all the outputs.
+Generally, you should just add this list of targets to a top level target's
+source list.
 
 Example:
 
@@ -245,7 +261,8 @@ Example:
 gnome = import('gnome')
 
 # The returned source would be passed to another target
-gdbus_src = gnome.gdbus_codegen('example-interface', 'com.example.Sample.xml',
+gdbus_src = gnome.gdbus_codegen('example-interface',
+  sources: 'com.example.Sample.xml',
   interface_prefix : 'com.example.',
   namespace : 'Sample',
   annotations : [

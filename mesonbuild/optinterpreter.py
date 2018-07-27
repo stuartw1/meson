@@ -15,26 +15,13 @@
 import os, re
 import functools
 
-from . import mlog
 from . import mparser
 from . import coredata
 from . import mesonlib
-
+from . import compilers
 
 forbidden_option_names = coredata.get_builtin_options()
-forbidden_prefixes = {'c_',
-                      'cpp_',
-                      'd_',
-                      'rust_',
-                      'fortran_',
-                      'objc_',
-                      'objcpp_',
-                      'vala_',
-                      'csharp_',
-                      'swift_',
-                      'b_',
-                      'backend_',
-                      }
+forbidden_prefixes = [lang + '_' for lang in compilers.all_languages] + ['b_', 'backend_']
 
 def is_invalid_name(name):
     if name in forbidden_option_names:
@@ -106,6 +93,9 @@ def IntegerParser(name, description, kwargs):
                                       kwargs['value'],
                                       kwargs.get('yield', coredata.default_yielding))
 
+# FIXME: Cannot use FeatureNew while parsing options because we parse it before
+# reading options in project(). See func_project() in interpreter.py
+#@FeatureNew('array type option()', '0.44.0')
 @permitted_kwargs({'value', 'yield', 'choices'})
 def string_array_parser(name, description, kwargs):
     if 'choices' in kwargs:
@@ -127,56 +117,25 @@ def string_array_parser(name, description, kwargs):
                                     choices=choices,
                                     yielding=kwargs.get('yield', coredata.default_yielding))
 
+@permitted_kwargs({'value', 'yield'})
+def FeatureParser(name, description, kwargs):
+    return coredata.UserFeatureOption(name,
+                                      description,
+                                      kwargs.get('value', 'auto'),
+                                      yielding=kwargs.get('yield', coredata.default_yielding))
+
 option_types = {'string': StringParser,
                 'boolean': BooleanParser,
                 'combo': ComboParser,
                 'integer': IntegerParser,
                 'array': string_array_parser,
+                'feature': FeatureParser,
                 }
 
 class OptionInterpreter:
-    def __init__(self, subproject, command_line_options):
+    def __init__(self, subproject):
         self.options = {}
         self.subproject = subproject
-        self.sbprefix = subproject + ':'
-        self.cmd_line_options = {}
-        for o in command_line_options:
-            if self.subproject != '': # Strip the beginning.
-                # Ignore options that aren't for this subproject
-                if not o.startswith(self.sbprefix):
-                    continue
-            try:
-                (key, value) = o.split('=', 1)
-            except ValueError:
-                raise OptionException('Option {!r} must have a value separated by equals sign.'.format(o))
-            # Ignore subproject options if not fetching subproject options
-            if self.subproject == '' and ':' in key:
-                continue
-            self.cmd_line_options[key] = value
-
-    def get_bad_options(self):
-        subproj_len = len(self.subproject)
-        if subproj_len > 0:
-            subproj_len += 1
-        retval = []
-        # The options need to be sorted (e.g. here) to get consistent
-        # error messages (on all platforms) which is required by some test
-        # cases that check (also) the order of these options.
-        for option in sorted(self.cmd_line_options):
-            if option in list(self.options) + forbidden_option_names:
-                continue
-            if any(option[subproj_len:].startswith(p) for p in forbidden_prefixes):
-                continue
-            retval += [option]
-        return retval
-
-    def check_for_bad_options(self):
-        bad = self.get_bad_options()
-        if bad:
-            sub = 'In subproject {}: '.format(self.subproject) if self.subproject else ''
-            mlog.warning(
-                '{}Unknown command line options: "{}"\n'
-                'This will become a hard error in a future Meson release.'.format(sub, ', '.join(bad)))
 
     def process(self, option_file):
         try:
@@ -197,7 +156,6 @@ class OptionInterpreter:
                 e.colno = cur.colno
                 e.file = os.path.join('meson_options.txt')
                 raise e
-        self.check_for_bad_options()
 
     def reduce_single(self, arg):
         if isinstance(arg, str):
@@ -230,6 +188,13 @@ class OptionInterpreter:
         if func_name != 'option':
             raise OptionException('Only calls to option() are allowed in option files.')
         (posargs, kwargs) = self.reduce_arguments(node.args)
+
+        # FIXME: Cannot use FeatureNew while parsing options because we parse
+        # it before reading options in project(). See func_project() in
+        # interpreter.py
+        #if 'yield' in kwargs:
+        #    FeatureNew('option yield', '0.45.0').use(self.subproject)
+
         if 'type' not in kwargs:
             raise OptionException('Option call missing mandatory "type" keyword argument')
         opt_type = kwargs.pop('type')
@@ -249,6 +214,4 @@ class OptionInterpreter:
         opt = option_types[opt_type](opt_name, kwargs.pop('description', ''), kwargs)
         if opt.description == '':
             opt.description = opt_name
-        if opt_name in self.cmd_line_options:
-            opt.set_value(self.cmd_line_options[opt_name])
         self.options[opt_name] = opt

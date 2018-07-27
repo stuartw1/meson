@@ -118,11 +118,39 @@ enumexe3 = executable('enumprog3', main, enums_c3, enums_h3,
 dependencies : gobj)
 test('enum test 3', enumexe3)
 
-enums4 = gnome.mkenums_simple('enums4', sources : 'meson-sample.h',
+enums4 = gnome.mkenums_simple('enums4', sources : files('meson-sample.h'),
                               function_prefix : '_')
 enumexe4 = executable('enumprog4', 'main4.c', enums4, dependencies : gobj)
 
 enums5 = gnome.mkenums_simple('enums5', sources : 'meson-sample.h',
+                              install_header : true,
                               decorator : 'MESON_EXPORT',
                               header_prefix : '#include "meson-decls.h"')
 enumexe5 = executable('enumprog5', main, enums5, dependencies : gobj)
+
+# Generate template then use as input to mkenums
+
+# Simple trick to copy the file without substitutions, can be
+# removed when https://github.com/mesonbuild/meson/pull/3383 is fixed
+gen_h_template = configure_file(input: 'enums.h.in',
+  output: 'enums6.h.in',
+  configuration: configuration_data(),
+  format: 'cmake')
+
+enums_h6 = gnome.mkenums('enums6',
+  sources : 'meson-sample.h',
+  h_template : gen_h_template,
+  ftail : '/* trailing header file info */',
+  install_header : true,
+  install_dir : get_option('includedir'))
+
+conf = configuration_data()
+conf.set('ENUM_FILE', 'enums6.h')
+main = configure_file(
+  input : 'main.c',
+  output : 'main6.c',
+  configuration : conf)
+
+enumexe6 = executable('enumprog6', main, enums_c2, enums_h6,
+dependencies : gobj)
+test('enum test 4', enumexe6)

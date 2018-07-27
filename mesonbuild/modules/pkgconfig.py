@@ -21,7 +21,7 @@ from .. import mesonlib
 from .. import mlog
 from . import ModuleReturnValue
 from . import ExtensionModule
-from ..interpreterbase import permittedKwargs
+from ..interpreterbase import permittedKwargs, FeatureNew, FeatureNewKwargs
 
 class DependenciesHelper:
     def __init__(self, name):
@@ -59,7 +59,7 @@ class DependenciesHelper:
             elif hasattr(obj, 'pcdep'):
                 pcdeps = mesonlib.listify(obj.pcdep)
                 for d in pcdeps:
-                    processed_reqs += d.name
+                    processed_reqs.append(d.name)
                     self.add_version_reqs(d.name, obj.version_reqs)
             elif isinstance(obj, dependencies.PkgConfigDependency):
                 if obj.found():
@@ -87,10 +87,11 @@ class DependenciesHelper:
         processed_reqs = []
         processed_cflags = []
         for obj in libs:
+            shared_library_only = getattr(obj, 'shared_library_only', False)
             if hasattr(obj, 'pcdep'):
                 pcdeps = mesonlib.listify(obj.pcdep)
                 for d in pcdeps:
-                    processed_reqs += d.name
+                    processed_reqs.append(d.name)
                     self.add_version_reqs(d.name, obj.version_reqs)
             elif hasattr(obj, 'generated_pc'):
                 processed_reqs.append(obj.generated_pc)
@@ -105,25 +106,27 @@ class DependenciesHelper:
                 if obj.found():
                     processed_libs += obj.get_link_args()
                     processed_cflags += obj.get_compile_args()
-            elif isinstance(obj, build.SharedLibrary):
+            elif isinstance(obj, build.SharedLibrary) and shared_library_only:
+                # Do not pull dependencies for shared libraries because they are
+                # only required for static linking. Adding private requires has
+                # the side effect of exposing their cflags, which is the
+                # intended behaviour of pkg-config but force Debian to add more
+                # than needed build deps.
+                # See https://bugs.freedesktop.org/show_bug.cgi?id=105572
                 processed_libs.append(obj)
                 if public:
                     if not hasattr(obj, 'generated_pc'):
                         obj.generated_pc = self.name
-            elif isinstance(obj, build.StaticLibrary):
-                # Due to a "feature" in pkgconfig, it leaks out private dependencies.
-                # Thus we will not add them to the pc file unless the target
-                # we are processing is a static library.
-                #
-                # This way (hopefully) "pkgconfig --libs --static foobar" works
-                # and "pkgconfig --cflags/--libs foobar" does not have any trace
-                # of dependencies that the build file creator has not explicitly
-                # added to the dependency list.
+            elif isinstance(obj, (build.SharedLibrary, build.StaticLibrary)):
                 processed_libs.append(obj)
                 if public:
                     if not hasattr(obj, 'generated_pc'):
                         obj.generated_pc = self.name
-                    self.add_priv_libs(obj.get_dependencies())
+                if isinstance(obj, build.StaticLibrary) and public:
+                    self.add_pub_libs(obj.get_dependencies(internal=False))
+                    self.add_pub_libs(obj.get_external_deps())
+                else:
+                    self.add_priv_libs(obj.get_dependencies(internal=False))
                     self.add_priv_libs(obj.get_external_deps())
             elif isinstance(obj, str):
                 processed_libs.append(obj)
@@ -134,9 +137,13 @@ class DependenciesHelper:
 
     def add_version_reqs(self, name, version_reqs):
         if version_reqs:
-            vreqs = self.version_reqs.get(name, [])
-            vreqs += mesonlib.stringlistify(version_reqs)
-            self.version_reqs[name] = vreqs
+            if name not in self.version_reqs:
+                self.version_reqs[name] = set()
+            # Note that pkg-config is picky about whitespace.
+            # 'foo > 1.2' is ok but 'foo>1.2' is not.
+            # foo, bar' is ok, but 'foo,bar' is not.
+            new_vreqs = [s for s in mesonlib.stringlistify(version_reqs)]
+            self.version_reqs[name].update(new_vreqs)
 
     def split_version_req(self, s):
         for op in ['>=', '<=', '!=', '==', '=', '>', '<']:
@@ -163,16 +170,18 @@ class DependenciesHelper:
         return ', '.join(result)
 
     def remove_dups(self):
-        def _fn(xs):
+        def _fn(xs, libs=False):
             # Remove duplicates whilst preserving original order
             result = []
             for x in xs:
-                if x not in result:
+                # Don't de-dup unknown strings to avoid messing up arguments like:
+                # ['-framework', 'CoreAudio', '-framework', 'CoreMedia']
+                if x not in result or (libs and (isinstance(x, str) and not x.endswith(('-l', '-L')))):
                     result.append(x)
             return result
-        self.pub_libs = _fn(self.pub_libs)
+        self.pub_libs = _fn(self.pub_libs, True)
         self.pub_reqs = _fn(self.pub_reqs)
-        self.priv_libs = _fn(self.priv_libs)
+        self.priv_libs = _fn(self.priv_libs, True)
         self.priv_reqs = _fn(self.priv_reqs)
         self.cflags = _fn(self.cflags)
 
@@ -297,16 +306,21 @@ class PkgConfigModule(ExtensionModule):
                 ofile.write(self._escape(f))
             ofile.write('\n')
 
+    @FeatureNewKwargs('pkgconfig.generate', '0.42.0', ['extra_cflags'])
+    @FeatureNewKwargs('pkgconfig.generate', '0.41.0', ['variables'])
     @permittedKwargs({'libraries', 'version', 'name', 'description', 'filebase',
                       'subdirs', 'requires', 'requires_private', 'libraries_private',
                       'install_dir', 'extra_cflags', 'variables', 'url', 'd_module_versions'})
     def generate(self, state, args, kwargs):
+        if 'variables' in kwargs:
+            FeatureNew('custom pkgconfig variables', '0.41.0').use(state.subproject)
         default_version = state.project_version['version']
         default_install_dir = None
         default_description = None
         default_name = None
         mainlib = None
         if len(args) == 1:
+            FeatureNew('pkgconfig.generate optional positional argument', '0.46.0').use(state.subproject)
             mainlib = getattr(args[0], 'held_object', args[0])
             if not isinstance(mainlib, (build.StaticLibrary, build.SharedLibrary)):
                 raise mesonlib.MesonException('Pkgconfig_gen first positional argument must be a library object')
@@ -388,5 +402,5 @@ class PkgConfigModule(ExtensionModule):
         res = build.Data(mesonlib.File(True, state.environment.get_scratch_dir(), pcfile), pkgroot)
         return ModuleReturnValue(res, [res])
 
-def initialize():
-    return PkgConfigModule()
+def initialize(*args, **kwargs):
+    return PkgConfigModule(*args, **kwargs)

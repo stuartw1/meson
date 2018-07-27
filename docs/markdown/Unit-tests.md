@@ -71,6 +71,14 @@ You can also run only a single test by giving its name:
 $ meson test testname
 ```
 
+Tests belonging to a suite `suite` can be run as follows
+
+```console
+$ meson test --suite (sub)project_name:suite
+```
+
+Since version *0.46*, `(sub)project_name` can be omitted if it is the top-level project.
+
 Sometimes you need to run the tests multiple times, which is done like this:
 
 ```console
@@ -104,6 +112,12 @@ $ meson test --gdb --repeat=10000 testname
 ```
 
 This runs the test up to 10 000 times under GDB automatically. If the program crashes, GDB will halt and the user can debug the application. Note that testing timeouts are disabled in this case so `meson test` will not kill `gdb` while the developer is still debugging it. The downside is that if the test binary freezes, the test runner will wait forever.
+
+```console
+$ meson test --print-errorlogs
+```
+
+Meson will report the output produced by the failing tests along with other useful informations as the environmental variables. This is useful, for example, when you run the tests on Travis-CI, Jenkins and the like.
 
 For further information see the command line help of Meson by running `meson test -h`.
 
