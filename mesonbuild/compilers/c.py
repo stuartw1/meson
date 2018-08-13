@@ -1187,7 +1187,7 @@ class VisualStudioCCompiler(CCompiler):
     std_opt_args = ['/O2']
     ignore_libs = ('m', 'c', 'pthread')
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64, runtime):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         self.id = 'msvc'
         # /showIncludes is needed for build dependency tracking in Ninja
@@ -1198,6 +1198,7 @@ class VisualStudioCCompiler(CCompiler):
                           '3': ['/W4']}
         self.base_options = ['b_pch', 'b_ndebug'] # FIXME add lto, pgo and the like
         self.is_64 = is_64
+        self.runtime = runtime
 
     # Override CCompiler.get_always_args
     def get_always_args(self):
@@ -1215,7 +1216,10 @@ class VisualStudioCCompiler(CCompiler):
         return ['/MDd']
 
     def get_buildtype_args(self, buildtype):
-        return msvc_buildtype_args[buildtype]
+        args = msvc_buildtype_args[buildtype]
+        if self.runtime == 'static':
+            args = [arg.replace("/MD", "/MT") for arg in args]
+        return args
 
     def get_buildtype_linker_args(self, buildtype):
         return msvc_buildtype_linker_args[buildtype]
