@@ -239,9 +239,9 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
 
 
 class VisualStudioCPPCompiler(VisualStudioCCompiler, CPPCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, is_64, runtime):
+    def __init__(self, exelist, version, is_cross, exe_wrap, machine, runtime):
         CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
-        VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, is_64, runtime)
+        VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, machine, runtime)
         self.base_options = ['b_pch'] # FIXME add lto, pgo and the like
 
     def get_options(self):
