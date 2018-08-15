@@ -16,6 +16,7 @@ import re
 import glob
 import os.path
 import subprocess
+from pathlib import Path
 
 from .. import mlog
 from .. import coredata
@@ -46,11 +47,14 @@ from .compilers import (
     RunResult,
 )
 
+gnu_compiler_internal_libs = ('m', 'c', 'pthread', 'dl', 'rt')
+
 
 class CCompiler(Compiler):
     library_dirs_cache = {}
     program_dirs_cache = {}
     find_library_cache = {}
+    internal_libs = gnu_compiler_internal_libs
 
     def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
         # If a child ObjC or CPP class has already set it, don't set it ourselves
@@ -60,10 +64,12 @@ class CCompiler(Compiler):
         self.id = 'unknown'
         self.is_cross = is_cross
         self.can_compile_suffixes.add('h')
-        if isinstance(exe_wrapper, str):
-            self.exe_wrapper = [exe_wrapper]
+        # If the exe wrapper was not found, pretend it wasn't set so that the
+        # sanity check is skipped and compiler checks use fallbacks.
+        if not exe_wrapper or not exe_wrapper.found():
+            self.exe_wrapper = None
         else:
-            self.exe_wrapper = exe_wrapper
+            self.exe_wrapper = exe_wrapper.get_command()
 
         # Set to None until we actually need to check this
         self.has_fatal_warnings_link_arg = None
@@ -883,13 +889,13 @@ class CCompiler(Compiler):
 
     @classmethod
     def _get_trials_from_pattern(cls, pattern, directory, libname):
-        f = os.path.join(directory, pattern.format(libname))
+        f = Path(directory) / pattern.format(libname)
         # Globbing for OpenBSD
         if '*' in pattern:
             # NOTE: globbing matches directories and broken symlinks
             # so we have to do an isfile test on it later
-            return cls._sort_shlibs_openbsd(glob.glob(f))
-        return [f]
+            return cls._sort_shlibs_openbsd(glob.glob(str(f)))
+        return [f.as_posix()]
 
     @staticmethod
     def _get_file_from_list(files):
@@ -902,10 +908,13 @@ class CCompiler(Compiler):
         # First try if we can just add the library as -l.
         # Gcc + co seem to prefer builtin lib dirs to -L dirs.
         # Only try to find std libs if no extra dirs specified.
-        if not extra_dirs:
+        if not extra_dirs or libname in self.internal_libs:
             args = ['-l' + libname]
             if self.links(code, env, extra_args=args):
                 return args
+            # Don't do a manual search for internal libs
+            if libname in self.internal_libs:
+                return None
         # Not found or we want to use a specific libtype? Try to find the
         # library file itself.
         patterns = self.get_library_naming(env, libtype)
@@ -1185,9 +1194,10 @@ class IntelCCompiler(IntelCompiler, CCompiler):
 class VisualStudioCCompiler(CCompiler):
     std_warn_args = ['/W3']
     std_opt_args = ['/O2']
-    ignore_libs = ('m', 'c', 'pthread')
+    ignore_libs = gnu_compiler_internal_libs
+    internal_libs = ()
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, machine, runtime):
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         self.id = 'msvc'
         # /showIncludes is needed for build dependency tracking in Ninja
@@ -1197,9 +1207,7 @@ class VisualStudioCCompiler(CCompiler):
                           '2': ['/W3'],
                           '3': ['/W4']}
         self.base_options = ['b_pch', 'b_ndebug'] # FIXME add lto, pgo and the like
-        self.is_64 = machine.endswith('64')
-        self.machine = machine
-        self.runtime = runtime
+        self.is_64 = is_64
 
     # Override CCompiler.get_always_args
     def get_always_args(self):
@@ -1217,10 +1225,7 @@ class VisualStudioCCompiler(CCompiler):
         return ['/MDd']
 
     def get_buildtype_args(self, buildtype):
-        args = msvc_buildtype_args[buildtype]
-        if self.runtime == 'static':
-            args = [arg.replace("/MD", "/MT") for arg in args]
-        return args
+        return msvc_buildtype_args[buildtype]
 
     def get_buildtype_linker_args(self, buildtype):
         return msvc_buildtype_linker_args[buildtype]
@@ -1263,7 +1268,7 @@ class VisualStudioCCompiler(CCompiler):
         return ['/nologo']
 
     def get_linker_output_args(self, outputname):
-        return ['/MACHINE:' + self.machine, '/OUT:' + outputname]
+        return ['/OUT:' + outputname]
 
     def get_linker_search_args(self, dirname):
         return ['/LIBPATH:' + dirname]
@@ -1271,11 +1276,19 @@ class VisualStudioCCompiler(CCompiler):
     def linker_to_compiler_args(self, args):
         return ['/link'] + args
 
-    def get_gui_app_args(self):
-        return ['/SUBSYSTEM:WINDOWS']
+    def get_gui_app_args(self, value):
+        # the default is for the linker to guess the subsystem based on presence
+        # of main or WinMain symbols, so always be explicit
+        if value:
+            return ['/SUBSYSTEM:WINDOWS']
+        else:
+            return ['/SUBSYSTEM:CONSOLE']
 
     def get_pic_args(self):
         return [] # PIC is handled by the loader on Windows
+
+    def gen_export_dynamic_link_args(self, env):
+        return [] # Not applicable with MSVC
 
     def get_std_shared_lib_link_args(self):
         return ['/DLL']

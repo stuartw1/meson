@@ -405,7 +405,7 @@ class DependencyHolder(InterpreterObject, ObjectHolder):
     def name_method(self, args, kwargs):
         return self.held_object.get_name()
 
-    @permittedKwargs({'define_variable'})
+    @permittedKwargs({'define_variable', 'default'})
     def pkgconfig_method(self, args, kwargs):
         args = listify(args)
         if len(args) != 1:
@@ -1608,7 +1608,6 @@ class MesonMain(InterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
-                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'backend': self.backend_method,
                              })
@@ -1682,10 +1681,8 @@ class MesonMain(InterpreterObject):
     @permittedKwargs({})
     def has_exe_wrapper_method(self, args, kwargs):
         if self.is_cross_build_method(None, None) and \
-           'binaries' in self.build.environment.cross_info.config and \
            self.build.environment.cross_info.need_exe_wrapper():
-            exe_wrap = self.build.environment.cross_info.config['binaries'].get('exe_wrapper', None)
-            if exe_wrap is None:
+            if self.build.environment.exe_wrapper is None:
                 return False
         # We return True when exe_wrap is defined, when it's not needed, and
         # when we're compiling natively. The last two are semantically confusing.
@@ -1784,36 +1781,6 @@ class MesonMain(InterpreterObject):
 
     @noArgsFlattening
     @permittedKwargs({})
-    def get_cross_binary_method(self, args, kwargs):
-        if len(args) < 1 or len(args) > 2:
-            raise InterpreterException('Must have one or two arguments.')
-        binname = args[0]
-        if not isinstance(binname, str):
-            raise InterpreterException('Binary name must be string.')
-        try:
-            binaries = self.interpreter.environment.cross_info.get_binaries()
-            return binaries[binname]
-        except Exception:
-            if binname == 'ar':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    return static_linker.exelist[0]
-            elif binname == 'libtool':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    ar_binary = static_linker.exelist[0]
-                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
-                        return os.path.join(os.path.dirname(ar_binary), 'libtool')
-            elif binname == 'strip':
-                return self.build.environment.native_strip_bin[0]
-
-            if len(args) == 2:
-                return args[1]
-
-            raise InterpreterException('Unknown cross binary: %s.' % binname)
-
-    @noArgsFlattening
-    @permittedKwargs({})
     def get_cross_property_method(self, args, kwargs):
         if len(args) < 1 or len(args) > 2:
             raise InterpreterException('Must have one or two arguments.')
@@ -1850,7 +1817,7 @@ permitted_kwargs = {'add_global_arguments': {'language'},
                     'benchmark': {'args', 'env', 'should_fail', 'timeout', 'workdir', 'suite'},
                     'build_target': known_build_target_kwargs,
                     'configure_file': {'input', 'output', 'configuration', 'command', 'copy', 'install_dir', 'install_mode', 'capture', 'install', 'format', 'output_format', 'encoding'},
-                    'custom_target': {'input', 'output', 'command', 'install', 'install_dir', 'install_mode', 'build_always', 'capture', 'depends', 'depend_files', 'depfile', 'build_by_default', 'build_always_stale'},
+                    'custom_target': {'input', 'output', 'command', 'install', 'install_dir', 'install_mode', 'build_always', 'capture', 'depends', 'depend_files', 'depfile', 'build_by_default', 'build_always_stale', 'console'},
                     'dependency': {'default_options', 'fallback', 'language', 'main', 'method', 'modules', 'optional_modules', 'native', 'required', 'static', 'version', 'private_headers'},
                     'declare_dependency': {'include_directories', 'link_with', 'sources', 'dependencies', 'compile_args', 'link_args', 'link_whole', 'version'},
                     'executable': build.known_exe_kwargs,
@@ -1880,7 +1847,7 @@ permitted_kwargs = {'add_global_arguments': {'language'},
 class Interpreter(InterpreterBase):
 
     def __init__(self, build, backend=None, subproject='', subdir='', subproject_dir='subprojects',
-                 modules = None, default_project_options=None):
+                 modules = None, default_project_options=None, mock=False):
         super().__init__(build.environment.get_source_dir(), subdir)
         self.an_unpicklable_object = mesonlib.an_unpicklable_object
         self.build = build
@@ -1897,8 +1864,9 @@ class Interpreter(InterpreterBase):
         self.subproject_directory_name = subdir.split(os.path.sep)[-1]
         self.subproject_dir = subproject_dir
         self.option_file = os.path.join(self.source_root, self.subdir, 'meson_options.txt')
-        self.load_root_meson_file()
-        self.sanity_check_ast()
+        if not mock:
+            self.load_root_meson_file()
+            self.sanity_check_ast()
         self.builtin.update({'meson': MesonMain(build, self)})
         self.generators = []
         self.visited_subdirs = {}
@@ -1916,7 +1884,8 @@ class Interpreter(InterpreterBase):
         self.build_func_dict()
         # build_def_files needs to be defined before parse_project is called
         self.build_def_files = [os.path.join(self.subdir, environment.build_filename)]
-        self.parse_project()
+        if not mock:
+            self.parse_project()
         self.builtin['build_machine'] = BuildMachine(self.coredata.compilers)
         if not self.build.environment.is_cross_build():
             self.builtin['host_machine'] = self.builtin['build_machine']
@@ -2310,7 +2279,7 @@ external dependencies (including libraries) must go to "dependencies".''')
         return self.subprojects[dirname]
 
     def get_option_internal(self, optname):
-        undecorated_optname = optname
+        raw_optname = optname
         try:
             return self.coredata.base_options[optname]
         except KeyError:
@@ -2327,9 +2296,20 @@ external dependencies (including libraries) must go to "dependencies".''')
             optname = self.subproject + ':' + optname
         try:
             opt = self.coredata.user_options[optname]
-            if opt.yielding and ':' in optname:
-                # If option not present in superproject, keep the original.
-                opt = self.coredata.user_options.get(undecorated_optname, opt)
+            if opt.yielding and ':' in optname and raw_optname in self.coredata.user_options:
+                popt = self.coredata.user_options[raw_optname]
+                if type(opt) is type(popt):
+                    opt = popt
+                else:
+                    # Get class name, then option type as a string
+                    opt_type = opt.__class__.__name__[4:][:-6].lower()
+                    popt_type = popt.__class__.__name__[4:][:-6].lower()
+                    # This is not a hard error to avoid dependency hell, the workaround
+                    # when this happens is to simply set the subproject's option directly.
+                    mlog.warning('Option {0!r} of type {1!r} in subproject {2!r} cannot yield '
+                                 'to parent option of type {3!r}, ignoring parent value. '
+                                 'Use -D{2}:{0}=value to set the value for this option manually'
+                                 '.'.format(raw_optname, opt_type, self.subproject, popt_type))
             return opt
         except KeyError:
             pass
@@ -2578,9 +2558,9 @@ external dependencies (including libraries) must go to "dependencies".''')
             if need_cross_compiler:
                 cross_comp = comp  # C# is platform independent.
         elif lang == 'vala':
-            comp = self.environment.detect_vala_compiler(False)
+            comp = self.environment.detect_vala_compiler()
             if need_cross_compiler:
-                cross_comp = self.environment.detect_vala_compiler(True)
+                cross_comp = comp  # Vala compiles to platform-independent C
         elif lang == 'd':
             comp = self.environment.detect_d_compiler(False)
             if need_cross_compiler:
@@ -2847,6 +2827,12 @@ external dependencies (including libraries) must go to "dependencies".''')
         if not dep:
             return False
         found = dep.version_method([], {})
+        # Don't do a version check if the dependency is not found and not required
+        if found == 'none' and not required:
+            subproj_path = os.path.join(self.subproject_dir, dirname)
+            mlog.log('Dependency', mlog.bold(name), 'from subproject',
+                     mlog.bold(subproj_path), 'found:', mlog.red('NO'), '(cached)')
+            return dep
         if self.check_subproject_version(wanted, found):
             subproj_path = os.path.join(self.subproject_dir, dirname)
             mlog.log('Dependency', mlog.bold(name), 'from subproject',
@@ -3123,7 +3109,7 @@ root and issuing %s.
              regex_selector] + vcs_cmd
         kwargs.setdefault('build_by_default', True)
         kwargs.setdefault('build_always_stale', True)
-        return self.func_custom_target(node, [kwargs['output']], kwargs)
+        return self._func_custom_target_impl(node, [kwargs['output']], kwargs)
 
     @FeatureNew('subdir_done', '0.46.0')
     @stringArgs
@@ -3135,6 +3121,7 @@ root and issuing %s.
         raise SubdirDoneRequest()
 
     @stringArgs
+    @FeatureNewKwargs('custom_target', '0.48.0', ['console'])
     @FeatureNewKwargs('custom_target', '0.47.0', ['install_mode', 'build_always_stale'])
     @FeatureNewKwargs('custom_target', '0.40.0', ['build_by_default'])
     @permittedKwargs(permitted_kwargs['custom_target'])
@@ -3143,6 +3130,10 @@ root and issuing %s.
             raise InterpreterException('custom_target: Only one positional argument is allowed, and it must be a string name')
         if 'depfile' in kwargs and ('@BASENAME@' in kwargs['depfile'] or '@PLAINNAME@' in kwargs['depfile']):
             FeatureNew('substitutions in custom_target depfile', '0.47.0').use(self.subproject)
+        return self._func_custom_target_impl(node, args, kwargs)
+
+    def _func_custom_target_impl(self, node, args, kwargs):
+        'Implementation-only, without FeatureNew checks, for internal use'
         name = args[0]
         kwargs['install_mode'] = self._get_kwarg_install_mode(kwargs)
         tg = CustomTargetHolder(build.CustomTarget(name, self.subdir, self.subproject, kwargs), self)
@@ -3874,6 +3865,7 @@ Try setting b_lundef to false instead.''')
         @FeatureNewKwargs('build target', '0.42.0', ['rust_crate_type', 'build_rpath', 'implicit_include_directories'])
         @FeatureNewKwargs('build target', '0.41.0', ['rust_args'])
         @FeatureNewKwargs('build target', '0.40.0', ['build_by_default'])
+        @FeatureNewKwargs('build target', '0.48.0', ['gnu_symbol_visibility'])
         def build_target_decorator_caller(self, node, args, kwargs):
             return True
 

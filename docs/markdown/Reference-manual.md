@@ -244,6 +244,12 @@ following.
   this argument is set to true, Meson captures `stdout` and writes it
   to the target file. Note that your command argument list may not
   contain `@OUTPUT@` when capture mode is active.
+- `console` keyword argument conflicts with `capture`, and is meant
+  for commands that are resource-intensive and take a long time to
+  finish. With the Ninja backend, setting this will add this target
+  to [Ninja's `console` pool](https://ninja-build.org/manual.html#_the_literal_console_literal_pool),
+  which has special properties such as not buffering stdout and
+  serializing all targets in this pool.
 - `command` command to run to create outputs from inputs. The command
   may be strings or the return value of functions that return file-like
   objects such as [`find_program()`](#find_program),
@@ -505,6 +511,13 @@ be passed to [shared and static libraries](#library).
 - `override_options` takes an array of strings in the same format as
   `project`'s `default_options` overriding the values of these options
   for this target only, since 0.40.0
+- `gnu_symbol_visibility` specifies how symbols should be exported, see
+  e.g [the GCC Wiki](https://gcc.gnu.org/wiki/Visibility) for more
+  information. This value can either be an empty string or one of
+  `default`, `internal`, `hidden`, `protected` or `inlineshidden`, which
+  is the same as `hidden` but also includes things like C++ implicit
+  constructors as specified in the GCC manual. Ignored on compilers that
+  do not support GNU visibility arguments. Available since 0.48.0.
 - `d_import_dirs` list of directories to look in for string imports used
   in the D programming language
 - `d_unittest`, when set to true, the D modules are compiled in debug mode
@@ -970,15 +983,16 @@ dropped. That means that `join_paths('foo', '/bar')` returns `/bar`.
     buildtarget library(library_name, list_of_sources, ...)
 ```
 
-Builds a library that is either static, shared or both depending on the value of
-`default_library` user option. You should use this instead of
-[`shared_library`](#shared_library),
+Builds a library that is either static, shared or both depending on
+the value of `default_library` user option. You should use this
+instead of [`shared_library`](#shared_library),
 [`static_library`](#static_library) or
 [`both_libraries`](#both_libraries) most of the time. This allows you
 to toggle your entire project (including subprojects) from shared to
 static with only one option.
 
-The keyword arguments for this are the same as for [`executable`](#executable) with the following additions:
+The keyword arguments for this are the same as for
+[`executable`](#executable) with the following additions:
 
 - `name_prefix` the string that will be used as the prefix for the
   target output filename by overriding the default (only used for
@@ -1451,10 +1465,6 @@ the following methods.
   refer to files in the current or any other source directory instead
   of constructing paths manually with `meson.current_source_dir()`.
 
-- `get_cross_binary(binname, fallback_value)` returns the given binary
-  from a cross file, the optional second argument is returned if not
-  cross compiling or the given binary is not specified.
-
 - `get_cross_property(propname, fallback_value)` returns the given
   property from a cross file, the optional second argument is returned
   if not cross compiling or the given property is not found.
@@ -1642,7 +1652,7 @@ the following methods:
   `args` keyword, you can specify external dependencies to use with
   `dependencies` keyword argument.
 
-- `check_header` returns true if the specified header is *usable* with
+- `check_header` *(added 0.47.0)* returns true if the specified header is *usable* with
   the specified prefix, dependencies, and arguments.
   You can specify external dependencies to use with `dependencies`
   keyword argument and extra code to put above the header test with
@@ -1848,6 +1858,9 @@ You can also iterate over dictionaries with the [`foreach`
 statement](Syntax.md#foreach-statements).
 
 Dictionaries are available since 0.47.0.
+
+Since 0.48.0 dictionaries can be added (e.g. `d1 = d2 + d3` and `d1 += d2`).
+Values from the second dictionary overrides values from the first.
 
 ## Returned objects
 

@@ -294,16 +294,16 @@ def run_test(skipped, testdir, extra_args, compiler, backend, flags, commands, s
                 mlog.shutdown() # Close the log file because otherwise Windows wets itself.
 
 def pass_prefix_to_test(dirname):
-    if '40 prefix' in dirname:
+    if '39 prefix absolute' in dirname:
         return False
     return True
 
 def pass_libdir_to_test(dirname):
     if '8 install' in dirname:
         return False
-    if '39 libdir' in dirname:
+    if '38 libdir must be inside prefix' in dirname:
         return False
-    if '201 install_mode' in dirname:
+    if '199 install_mode' in dirname:
         return False
     return True
 
@@ -636,10 +636,32 @@ def check_file(fname):
         linenum += 1
 
 def check_format():
+    check_suffixes = {'.c',
+                      '.cpp',
+                      '.cxx',
+                      '.cc',
+                      '.rs',
+                      '.f90',
+                      '.vala',
+                      '.d',
+                      '.s',
+                      '.m',
+                      '.mm',
+                      '.asm',
+                      '.java',
+                      '.txt',
+                      '.py',
+                      '.swift',
+                      '.build',
+                      }
     for (root, _, files) in os.walk('.'):
-        for file in files:
-            if file.endswith('.py') or file.endswith('.build') or file == 'meson_options.txt':
-                fullname = os.path.join(root, file)
+        if '.dub' in root: # external deps are here
+            continue
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() in check_suffixes:
+                if os.path.split(fname)[1] == 'sitemap.txt':
+                    continue
+                fullname = os.path.join(root, fname)
                 check_file(fullname)
 
 def check_meson_commands_work():

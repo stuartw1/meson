@@ -247,7 +247,7 @@ def get_compiler_for_source(compilers, src):
     for comp in compilers:
         if comp.can_compile(src):
             return comp
-    raise RuntimeError('No specified compiler can handle file {!s}'.format(src))
+    raise MesonException('No specified compiler can handle file {!s}'.format(src))
 
 def classify_unity_sources(compilers, sources):
     compsrclist = {}
@@ -299,9 +299,7 @@ def for_windows(is_cross, env):
     """
     if not is_cross:
         return is_windows()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'windows'
-    return False
+    return env.cross_info.get_host_system() == 'windows'
 
 def for_cygwin(is_cross, env):
     """
@@ -311,9 +309,7 @@ def for_cygwin(is_cross, env):
     """
     if not is_cross:
         return is_cygwin()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'cygwin'
-    return False
+    return env.cross_info.get_host_system() == 'cygwin'
 
 def for_linux(is_cross, env):
     """
@@ -323,9 +319,7 @@ def for_linux(is_cross, env):
     """
     if not is_cross:
         return is_linux()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'linux'
-    return False
+    return env.cross_info.get_host_system() == 'linux'
 
 def for_darwin(is_cross, env):
     """
@@ -335,9 +329,7 @@ def for_darwin(is_cross, env):
     """
     if not is_cross:
         return is_osx()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] in ('darwin', 'ios')
-    return False
+    return env.cross_info.get_host_system() in ('darwin', 'ios')
 
 def for_android(is_cross, env):
     """
@@ -347,9 +339,7 @@ def for_android(is_cross, env):
     """
     if not is_cross:
         return is_android()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'android'
-    return False
+    return env.cross_info.get_host_system() == 'android'
 
 def for_haiku(is_cross, env):
     """
@@ -359,9 +349,7 @@ def for_haiku(is_cross, env):
     """
     if not is_cross:
         return is_haiku()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'haiku'
-    return False
+    return env.cross_info.get_host_system() == 'haiku'
 
 def for_openbsd(is_cross, env):
     """
@@ -1069,6 +1057,12 @@ def detect_subprojects(spdir_name, current_dir='', result=None):
 def get_error_location_string(fname, lineno):
     return '{}:{}:'.format(fname, lineno)
 
+def substring_is_in_list(substr, strlist):
+    for s in strlist:
+        if substr in s:
+            return True
+    return False
+
 class OrderedSet(collections.MutableSet):
     """A set that preserves the order in which items are added, by first
     insertion.
@@ -1093,6 +1087,9 @@ class OrderedSet(collections.MutableSet):
             return 'OrderedSet("{}")'.format(
                 '", "'.join(repr(e) for e in self.__container.keys()))
         return 'OrderedSet()'
+
+    def __reversed__(self):
+        return reversed(self.__container)
 
     def add(self, value):
         self.__container[value] = None

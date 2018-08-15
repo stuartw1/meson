@@ -28,7 +28,7 @@ from .. import build
 from .. import mlog
 from .. import dependencies
 from .. import compilers
-from ..compilers import CompilerArgs, CCompiler, get_macos_dylib_install_name
+from ..compilers import CompilerArgs, CCompiler
 from ..linkers import ArLinker
 from ..mesonlib import File, MesonException, OrderedSet
 from ..mesonlib import get_compiler_for_source, has_path_sep
@@ -545,7 +545,7 @@ int dummy;
             if extra_paths:
                 serialize = True
         if serialize:
-            exe_data = self.serialize_executable(target.command[0], cmd[1:],
+            exe_data = self.serialize_executable(target.name, target.command[0], cmd[1:],
                                                  # All targets are built from the build dir
                                                  self.environment.get_build_dir(),
                                                  extra_paths=extra_paths,
@@ -560,6 +560,8 @@ int dummy;
             abs_pdir = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
             os.makedirs(abs_pdir, exist_ok=True)
             elem.add_item('DEPFILE', rel_dfile)
+        if target.console:
+            elem.add_item('pool', 'console')
         cmd = self.replace_paths(target, cmd)
         elem.add_item('COMMAND', cmd)
         elem.add_item('description', desc.format(target.name, cmd_type))
@@ -599,11 +601,15 @@ int dummy;
         if isinstance(texe, build.Executable):
             abs_exe = os.path.join(self.environment.get_build_dir(), self.get_target_filename(texe))
             deps.append(self.get_target_filename(texe))
-            if self.environment.is_cross_build() and \
-               self.environment.cross_info.need_exe_wrapper():
-                exe_wrap = self.environment.cross_info.config['binaries'].get('exe_wrapper', None)
-                if exe_wrap is not None:
-                    cmd += [exe_wrap]
+            if self.environment.is_cross_build():
+                exe_wrap = self.environment.get_exe_wrapper()
+                if exe_wrap:
+                    if not exe_wrap.found():
+                        msg = 'The exe_wrapper {!r} defined in the cross file is ' \
+                              'needed by run target {!r}, but was not found. ' \
+                              'Please check the command and/or add it to PATH.'
+                        raise MesonException(msg.format(exe_wrap.name, target.name))
+                    cmd += exe_wrap.get_command()
             cmd.append(abs_exe)
         elif isinstance(texe, dependencies.ExternalProgram):
             cmd += texe.get_command()
@@ -668,234 +674,15 @@ int dummy;
         self.create_target_alias('meson-coverage-html', outfile)
 
     def generate_install(self, outfile):
-        install_data_file = os.path.join(self.environment.get_scratch_dir(), 'install.dat')
-        if self.environment.is_cross_build():
-            bins = self.environment.cross_info.config['binaries']
-            if 'strip' not in bins:
-                mlog.warning('Cross file does not specify strip binary, result will not be stripped.')
-                strip_bin = None
-            else:
-                strip_bin = mesonlib.stringlistify(bins['strip'])
-        else:
-            strip_bin = self.environment.native_strip_bin
-        d = InstallData(self.environment.get_source_dir(),
-                        self.environment.get_build_dir(),
-                        self.environment.get_prefix(),
-                        strip_bin,
-                        self.environment.coredata.get_builtin_option('install_umask'),
-                        self.environment.get_build_command() + ['introspect'])
+        self.create_install_data_files()
         elem = NinjaBuildElement(self.all_outputs, 'meson-install', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_dep('all')
         elem.add_item('DESC', 'Installing files.')
         elem.add_item('COMMAND', self.environment.get_build_command() + ['install', '--no-rebuild'])
         elem.add_item('pool', 'console')
-        self.generate_depmf_install(d)
-        self.generate_target_install(d)
-        self.generate_header_install(d)
-        self.generate_man_install(d)
-        self.generate_data_install(d)
-        self.generate_custom_install_script(d)
-        self.generate_subdir_install(d)
         elem.write(outfile)
         # Alias that runs the target defined above
         self.create_target_alias('meson-install', outfile)
-
-        with open(install_data_file, 'wb') as ofile:
-            pickle.dump(d, ofile)
-
-    def get_target_install_dirs(self, t):
-        # Find the installation directory.
-        if isinstance(t, build.SharedModule):
-            default_install_dir = self.environment.get_shared_module_dir()
-        elif isinstance(t, build.SharedLibrary):
-            default_install_dir = self.environment.get_shared_lib_dir()
-        elif isinstance(t, build.StaticLibrary):
-            default_install_dir = self.environment.get_static_lib_dir()
-        elif isinstance(t, build.Executable):
-            default_install_dir = self.environment.get_bindir()
-        elif isinstance(t, build.CustomTarget):
-            default_install_dir = None
-        else:
-            assert(isinstance(t, build.BuildTarget))
-            # XXX: Add BuildTarget-specific install dir cases here
-            default_install_dir = self.environment.get_libdir()
-        outdirs = t.get_custom_install_dir()
-        if outdirs[0] is not None and outdirs[0] != default_install_dir and outdirs[0] is not True:
-            # Either the value is set to a non-default value, or is set to
-            # False (which means we want this specific output out of many
-            # outputs to not be installed).
-            custom_install_dir = True
-        else:
-            custom_install_dir = False
-            outdirs[0] = default_install_dir
-        return outdirs, custom_install_dir
-
-    def get_target_link_deps_mappings(self, t, prefix):
-        '''
-        On macOS, we need to change the install names of all built libraries
-        that a target depends on using install_name_tool so that the target
-        continues to work after installation. For this, we need a dictionary
-        mapping of the install_name value to the new one, so we can change them
-        on install.
-        '''
-        result = {}
-        if isinstance(t, build.StaticLibrary):
-            return result
-        for ld in t.get_all_link_deps():
-            if ld is t or not isinstance(ld, build.SharedLibrary):
-                continue
-            old = get_macos_dylib_install_name(ld.prefix, ld.name, ld.suffix, ld.soversion)
-            if old in result:
-                continue
-            fname = ld.get_filename()
-            outdirs, _ = self.get_target_install_dirs(ld)
-            new = os.path.join(prefix, outdirs[0], fname)
-            result.update({old: new})
-        return result
-
-    def generate_target_install(self, d):
-        for t in self.build.get_targets().values():
-            if not t.should_install():
-                continue
-            outdirs, custom_install_dir = self.get_target_install_dirs(t)
-            # Sanity-check the outputs and install_dirs
-            num_outdirs, num_out = len(outdirs), len(t.get_outputs())
-            if num_outdirs != 1 and num_outdirs != num_out:
-                m = 'Target {!r} has {} outputs: {!r}, but only {} "install_dir"s were found.\n' \
-                    "Pass 'false' for outputs that should not be installed and 'true' for\n" \
-                    'using the default installation directory for an output.'
-                raise MesonException(m.format(t.name, num_out, t.get_outputs(), num_outdirs))
-            install_mode = t.get_custom_install_mode()
-            # Install the target output(s)
-            if isinstance(t, build.BuildTarget):
-                should_strip = self.get_option_for_target('strip', t)
-                # Install primary build output (library/executable/jar, etc)
-                # Done separately because of strip/aliases/rpath
-                if outdirs[0] is not False:
-                    mappings = self.get_target_link_deps_mappings(t, d.prefix)
-                    i = TargetInstallData(self.get_target_filename(t), outdirs[0],
-                                          t.get_aliases(), should_strip, mappings,
-                                          t.install_rpath, install_mode)
-                    d.targets.append(i)
-                    # On toolchains/platforms that use an import library for
-                    # linking (separate from the shared library with all the
-                    # code), we need to install that too (dll.a/.lib).
-                    if isinstance(t, (build.SharedLibrary, build.SharedModule, build.Executable)) and t.get_import_filename():
-                        if custom_install_dir:
-                            # If the DLL is installed into a custom directory,
-                            # install the import library into the same place so
-                            # it doesn't go into a surprising place
-                            implib_install_dir = outdirs[0]
-                        else:
-                            implib_install_dir = self.environment.get_import_lib_dir()
-                        # Install the import library.
-                        i = TargetInstallData(self.get_target_filename_for_linking(t),
-                                              implib_install_dir, {}, False, {}, '', install_mode)
-                        d.targets.append(i)
-                # Install secondary outputs. Only used for Vala right now.
-                if num_outdirs > 1:
-                    for output, outdir in zip(t.get_outputs()[1:], outdirs[1:]):
-                        # User requested that we not install this output
-                        if outdir is False:
-                            continue
-                        f = os.path.join(self.get_target_dir(t), output)
-                        i = TargetInstallData(f, outdir, {}, False, {}, None, install_mode)
-                        d.targets.append(i)
-            elif isinstance(t, build.CustomTarget):
-                # If only one install_dir is specified, assume that all
-                # outputs will be installed into it. This is for
-                # backwards-compatibility and because it makes sense to
-                # avoid repetition since this is a common use-case.
-                #
-                # To selectively install only some outputs, pass `false` as
-                # the install_dir for the corresponding output by index
-                if num_outdirs == 1 and num_out > 1:
-                    for output in t.get_outputs():
-                        f = os.path.join(self.get_target_dir(t), output)
-                        i = TargetInstallData(f, outdirs[0], {}, False, {}, None, install_mode)
-                        d.targets.append(i)
-                else:
-                    for output, outdir in zip(t.get_outputs(), outdirs):
-                        # User requested that we not install this output
-                        if outdir is False:
-                            continue
-                        f = os.path.join(self.get_target_dir(t), output)
-                        i = TargetInstallData(f, outdir, {}, False, {}, None, install_mode)
-                        d.targets.append(i)
-
-    def generate_custom_install_script(self, d):
-        result = []
-        srcdir = self.environment.get_source_dir()
-        builddir = self.environment.get_build_dir()
-        for i in self.build.install_scripts:
-            exe = i['exe']
-            args = i['args']
-            fixed_args = []
-            for a in args:
-                a = a.replace('@SOURCE_ROOT@', srcdir)
-                a = a.replace('@BUILD_ROOT@', builddir)
-                fixed_args.append(a)
-            result.append(build.RunScript(exe, fixed_args))
-        d.install_scripts = result
-
-    def generate_header_install(self, d):
-        incroot = self.environment.get_includedir()
-        headers = self.build.get_headers()
-
-        srcdir = self.environment.get_source_dir()
-        builddir = self.environment.get_build_dir()
-        for h in headers:
-            outdir = h.get_custom_install_dir()
-            if outdir is None:
-                outdir = os.path.join(incroot, h.get_install_subdir())
-            for f in h.get_sources():
-                if not isinstance(f, File):
-                    msg = 'Invalid header type {!r} can\'t be installed'
-                    raise MesonException(msg.format(f))
-                abspath = f.absolute_path(srcdir, builddir)
-                i = [abspath, outdir, h.get_custom_install_mode()]
-                d.headers.append(i)
-
-    def generate_man_install(self, d):
-        manroot = self.environment.get_mandir()
-        man = self.build.get_man()
-        for m in man:
-            for f in m.get_sources():
-                num = f.split('.')[-1]
-                subdir = m.get_custom_install_dir()
-                if subdir is None:
-                    subdir = os.path.join(manroot, 'man' + num)
-                srcabs = f.absolute_path(self.environment.get_source_dir(), self.environment.get_build_dir())
-                dstabs = os.path.join(subdir, os.path.basename(f.fname) + '.gz')
-                i = [srcabs, dstabs, m.get_custom_install_mode()]
-                d.man.append(i)
-
-    def generate_data_install(self, d):
-        data = self.build.get_data()
-        srcdir = self.environment.get_source_dir()
-        builddir = self.environment.get_build_dir()
-        for de in data:
-            assert(isinstance(de, build.Data))
-            subdir = de.install_dir
-            if not subdir:
-                subdir = os.path.join(self.environment.get_datadir(), self.interpreter.build.project_name)
-            for src_file, dst_name in zip(de.sources, de.rename):
-                assert(isinstance(src_file, mesonlib.File))
-                dst_abs = os.path.join(subdir, dst_name)
-                i = [src_file.absolute_path(srcdir, builddir), dst_abs, de.install_mode]
-                d.data.append(i)
-
-    def generate_subdir_install(self, d):
-        for sd in self.build.get_install_subdirs():
-            src_dir = os.path.join(self.environment.get_source_dir(),
-                                   sd.source_subdir,
-                                   sd.installable_subdir).rstrip('/')
-            dst_dir = os.path.join(self.environment.get_prefix(),
-                                   sd.install_dir)
-            if not sd.strip_directory:
-                dst_dir = os.path.join(dst_dir, os.path.basename(src_dir))
-            d.install_subdirs.append([src_dir, dst_dir, sd.install_mode,
-                                      sd.exclude])
 
     def generate_tests(self, outfile):
         self.serialize_tests()
@@ -1294,12 +1081,8 @@ int dummy;
         dependency_vapis = self.determine_dep_vapis(target)
         extra_dep_files += dependency_vapis
         args += extra_args
-        if target.is_cross:
-            crstr = '_CROSS'
-        else:
-            crstr = ''
         element = NinjaBuildElement(self.all_outputs, valac_outputs,
-                                    '%s%s_COMPILER' % (valac.get_language(), crstr),
+                                    valac.get_language() + '_COMPILER',
                                     all_files + dependency_vapis)
         element.add_item('ARGS', args)
         element.add_dep(extra_dep_files)
@@ -1665,14 +1448,9 @@ int dummy;
         outfile.write(description)
         outfile.write('\n')
 
-    def generate_vala_compile_rules(self, compiler, is_cross, outfile):
-        if is_cross:
-            crstr = '_CROSS'
-        else:
-            crstr = ''
-        rule = 'rule %s%s_COMPILER\n' % (compiler.get_language(), crstr)
-        cross_args = self.get_cross_info_lang_args('vala', is_cross)
-        invoc = ' '.join([ninja_quote(i) for i in compiler.get_exelist() + cross_args])
+    def generate_vala_compile_rules(self, compiler, outfile):
+        rule = 'rule %s_COMPILER\n' % compiler.get_language()
+        invoc = ' '.join([ninja_quote(i) for i in compiler.get_exelist()])
         command = ' command = %s $ARGS $in\n' % invoc
         description = ' description = Compiling Vala source $in.\n'
         restat = ' restat = 1\n' # ValaC does this always to take advantage of it.
@@ -1773,7 +1551,8 @@ rule FORTRAN_DEP_HACK%s
                 self.generate_cs_compile_rule(compiler, outfile)
             return
         if langname == 'vala':
-            self.generate_vala_compile_rules(compiler, is_cross, outfile)
+            if not is_cross:
+                self.generate_vala_compile_rules(compiler, outfile)
             return
         if langname == 'rust':
             self.generate_rust_compile_rules(compiler, outfile, is_cross)
@@ -1945,6 +1724,7 @@ rule FORTRAN_DEP_HACK%s
             cmdlist = exe_arr + self.replace_extra_args(args, genlist)
             if generator.capture:
                 exe_data = self.serialize_executable(
+                    'generator ' + cmdlist[0],
                     cmdlist[0],
                     cmdlist[1:],
                     self.environment.get_build_dir(),
@@ -2171,6 +1951,8 @@ rule FORTRAN_DEP_HACK%s
         # Create an empty commands list, and start adding arguments from
         # various sources in the order in which they must override each other
         commands = CompilerArgs(compiler)
+        # Start with symbol visibility.
+        commands += compiler.gnu_symbol_visibility_args(target.gnu_symbol_visibility)
         # Add compiler args for compiling this target derived from 'base' build
         # options passed on the command-line, in default_options, etc.
         # These have the lowest priority.
@@ -2452,9 +2234,8 @@ rule FORTRAN_DEP_HACK%s
         if isinstance(target, build.Executable):
             # Currently only used with the Swift compiler to add '-emit-executable'
             commands += linker.get_std_exe_link_args()
-            # If gui_app, and that's significant on this platform
-            if target.gui_app and hasattr(linker, 'get_gui_app_args'):
-                commands += linker.get_gui_app_args()
+            # If gui_app is significant on this platform, add the appropriate linker arguments
+            commands += linker.get_gui_app_args(target.gui_app)
             # If export_dynamic, add the appropriate linker arguments
             if target.export_dynamic:
                 commands += linker.gen_export_dynamic_link_args(self.environment)

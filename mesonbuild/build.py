@@ -71,6 +71,7 @@ buildtarget_kwargs = set([
     'objects',
     'override_options',
     'sources',
+    'gnu_symbol_visibility',
 ])
 
 known_build_target_kwargs = (
@@ -817,6 +818,14 @@ This will become a hard error in a future Meson release.''')
         self.implicit_include_directories = kwargs.get('implicit_include_directories', True)
         if not isinstance(self.implicit_include_directories, bool):
             raise InvalidArguments('Implicit_include_directories must be a boolean.')
+        self.gnu_symbol_visibility = kwargs.get('gnu_symbol_visibility', '')
+        if not isinstance(self.gnu_symbol_visibility, str):
+            raise InvalidArguments('GNU symbol visibility must be a string.')
+        if self.gnu_symbol_visibility != '':
+            permitted = ['default', 'internal', 'hidden', 'protected', 'inlineshidden']
+            if self.gnu_symbol_visibility not in permitted:
+                raise InvalidArguments('GNU symbol visibility arg %s not one of: %s',
+                                       self.symbol_visibility, ', '.join(permitted))
 
     def get_filename(self):
         return self.filename
@@ -1638,6 +1647,7 @@ class CustomTarget(Target):
         'depfile',
         'build_by_default',
         'override_options',
+        'console',
     ])
 
     def __init__(self, name, subdir, subproject, kwargs, absolute_paths=False):
@@ -1756,6 +1766,11 @@ class CustomTarget(Target):
         self.capture = kwargs.get('capture', False)
         if self.capture and len(self.outputs) != 1:
             raise InvalidArguments('Capturing can only output to a single file.')
+        self.console = kwargs.get('console', False)
+        if not isinstance(self.console, bool):
+            raise InvalidArguments('"console" kwarg only accepts booleans')
+        if self.capture and self.console:
+            raise InvalidArguments("Can't both capture output and output to console")
         if 'command' not in kwargs:
             raise InvalidArguments('Missing keyword argument "command".')
         if 'depfile' in kwargs:

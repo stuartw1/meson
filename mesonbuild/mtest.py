@@ -20,7 +20,7 @@ import pickle
 from mesonbuild import build
 from mesonbuild import environment
 from mesonbuild.dependencies import ExternalProgram
-from mesonbuild import mesonlib
+from mesonbuild.mesonlib import substring_is_in_list, MesonException
 from mesonbuild import mlog
 
 import time, datetime, multiprocessing, json
@@ -130,8 +130,11 @@ def returncode_to_status(retcode):
         signame = 'SIGinvalid'
     return '(exit status %d or signal %d %s)' % (retcode, signum, signame)
 
+def env_tuple_to_str(env):
+    return ''.join(["%s='%s' " % (k, v) for k, v in env])
 
-class TestException(mesonlib.MesonException):
+
+class TestException(MesonException):
     pass
 
 
@@ -162,7 +165,8 @@ class TestRun:
         if self.cmd is None:
             res += 'NONE\n'
         else:
-            res += '%s%s\n' % (''.join(["%s='%s' " % (k, v) for k, v in self.env.items()]), ' ' .join(self.cmd))
+            test_only_env = set(self.env.items()) - set(os.environ.items())
+            res += '{}{}\n'.format(env_tuple_to_str(test_only_env), ' '.join(self.cmd))
         if self.stdo:
             res += '--- stdout ---\n'
             res += self.stdo
@@ -240,7 +244,11 @@ class SingleTestRunner:
                     # because there is no execute wrapper.
                     return None
                 else:
-                    return [self.test.exe_runner] + self.test.fname
+                    if not self.test.exe_runner.found():
+                        msg = 'The exe_wrapper defined in the cross file {!r} was not ' \
+                              'found. Please check the command and/or add it to PATH.'
+                        raise TestException(msg.format(self.test.exe_runner.name))
+                    return self.test.exe_runner.get_command() + self.test.fname
             else:
                 return self.test.fname
 
@@ -257,19 +265,12 @@ class SingleTestRunner:
                 self.test.timeout = None
             return self._run_cmd(wrap + cmd + self.test.cmd_args + self.options.test_args)
 
-    @staticmethod
-    def _substring_in_list(substr, strlist):
-        for s in strlist:
-            if substr in s:
-                return True
-        return False
-
     def _run_cmd(self, cmd):
         starttime = time.time()
 
         if len(self.test.extra_paths) > 0:
             self.env['PATH'] = os.pathsep.join(self.test.extra_paths + ['']) + self.env['PATH']
-            if self._substring_in_list('wine', cmd):
+            if substring_is_in_list('wine', cmd):
                 wine_paths = ['Z:' + p for p in self.test.extra_paths]
                 wine_path = ';'.join(wine_paths)
                 # Don't accidentally end with an `;` because that will add the
@@ -608,6 +609,8 @@ TIMEOUT: %4d
 
         self.logfile.write('Log of Meson test suite run on %s\n\n'
                            % datetime.datetime.now().isoformat())
+        inherit_env = env_tuple_to_str(os.environ.items())
+        self.logfile.write('Inherited environment: {}\n\n'.format(inherit_env))
 
     @staticmethod
     def get_wrapper(options):
@@ -744,12 +747,13 @@ def run(args):
     if check_bin is not None:
         exe = ExternalProgram(check_bin, silent=True)
         if not exe.found():
-            sys.exit('Could not find requested program: %s' % check_bin)
+            print('Could not find requested program: {!r}'.format(check_bin))
+            return 1
     options.wd = os.path.abspath(options.wd)
 
     if not options.list and not options.no_rebuild:
         if not rebuild_all(options.wd):
-            sys.exit(-1)
+            return 1
 
     try:
         th = TestHarness(options)
@@ -761,5 +765,8 @@ def run(args):
         return th.run_special()
     except TestException as e:
         print('Meson test encountered an error:\n')
-        print(e)
+        if os.environ.get('MESON_FORCE_BACKTRACE'):
+            raise e
+        else:
+            print(e)
         return 1

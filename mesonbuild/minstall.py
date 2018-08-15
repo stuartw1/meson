@@ -20,7 +20,12 @@ from .scripts import depfixer
 from .scripts import destdir_join
 from .mesonlib import is_windows, Popen_safe
 from .mtest import rebuild_all
-from __main__ import __file__ as main_file
+try:
+    from __main__ import __file__ as main_file
+except ImportError:
+    # Happens when running as meson.exe which is native Windows.
+    # This is only used for pkexec which is not, so this is fine.
+    main_file = None
 
 selinux_updates = []
 
@@ -186,12 +191,16 @@ class Installer:
     def should_preserve_existing_file(self, from_file, to_file):
         if not self.options.only_changed:
             return False
+        # Always replace danging symlinks
+        if os.path.islink(from_file) and not os.path.isfile(from_file):
+            return False
         from_time = os.stat(from_file).st_mtime
         to_time = os.stat(to_file).st_mtime
         return from_time <= to_time
 
     def do_copyfile(self, from_file, to_file):
-        if not os.path.isfile(from_file):
+        outdir = os.path.split(to_file)[0]
+        if not os.path.isfile(from_file) and not os.path.islink(from_file):
             raise RuntimeError('Tried to install something that isn\'t a file:'
                                '{!r}'.format(from_file))
         # copyfile fails if the target file already exists, so remove it to
@@ -205,11 +214,13 @@ class Installer:
                 append_to_log(self.lf, '# Preserving old file %s\n' % to_file)
                 print('Preserving existing file %s.' % to_file)
                 return False
-            os.unlink(to_file)
-        outdir = os.path.split(to_file)[0]
+            os.remove(to_file)
         print('Installing %s to %s' % (from_file, outdir))
-        shutil.copyfile(from_file, to_file)
-        shutil.copystat(from_file, to_file)
+        if os.path.islink(from_file):
+            shutil.copy(from_file, outdir, follow_symlinks=False)
+        else:
+            shutil.copyfile(from_file, to_file)
+            shutil.copystat(from_file, to_file)
         selinux_updates.append(to_file)
         append_to_log(self.lf, to_file)
         return True
@@ -272,7 +283,7 @@ class Installer:
                 if os.path.isdir(abs_dst):
                     print('Tried to copy file %s but a directory of that name already exists.' % abs_dst)
                 if os.path.exists(abs_dst):
-                    os.unlink(abs_dst)
+                    os.remove(abs_dst)
                 parent_dir = os.path.dirname(abs_dst)
                 if not os.path.isdir(parent_dir):
                     os.mkdir(parent_dir)
@@ -384,6 +395,13 @@ class Installer:
 
     def install_targets(self, d):
         for t in d.targets:
+            if not os.path.exists(t.fname):
+                # For example, import libraries of shared modules are optional
+                if t.optional:
+                    print('File {!r} not found, skipping'.format(t.fname))
+                    continue
+                else:
+                    raise RuntimeError('File {!r} could not be found'.format(t.fname))
             fname = check_for_stampfile(t.fname)
             outdir = get_destdir_path(d, t.outdir)
             outname = os.path.join(outdir, os.path.basename(fname))
@@ -426,7 +444,7 @@ class Installer:
                 try:
                     symlinkfilename = os.path.join(outdir, alias)
                     try:
-                        os.unlink(symlinkfilename)
+                        os.remove(symlinkfilename)
                     except FileNotFoundError:
                         pass
                     os.symlink(to, symlinkfilename)

@@ -15,7 +15,7 @@
 import configparser, os, platform, re, shlex, shutil, subprocess
 
 from . import coredata
-from .linkers import ArLinker, VisualStudioLinker
+from .linkers import ArLinker, ArmarLinker, VisualStudioLinker
 from . import mesonlib
 from .mesonlib import EnvironmentException, Popen_safe
 from . import mlog
@@ -86,6 +86,8 @@ known_cpu_families = (
     'ppc64',
     'riscv32',
     'riscv64',
+    's390x',
+    'sparc',
     'sparc64',
     'x86',
     'x86_64'
@@ -311,10 +313,13 @@ class Environment:
             # Used by the regenchecker script, which runs meson
             self.coredata.meson_command = mesonlib.meson_command
             self.first_invocation = True
+        self.cross_info = None
+        self.exe_wrapper = None
         if self.coredata.cross_file:
             self.cross_info = CrossBuildInfo(self.coredata.cross_file)
-        else:
-            self.cross_info = None
+            if 'exe_wrapper' in self.cross_info.config['binaries']:
+                from .dependencies import ExternalProgram
+                self.exe_wrapper = ExternalProgram.from_cross_info(self.cross_info, 'exe_wrapper')
         self.cmd_line_options = options.cmd_line_options.copy()
 
         # List of potential compilers.
@@ -331,7 +336,6 @@ class Environment:
         self.default_objc = ['cc']
         self.default_objcpp = ['c++']
         self.default_fortran = ['gfortran', 'g95', 'f95', 'f90', 'f77', 'ifort']
-        self.default_vala = ['valac']
         self.default_rust = ['rustc']
         self.default_static_linker = ['ar']
         self.vs_static_linker = ['lib']
@@ -342,13 +346,11 @@ class Environment:
         # static libraries, and executables.
         # Versioning is added to these names in the backends as-needed.
         cross = self.is_cross_build()
-        if (not cross and mesonlib.is_windows()) \
-                or (cross and self.cross_info.has_host() and self.cross_info.config['host_machine']['system'] == 'windows'):
+        if mesonlib.for_windows(cross, self):
             self.exe_suffix = 'exe'
             self.object_suffix = 'obj'
             self.win_libdir_layout = True
-        elif (not cross and mesonlib.is_cygwin()) \
-                or (cross and self.cross_info.has_host() and self.cross_info.config['host_machine']['system'] == 'cygwin'):
+        elif mesonlib.for_cygwin(cross, self):
             self.exe_suffix = 'exe'
             self.object_suffix = 'o'
             self.win_libdir_layout = True
@@ -481,10 +483,7 @@ This is probably wrong, it should always point to the native compiler.''' % evar
             # Return value has to be a list of compiler 'choices'
             compilers = [compilers]
             is_cross = True
-            if self.cross_info.need_exe_wrapper():
-                exe_wrap = self.cross_info.config['binaries'].get('exe_wrapper', None)
-            else:
-                exe_wrap = []
+            exe_wrap = self.get_exe_wrapper()
         elif evar in os.environ:
             compilers = shlex.split(os.environ[evar])
             # Ensure ccache exists and remove it if it doesn't
@@ -606,10 +605,9 @@ This is probably wrong, it should always point to the native compiler.''' % evar
                 if version == 'unknown version':
                     m = 'Failed to detect MSVC compiler arch: stderr was\n{!r}'
                     raise EnvironmentException(m.format(err))
-                machine = err.split('\n')[0].split(' ')[-1]
-                runtime = self.coredata.get_builtin_option('msvcrt')
+                is_64 = err.split('\n')[0].endswith(' x64')
                 cls = VisualStudioCCompiler if lang == 'c' else VisualStudioCPPCompiler
-                return cls(compiler, version, is_cross, exe_wrap, machine, runtime)
+                return cls(compiler, version, is_cross, exe_wrap, is_64)
             if '(ICC)' in out:
                 # TODO: add microsoft add check OSX
                 inteltype = ICC_STANDARD
@@ -773,25 +771,19 @@ This is probably wrong, it should always point to the native compiler.''' % evar
 
         self._handle_exceptions(popen_exceptions, compilers)
 
-    def detect_vala_compiler(self, want_cross):
-        popen_exceptions = {}
-        compilers, ccache, is_cross, exe_wrap = self._get_compilers('vala', 'VALAC', want_cross)
-        for compiler in compilers:
-            if isinstance(compiler, str):
-                compiler = [compiler]
-            arg = ['--version']
-            try:
-                p, out = Popen_safe(compiler + arg)[0:2]
-            except OSError as e:
-                popen_exceptions[' '.join(compiler + arg)] = e
-                continue
-
-            version = search_version(out)
-
-            if 'Vala' in out:
-                return ValaCompiler(compiler, version, is_cross)
-
-        self._handle_exceptions(popen_exceptions, compilers)
+    def detect_vala_compiler(self):
+        if 'VALAC' in os.environ:
+            exelist = shlex.split(os.environ['VALAC'])
+        else:
+            exelist = ['valac']
+        try:
+            p, out = Popen_safe(exelist + ['--version'])[0:2]
+        except OSError:
+            raise EnvironmentException('Could not execute Vala compiler "%s"' % ' '.join(exelist))
+        version = search_version(out)
+        if 'Vala' in out:
+            return ValaCompiler(exelist, version)
+        raise EnvironmentException('Unknown compiler "' + ' '.join(exelist) + '"')
 
     def detect_rust_compiler(self, want_cross):
         popen_exceptions = {}
@@ -892,7 +884,9 @@ This is probably wrong, it should always point to the native compiler.''' % evar
                 popen_exceptions[' '.join(linker + [arg])] = e
                 continue
             if '/OUT:' in out or '/OUT:' in err:
-                return VisualStudioLinker(linker, compiler.machine)
+                return VisualStudioLinker(linker)
+            if p.returncode == 0 and ('armar' in linker or 'armar.exe' in linker):
+                return ArmarLinker(linker)
             if p.returncode == 0:
                 return ArLinker(linker)
             if p.returncode == 1 and err.startswith('usage'): # OSX
@@ -981,16 +975,21 @@ This is probably wrong, it should always point to the native compiler.''' % evar
         out = out.split('\n')[index].lstrip('libraries: =').split(':')
         return [os.path.normpath(p) for p in out]
 
+    def get_exe_wrapper(self):
+        if not self.cross_info.need_exe_wrapper():
+            from .dependencies import EmptyExternalProgram
+            return EmptyExternalProgram()
+        return self.exe_wrapper
+
+
 class CrossBuildInfo:
     def __init__(self, filename):
         self.config = {'properties': {}}
         self.parse_datafile(filename)
-        if 'target_machine' in self.config:
-            return
-        if 'host_machine' not in self.config:
+        if 'host_machine' not in self.config and 'target_machine' not in self.config:
             raise mesonlib.MesonException('Cross info file must have either host or a target machine.')
-        if 'binaries' not in self.config:
-            raise mesonlib.MesonException('Cross file is missing "binaries".')
+        if 'host_machine' in self.config and 'binaries' not in self.config:
+            raise mesonlib.MesonException('Cross file with "host_machine" is missing "binaries".')
 
     def ok_type(self, i):
         return isinstance(i, (str, int, bool))
@@ -1039,8 +1038,11 @@ class CrossBuildInfo:
     def get_stdlib(self, language):
         return self.config['properties'][language + '_stdlib']
 
-    def get_binaries(self):
-        return self.config['binaries']
+    def get_host_system(self):
+        "Name of host system like 'linux', or None"
+        if self.has_host():
+            return self.config['host_machine']['system']
+        return None
 
     def get_properties(self):
         return self.config['properties']

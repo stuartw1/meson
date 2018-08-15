@@ -105,7 +105,7 @@ class Vs2010Backend(backends.Backend):
                 exe = generator.get_exe()
                 infilelist = genlist.get_inputs()
                 outfilelist = genlist.get_outputs()
-                source_dir = os.path.join(self.build_to_src, genlist.subdir)
+                source_dir = os.path.join(down, self.build_to_src, genlist.subdir)
                 exe_arr = self.exe_object_to_cmd_array(exe)
                 idgroup = ET.SubElement(parent_node, 'ItemGroup')
                 for i in range(len(infilelist)):
@@ -133,6 +133,7 @@ class Vs2010Backend(backends.Backend):
                     cmd = exe_arr + self.replace_extra_args(args, genlist)
                     if generator.capture:
                         exe_data = self.serialize_executable(
+                            'generator ' + cmd[0],
                             cmd[0],
                             cmd[1:],
                             self.environment.get_build_dir(),
@@ -163,6 +164,7 @@ class Vs2010Backend(backends.Backend):
         sln_filename = os.path.join(self.environment.get_build_dir(), self.build.project_name + '.sln')
         projlist = self.generate_projects()
         self.gen_testproj('RUN_TESTS', os.path.join(self.environment.get_build_dir(), 'RUN_TESTS.vcxproj'))
+        self.gen_installproj('RUN_INSTALL', os.path.join(self.environment.get_build_dir(), 'RUN_INSTALL.vcxproj'))
         self.gen_regenproj('REGEN', os.path.join(self.environment.get_build_dir(), 'REGEN.vcxproj'))
         self.generate_solution(sln_filename, projlist)
         self.generate_regen_info()
@@ -298,6 +300,11 @@ class Vs2010Backend(backends.Backend):
                                       self.environment.coredata.regen_guid)
             ofile.write(regen_line)
             ofile.write('EndProject\n')
+            install_line = prj_templ % (self.environment.coredata.lang_guids['default'],
+                                        'RUN_INSTALL', 'RUN_INSTALL.vcxproj',
+                                        self.environment.coredata.install_guid)
+            ofile.write(install_line)
+            ofile.write('EndProject\n')
             ofile.write('Global\n')
             ofile.write('\tGlobalSection(SolutionConfigurationPlatforms) = '
                         'preSolution\n')
@@ -327,6 +334,9 @@ class Vs2010Backend(backends.Backend):
                                  self.buildtype, self.platform))
             ofile.write('\t\t{%s}.%s|%s.ActiveCfg = %s|%s\n' %
                         (self.environment.coredata.test_guid, self.buildtype,
+                         self.platform, self.buildtype, self.platform))
+            ofile.write('\t\t{%s}.%s|%s.ActiveCfg = %s|%s\n' %
+                        (self.environment.coredata.install_guid, self.buildtype,
                          self.platform, self.buildtype, self.platform))
             ofile.write('\tEndGlobalSection\n')
             ofile.write('\tGlobalSection(SolutionProperties) = preSolution\n')
@@ -489,7 +499,7 @@ class Vs2010Backend(backends.Backend):
         tdir_abs = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
         extra_bdeps = target.get_transitive_build_target_deps()
         extra_paths = self.determine_windows_extra_paths(target.command[0], extra_bdeps)
-        exe_data = self.serialize_executable(target.command[0], cmd[1:],
+        exe_data = self.serialize_executable(target.name, target.command[0], cmd[1:],
                                              # All targets run from the target dir
                                              tdir_abs,
                                              extra_paths=extra_paths,
@@ -1268,6 +1278,74 @@ exit /b %%1
 :cmDone
 if %%errorlevel%% neq 0 goto :VCEnd'''
         self.serialize_tests()
+        ET.SubElement(postbuild, 'Command').text =\
+            cmd_templ % ('" "'.join(test_command))
+        ET.SubElement(root, 'Import', Project='$(VCTargetsPath)\Microsoft.Cpp.targets')
+        self._prettyprint_vcxproj_xml(ET.ElementTree(root), ofname)
+
+    def gen_installproj(self, target_name, ofname):
+        self.create_install_data_files()
+        project_name = target_name
+        root = ET.Element('Project', {'DefaultTargets': "Build",
+                                      'ToolsVersion': '4.0',
+                                      'xmlns': 'http://schemas.microsoft.com/developer/msbuild/2003'})
+        confitems = ET.SubElement(root, 'ItemGroup', {'Label': 'ProjectConfigurations'})
+        prjconf = ET.SubElement(confitems, 'ProjectConfiguration',
+                                {'Include': self.buildtype + '|' + self.platform})
+        p = ET.SubElement(prjconf, 'Configuration')
+        p.text = self.buildtype
+        pl = ET.SubElement(prjconf, 'Platform')
+        pl.text = self.platform
+        globalgroup = ET.SubElement(root, 'PropertyGroup', Label='Globals')
+        guidelem = ET.SubElement(globalgroup, 'ProjectGuid')
+        guidelem.text = '{%s}' % self.environment.coredata.install_guid
+        kw = ET.SubElement(globalgroup, 'Keyword')
+        kw.text = self.platform + 'Proj'
+        p = ET.SubElement(globalgroup, 'Platform')
+        p.text = self.platform
+        pname = ET.SubElement(globalgroup, 'ProjectName')
+        pname.text = project_name
+        if self.windows_target_platform_version:
+            ET.SubElement(globalgroup, 'WindowsTargetPlatformVersion').text = self.windows_target_platform_version
+        ET.SubElement(root, 'Import', Project='$(VCTargetsPath)\Microsoft.Cpp.Default.props')
+        type_config = ET.SubElement(root, 'PropertyGroup', Label='Configuration')
+        ET.SubElement(type_config, 'ConfigurationType')
+        ET.SubElement(type_config, 'CharacterSet').text = 'MultiByte'
+        ET.SubElement(type_config, 'UseOfMfc').text = 'false'
+        if self.platform_toolset:
+            ET.SubElement(type_config, 'PlatformToolset').text = self.platform_toolset
+        ET.SubElement(root, 'Import', Project='$(VCTargetsPath)\Microsoft.Cpp.props')
+        direlem = ET.SubElement(root, 'PropertyGroup')
+        fver = ET.SubElement(direlem, '_ProjectFileVersion')
+        fver.text = self.project_file_version
+        outdir = ET.SubElement(direlem, 'OutDir')
+        outdir.text = '.\\'
+        intdir = ET.SubElement(direlem, 'IntDir')
+        intdir.text = 'install-temp\\'
+        tname = ET.SubElement(direlem, 'TargetName')
+        tname.text = target_name
+
+        action = ET.SubElement(root, 'ItemDefinitionGroup')
+        midl = ET.SubElement(action, 'Midl')
+        ET.SubElement(midl, "AdditionalIncludeDirectories").text = '%(AdditionalIncludeDirectories)'
+        ET.SubElement(midl, "OutputDirectory").text = '$(IntDir)'
+        ET.SubElement(midl, 'HeaderFileName').text = '%(Filename).h'
+        ET.SubElement(midl, 'TypeLibraryName').text = '%(Filename).tlb'
+        ET.SubElement(midl, 'InterfaceIdentifierFilename').text = '%(Filename)_i.c'
+        ET.SubElement(midl, 'ProxyFileName').text = '%(Filename)_p.c'
+        postbuild = ET.SubElement(action, 'PostBuildEvent')
+        ET.SubElement(postbuild, 'Message')
+        # FIXME: No benchmarks?
+        test_command = self.environment.get_build_command() + ['install', '--no-rebuild']
+        cmd_templ = '''setlocal
+"%s"
+if %%errorlevel%% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %%errorlevel%% & goto :cmDone
+:cmErrorLevel
+exit /b %%1
+:cmDone
+if %%errorlevel%% neq 0 goto :VCEnd'''
         ET.SubElement(postbuild, 'Command').text =\
             cmd_templ % ('" "'.join(test_command))
         ET.SubElement(root, 'Import', Project='$(VCTargetsPath)\Microsoft.Cpp.targets')

@@ -16,6 +16,7 @@
 # Custom logic for several other packages are in separate files.
 
 import copy
+import functools
 import os
 import re
 import stat
@@ -265,6 +266,15 @@ class ExternalDependency(Dependency):
 
         return new
 
+    def log_details(self):
+        return ''
+
+    def log_info(self):
+        return ''
+
+    def log_tried(self):
+        return ''
+
 
 class NotFoundDependency(Dependency):
     def __init__(self, environment):
@@ -296,6 +306,8 @@ class ConfigToolDependency(ExternalDependency):
             self.config = None
             return
         self.version = version
+        if getattr(self, 'finish_init', None):
+            self.finish_init(self)
 
     def _sanitize_version(self, version):
         """Remove any non-numeric, non-point version suffixes."""
@@ -307,7 +319,7 @@ class ConfigToolDependency(ExternalDependency):
         return version
 
     @classmethod
-    def factory(cls, name, environment, language, kwargs, tools, tool_name):
+    def factory(cls, name, environment, language, kwargs, tools, tool_name, finish_init=None):
         """Constructor for use in dependencies that can be found multiple ways.
 
         In addition to the standard constructor values, this constructor sets
@@ -322,7 +334,7 @@ class ConfigToolDependency(ExternalDependency):
         def reduce(self):
             return (cls._unpickle, (), self.__dict__)
         sub = type('{}Dependency'.format(name.capitalize()), (cls, ),
-                   {'tools': tools, 'tool_name': tool_name, '__reduce__': reduce})
+                   {'tools': tools, 'tool_name': tool_name, '__reduce__': reduce, 'finish_init': staticmethod(finish_init)})
 
         return sub(name, environment, language, kwargs)
 
@@ -388,13 +400,9 @@ class ConfigToolDependency(ExternalDependency):
             else:
                 mlog.log('Found', mlog.bold(self.tool_name), repr(req_version),
                          mlog.red('NO'))
-            mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.red('NO'))
-            if self.required:
-                raise DependencyException('Dependency {} not found'.format(self.name))
             return False
         mlog.log('Found {}:'.format(self.tool_name), mlog.bold(shutil.which(self.config)),
                  '({})'.format(version))
-        mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.green('YES'))
         return True
 
     def get_config_value(self, args, stage):
@@ -421,6 +429,9 @@ class ConfigToolDependency(ExternalDependency):
         variable = out.strip()
         mlog.debug('Got config-tool variable {} : {}'.format(variable_name, variable))
         return variable
+
+    def log_tried(self):
+        return self.type_name
 
 
 class PkgConfigDependency(ExternalDependency):
@@ -463,20 +474,12 @@ class PkgConfigDependency(ExternalDependency):
             if self.required:
                 raise DependencyException('Pkg-config not found.')
             return
-        if self.want_cross:
-            self.type_string = 'Cross'
-        else:
-            self.type_string = 'Native'
 
         mlog.debug('Determining dependency {!r} with pkg-config executable '
                    '{!r}'.format(name, self.pkgbin.get_path()))
         ret, self.version = self._call_pkgbin(['--modversion', name])
         if ret != 0:
-            if self.required:
-                raise DependencyException('{} dependency {!r} not found'
-                                          ''.format(self.type_string, name))
             return
-        found_msg = [self.type_string + ' dependency', mlog.bold(name), 'found:']
         if self.version_reqs is None:
             self.is_found = True
         else:
@@ -487,14 +490,6 @@ class PkgConfigDependency(ExternalDependency):
             (self.is_found, not_found, found) = \
                 version_compare_many(self.version, self.version_reqs)
             if not self.is_found:
-                found_msg += [mlog.red('NO'),
-                              'found {!r} but need:'.format(self.version),
-                              ', '.join(["'{}'".format(e) for e in not_found])]
-                if found:
-                    found_msg += ['; matched:',
-                                  ', '.join(["'{}'".format(e) for e in found])]
-                if not self.silent:
-                    mlog.log(*found_msg)
                 if self.required:
                     m = 'Invalid version of dependency, need {!r} {!r} found {!r}.'
                     raise DependencyException(m.format(name, not_found, self.version))
@@ -505,7 +500,6 @@ class PkgConfigDependency(ExternalDependency):
             self._set_cargs()
             # Fetch the libraries and library paths needed for using this
             self._set_libs()
-            found_msg += [mlog.green('YES'), self.version]
         except DependencyException as e:
             if self.required:
                 raise
@@ -513,12 +507,7 @@ class PkgConfigDependency(ExternalDependency):
                 self.compile_args = []
                 self.link_args = []
                 self.is_found = False
-                found_msg += [mlog.red('NO'), '; reason: {}'.format(str(e))]
-
-        # Print the found message only at the very end because fetching cflags
-        # and libs can also fail if other needed pkg-config files aren't found.
-        if not self.silent:
-            mlog.log(*found_msg)
+                self.reason = e
 
     def __repr__(self):
         s = '<{0} {1}: {2} {3}>'
@@ -586,26 +575,7 @@ class PkgConfigDependency(ExternalDependency):
                                       (self.name, out))
         self.compile_args = self._convert_mingw_paths(shlex.split(out))
 
-    def _set_libs(self):
-        env = None
-        libcmd = [self.name, '--libs']
-        if self.static:
-            libcmd.append('--static')
-        # Force pkg-config to output -L fields even if they are system
-        # paths so we can do manual searching with cc.find_library() later.
-        env = os.environ.copy()
-        env['PKG_CONFIG_ALLOW_SYSTEM_LIBS'] = '1'
-        ret, out = self._call_pkgbin(libcmd, env=env)
-        if ret != 0:
-            raise DependencyException('Could not generate libs for %s:\n\n%s' %
-                                      (self.name, out))
-        # Also get the 'raw' output without -Lfoo system paths for usage when
-        # a library can't be found, and also in gnome.generate_gir
-        # + gnome.gtkdoc which need -L -l arguments.
-        ret, out_raw = self._call_pkgbin(libcmd)
-        if ret != 0:
-            raise DependencyException('Could not generate libs for %s:\n\n%s' %
-                                      (self.name, out_raw))
+    def _search_libs(self, out, out_raw):
         link_args = []
         raw_link_args = []
         # Library paths should be safe to de-dup
@@ -636,18 +606,22 @@ class PkgConfigDependency(ExternalDependency):
                     continue
                 if self.clib_compiler:
                     args = self.clib_compiler.find_library(lib[2:], self.env,
-                                                           list(libpaths), libtype)
+                                                           list(reversed(libpaths)), libtype)
                 # If the project only uses a non-clib language such as D, Rust,
                 # C#, Python, etc, all we can do is limp along by adding the
                 # arguments as-is and then adding the libpaths at the end.
                 else:
                     args = None
-                if args:
+                if args is not None:
                     libs_found.add(lib)
                     # Replace -l arg with full path to library if available
-                    # else, library is provided by the compiler and can't be resolved
-                    if not args[0].startswith('-l'):
-                        lib = args[0]
+                    # else, library is either to be ignored, or is provided by
+                    # the compiler, can't be resolved, and should be used as-is
+                    if args:
+                        if not args[0].startswith('-l'):
+                            lib = args[0]
+                    else:
+                        continue
                 else:
                     # Library wasn't found, maybe we're looking in the wrong
                     # places or the library will be provided with LDFLAGS or
@@ -681,14 +655,34 @@ class PkgConfigDependency(ExternalDependency):
             if lib.startswith('-L') and not lib.startswith(('-L-l', '-L-L')):
                 raw_libpaths.add(lib[2:])
             raw_link_args.append(lib)
-        # Set everything
-        self.link_args = link_args
-        self.raw_link_args = raw_link_args
         # Add all -Lbar args if we have -lfoo args in link_args
         if libs_notfound:
             # Order of -L flags doesn't matter with ld, but it might with other
             # linkers such as MSVC, so prepend them.
-            self.link_args = ['-L' + lp for lp in raw_libpaths] + self.link_args
+            link_args = ['-L' + lp for lp in raw_libpaths] + link_args
+        return link_args, raw_link_args
+
+    def _set_libs(self):
+        env = None
+        libcmd = [self.name, '--libs']
+        if self.static:
+            libcmd.append('--static')
+        # Force pkg-config to output -L fields even if they are system
+        # paths so we can do manual searching with cc.find_library() later.
+        env = os.environ.copy()
+        env['PKG_CONFIG_ALLOW_SYSTEM_LIBS'] = '1'
+        ret, out = self._call_pkgbin(libcmd, env=env)
+        if ret != 0:
+            raise DependencyException('Could not generate libs for %s:\n\n%s' %
+                                      (self.name, out))
+        # Also get the 'raw' output without -Lfoo system paths for adding -L
+        # args with -lfoo when a library can't be found, and also in
+        # gnome.generate_gir + gnome.gtkdoc which need -L -l arguments.
+        ret, out_raw = self._call_pkgbin(libcmd)
+        if ret != 0:
+            raise DependencyException('Could not generate libs for %s:\n\n%s' %
+                                      (self.name, out_raw))
+        self.link_args, self.raw_link_args = self._search_libs(out, out_raw)
 
     def get_pkgconfig_variable(self, variable_name, kwargs):
         options = ['--variable=' + variable_name, self.name]
@@ -707,8 +701,8 @@ class PkgConfigDependency(ExternalDependency):
         variable = ''
         if ret != 0:
             if self.required:
-                raise DependencyException('%s dependency %s not found.' %
-                                          (self.type_string, self.name))
+                raise DependencyException('dependency %s not found.' %
+                                          (self.name))
         else:
             variable = out.strip()
 
@@ -792,6 +786,9 @@ class PkgConfigDependency(ExternalDependency):
         # a path rather than the raw dlname
         return os.path.basename(dlname)
 
+    def log_tried(self):
+        return self.type_name
+
 class DubDependency(ExternalDependency):
     class_dubbin = None
 
@@ -813,7 +810,6 @@ class DubDependency(ExternalDependency):
             if self.required:
                 raise DependencyException('DUB not found.')
             self.is_found = False
-            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
             return
 
         mlog.debug('Determining dependency {!r} with DUB executable '
@@ -823,10 +819,7 @@ class DubDependency(ExternalDependency):
         ret, res = self._call_dubbin(['describe', name])
 
         if ret != 0:
-            if self.required:
-                raise DependencyException('Dependency {!r} not found'.format(name))
             self.is_found = False
-            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
             return
 
         j = json.loads(res)
@@ -837,10 +830,7 @@ class DubDependency(ExternalDependency):
                     msg = ['Dependency', mlog.bold(name), 'found but it was compiled with']
                     msg += [mlog.bold(j['compiler']), 'and we are using', mlog.bold(comp)]
                     mlog.error(*msg)
-                    if self.required:
-                        raise DependencyException('Dependency {!r} not found'.format(name))
                     self.is_found = False
-                    mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
                     return
 
                 self.version = package['version']
@@ -848,7 +838,6 @@ class DubDependency(ExternalDependency):
                 break
 
         # Check if package version meets the requirements
-        found_msg = ['Dependency', mlog.bold(name), 'found:']
         if self.version_reqs is None:
             self.is_found = True
         else:
@@ -859,20 +848,10 @@ class DubDependency(ExternalDependency):
             (self.is_found, not_found, found) = \
                 version_compare_many(self.version, self.version_reqs)
             if not self.is_found:
-                found_msg += [mlog.red('NO'),
-                              'found {!r} but need:'.format(self.version),
-                              ', '.join(["'{}'".format(e) for e in not_found])]
-                if found:
-                    found_msg += ['; matched:',
-                                  ', '.join(["'{}'".format(e) for e in found])]
-                if not self.silent:
-                    mlog.log(*found_msg)
                 if self.required:
                     m = 'Invalid version of dependency, need {!r} {!r} found {!r}.'
                     raise DependencyException(m.format(name, not_found, self.version))
                 return
-
-        found_msg += [mlog.green('YES'), self.version]
 
         if self.pkg['targetFileName'].endswith('.a'):
             self.static = True
@@ -894,14 +873,8 @@ class DubDependency(ExternalDependency):
             self.link_args.append(file)
 
         if not found:
-            if self.required:
-                raise DependencyException('Dependency {!r} not found'.format(name))
-                self.is_found = False
-                mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
-                return
-
-        if not self.silent:
-            mlog.log(*found_msg)
+            self.is_found = False
+            return
 
     def get_compiler(self):
         return self.compiler
@@ -947,7 +920,7 @@ class DubDependency(ExternalDependency):
 
     @staticmethod
     def get_methods():
-        return [DependencyMethods.PKGCONFIG, DependencyMethods.DUB]
+        return [DependencyMethods.DUB]
 
 class ExternalProgram:
     windows_exts = ('exe', 'msc', 'com', 'bat', 'cmd')
@@ -1139,10 +1112,14 @@ class ExternalProgram:
     def get_name(self):
         return self.name
 
+
 class NonExistingExternalProgram(ExternalProgram):
+    "A program that will never exist"
 
     def __init__(self):
-        super().__init__(name = 'nonexistingprogram', silent = True)
+        self.name = 'nonexistingprogram'
+        self.command = [None]
+        self.path = None
 
     def __repr__(self):
         r = '<{} {!r} -> {!r}>'
@@ -1150,6 +1127,26 @@ class NonExistingExternalProgram(ExternalProgram):
 
     def found(self):
         return False
+
+
+class EmptyExternalProgram(ExternalProgram):
+    '''
+    A program object that returns an empty list of commands. Used for cases
+    such as a cross file exe_wrapper to represent that it's not required.
+    '''
+
+    def __init__(self):
+        self.name = None
+        self.command = []
+        self.path = None
+
+    def __repr__(self):
+        r = '<{} {!r} -> {!r}>'
+        return r.format(self.__class__.__name__, self.name, self.command)
+
+    def found(self):
+        return True
+
 
 class ExternalLibrary(ExternalDependency):
     def __init__(self, name, link_args, environment, language, silent=False):
@@ -1200,10 +1197,6 @@ class ExtraFrameworkDependency(ExternalDependency):
         if self.found():
             self.compile_args = ['-I' + os.path.join(self.path, self.name, 'Headers')]
             self.link_args = ['-F' + self.path, '-framework', self.name.split('.')[0]]
-            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.green('YES'),
-                     os.path.join(self.path, self.name))
-        else:
-            mlog.log('Dependency', name, 'found:', mlog.red('NO'))
 
     def detect(self, name, path):
         lname = name.lower()
@@ -1222,11 +1215,15 @@ class ExtraFrameworkDependency(ExternalDependency):
                 self.name = d
                 self.is_found = True
                 return
-        if not self.found() and self.required:
-            raise DependencyException('Framework dependency %s not found.' % (name, ))
 
     def get_version(self):
         return 'unknown'
+
+    def log_info(self):
+        return os.path.join(self.path, self.name)
+
+    def log_tried(self):
+        return 'framework'
 
 
 def get_dep_identifier(name, kwargs, want_cross):
@@ -1248,54 +1245,131 @@ def get_dep_identifier(name, kwargs, want_cross):
         identifier += (key, value)
     return identifier
 
+display_name_map = {
+    'boost': 'Boost',
+    'dub': 'DUB',
+    'gmock': 'GMock',
+    'gtest': 'GTest',
+    'llvm': 'LLVM',
+    'mpi': 'MPI',
+    'openmp': 'OpenMP',
+    'wxwidgets': 'WxWidgets',
+}
 
 def find_external_dependency(name, env, kwargs):
+    assert(name)
     required = kwargs.get('required', True)
     if not isinstance(required, bool):
         raise DependencyException('Keyword "required" must be a boolean.')
     if not isinstance(kwargs.get('method', ''), str):
         raise DependencyException('Keyword "method" must be a string.')
-    method = kwargs.get('method', '')
+    lname = name.lower()
+    if lname not in _packages_accept_language and 'language' in kwargs:
+        raise DependencyException('%s dependency does not accept "language" keyword argument' % (name, ))
+
+    # display the dependency name with correct casing
+    display_name = display_name_map.get(lname, lname)
+
+    # if this isn't a cross-build, it's uninteresting if native: is used or not
+    if not env.is_cross_build():
+        type_text = 'Dependency'
+    else:
+        type_text = 'Native' if kwargs.get('native', False) else 'Cross'
+        type_text += ' dependency'
+
+    # build a list of dependency methods to try
+    candidates = _build_external_dependency_list(name, env, kwargs)
+
+    pkg_exc = None
+    pkgdep = []
+    details = ''
+
+    for c in candidates:
+        # try this dependency method
+        try:
+            d = c()
+            pkgdep.append(d)
+        except Exception as e:
+            mlog.debug(str(e))
+            # store the first exception we see
+            if not pkg_exc:
+                pkg_exc = e
+        else:
+            details = d.log_details()
+            if details:
+                details = '(' + details + ') '
+            if 'language' in kwargs:
+                details += 'for ' + d.language + ' '
+
+            # if the dependency was found
+            if d.found():
+
+                info = d.log_info()
+                if info:
+                    info = ', ' + info
+
+                mlog.log(type_text, mlog.bold(display_name), details + 'found:', mlog.green('YES'), d.version + info)
+
+                return d
+
+    # otherwise, the dependency could not be found
+    tried_methods = [d.log_tried() for d in pkgdep if d.log_tried()]
+    if tried_methods:
+        tried = '{}'.format(mlog.format_list(tried_methods))
+    else:
+        tried = ''
+
+    mlog.log(type_text, mlog.bold(display_name), details + 'found:', mlog.red('NO'),
+             '(tried {})'.format(tried) if tried else '')
+
+    if required:
+        # if exception(s) occurred, re-raise the first one (on the grounds that
+        # it came from a preferred dependency detection method)
+        if pkg_exc:
+            raise pkg_exc
+
+        # we have a list of failed ExternalDependency objects, so we can report
+        # the methods we tried to find the dependency
+        raise DependencyException('Dependency "%s" not found, tried %s' % (name, tried))
+
+    # return the last failed dependency object
+    if pkgdep:
+        return pkgdep[-1]
+
+    # this should never happen
+    raise DependencyException('Dependency "%s" not found, but no dependency object to return' % (name))
+
+
+def _build_external_dependency_list(name, env, kwargs):
+    # Is there a specific dependency detector for this dependency?
     lname = name.lower()
     if lname in packages:
-        if lname not in _packages_accept_language and 'language' in kwargs:
-            raise DependencyException('%s dependency does not accept "language" keyword argument' % (lname, ))
-        # Create the dependency object using a factory class method, if one
-        # exists, otherwise it is just constructed directly.
+        # Create the list of dependency object constructors using a factory
+        # class method, if one exists, otherwise the list just consists of the
+        # constructor
         if getattr(packages[lname], '_factory', None):
             dep = packages[lname]._factory(env, kwargs)
         else:
-            dep = packages[lname](env, kwargs)
-        if required and not dep.found():
-            raise DependencyException('Dependency "%s" not found' % name)
+            dep = [functools.partial(packages[lname], env, kwargs)]
         return dep
-    if 'language' in kwargs:
-        # Remove check when PkgConfigDependency supports language.
-        raise DependencyException('%s dependency does not accept "language" keyword argument' % (lname, ))
-    if 'dub' == method:
-        dubdep = DubDependency(name, env, kwargs)
-        if required and not dubdep.found():
-            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
-        return dubdep
-    pkg_exc = None
-    pkgdep = None
-    try:
-        pkgdep = PkgConfigDependency(name, env, kwargs)
-        if pkgdep.found():
-            return pkgdep
-    except Exception as e:
-        pkg_exc = e
+
+    candidates = []
+
+    # If it's explicitly requested, use the dub detection method (only)
+    if 'dub' == kwargs.get('method', ''):
+        candidates.append(functools.partial(DubDependency, name, env, kwargs))
+        return candidates
+    # TBD: other values of method should control what method(s) are used
+
+    # Otherwise, just use the pkgconfig dependency detector
+    candidates.append(functools.partial(PkgConfigDependency, name, env, kwargs))
+
+    # On OSX, also try framework dependency detector
     if mesonlib.is_osx():
-        fwdep = ExtraFrameworkDependency(name, False, None, env, None, kwargs)
-        if required and not fwdep.found():
-            m = 'Dependency {!r} not found, tried Extra Frameworks ' \
-                'and Pkg-Config:\n\n' + str(pkg_exc)
-            raise DependencyException(m.format(name))
-        return fwdep
-    if pkg_exc is not None:
-        raise pkg_exc
-    mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
-    return pkgdep
+        candidates.append(functools.partial(ExtraFrameworkDependency, name,
+                                            False, None, env, None, kwargs))
+
+    return candidates
 
 
 def strip_system_libdirs(environment, link_args):

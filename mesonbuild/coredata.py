@@ -211,6 +211,7 @@ class CoreData:
         }
         self.test_guid = str(uuid.uuid4()).upper()
         self.regen_guid = str(uuid.uuid4()).upper()
+        self.install_guid = str(uuid.uuid4()).upper()
         self.target_guids = {}
         self.version = version
         self.init_builtins()
@@ -544,7 +545,6 @@ def parse_cmd_line_options(args):
 
 builtin_options = {
     'buildtype':  [UserComboOption, 'Build type to use.', ['plain', 'debug', 'debugoptimized', 'release', 'minsize'], 'debug'],
-    'msvcrt':     [UserComboOption, 'MSVC runtime to use.', ['dynamic', 'static'], 'dynamic'],
     'strip':      [UserBooleanOption, 'Strip targets on install.', False],
     'unity':      [UserComboOption, 'Unity build.', ['on', 'off', 'subprojects'], 'off'],
     'prefix':     [UserStringOption, 'Installation prefix.', default_prefix()],

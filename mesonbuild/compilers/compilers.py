@@ -311,6 +311,14 @@ vs64_instruction_set_args = {'mmx': ['/arch:AVX'],
                              'neon': None,
                              }
 
+gnu_symbol_visibility_args = {'': [],
+                              'default': ['-fvisibility=default'],
+                              'internal': ['-fvisibility=internal'],
+                              'hidden': ['-fvisibility=hidden'],
+                              'protected': ['-fvisibility=protected'],
+                              'inlineshidden': ['-fvisibility=hidden', '-fvisibility-inlines-hidden'],
+                              }
+
 def sanitizer_compile_args(value):
     if value == 'none':
         return []
@@ -661,6 +669,9 @@ class Compiler:
     # Libraries to ignore in find_library() since they are provided by the
     # compiler or the C library. Currently only used for MSVC.
     ignore_libs = ()
+    # Libraries that are internal compiler implementations, and must not be
+    # manually searched.
+    internal_libs = ()
     # Cache for the result of compiler checks which can be cached
     compiler_check_cache = {}
 
@@ -1062,6 +1073,12 @@ class Compiler:
         # building fails with undefined symbols.
         return []
 
+    def gnu_symbol_visibility_args(self, vistype):
+        return []
+
+    def get_gui_app_args(self, value):
+        return []
+
 GCC_STANDARD = 0
 GCC_OSX = 1
 GCC_MINGW = 2
@@ -1263,8 +1280,8 @@ class GnuCompiler:
         # For other targets, discard the .def file.
         return []
 
-    def get_gui_app_args(self):
-        if self.gcc_type in (GCC_CYGWIN, GCC_MINGW):
+    def get_gui_app_args(self, value):
+        if self.gcc_type in (GCC_CYGWIN, GCC_MINGW) and value:
             return ['-mwindows']
         return []
 
@@ -1277,6 +1294,8 @@ class GnuCompiler:
     def openmp_flags(self):
         return ['-fopenmp']
 
+    def gnu_symbol_visibility_args(self, vistype):
+        return gnu_symbol_visibility_args[vistype]
 
 class ElbrusCompiler(GnuCompiler):
     # Elbrus compiler is nearly like GCC, but does not support
@@ -1419,6 +1438,8 @@ class ClangCompiler:
             # Shouldn't work, but it'll be checked explicitly in the OpenMP dependency.
             return []
 
+    def gnu_symbol_visibility_args(self, vistype):
+        return gnu_symbol_visibility_args[vistype]
 
 class ArmclangCompiler:
     def __init__(self):
