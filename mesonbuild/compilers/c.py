@@ -1187,7 +1187,7 @@ class VisualStudioCCompiler(CCompiler):
     std_opt_args = ['/O2']
     ignore_libs = ('m', 'c', 'pthread')
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, is_64, runtime):
+    def __init__(self, exelist, version, is_cross, exe_wrap, machine, runtime):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         self.id = 'msvc'
         # /showIncludes is needed for build dependency tracking in Ninja
@@ -1197,7 +1197,8 @@ class VisualStudioCCompiler(CCompiler):
                           '2': ['/W3'],
                           '3': ['/W4']}
         self.base_options = ['b_pch', 'b_ndebug'] # FIXME add lto, pgo and the like
-        self.is_64 = is_64
+        self.is_64 = machine.endswith('64')
+        self.machine = machine
         self.runtime = runtime
 
     # Override CCompiler.get_always_args
@@ -1262,7 +1263,7 @@ class VisualStudioCCompiler(CCompiler):
         return ['/nologo']
 
     def get_linker_output_args(self, outputname):
-        return ['/OUT:' + outputname]
+        return ['/MACHINE:' + self.machine, '/OUT:' + outputname]
 
     def get_linker_search_args(self, dirname):
         return ['/LIBPATH:' + dirname]
