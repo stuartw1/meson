@@ -54,10 +54,10 @@ vs64_instruction_set_args = {
 
 msvc_buildtype_args = {
     'plain': [],
-    'debug': ["/ZI", "/Ob0", "/Od", "/RTC1"],
-    'debugoptimized': ["/Zi", "/Ob1"],
+    'debug': ["/Z7", "/Ob0", "/Od", "/RTC1"],
+    'debugoptimized': ["/Z7", "/Ob1"],
     'release': ["/Ob2", "/Gw"],
-    'minsize': ["/Zi", "/Gw"],
+    'minsize': ["/Z7", "/Gw"],
     'custom': [],
 }  # type: T.Dict[str, T.List[str]]
 
@@ -292,10 +292,7 @@ class VisualStudioLikeCompiler(metaclass=abc.ABCMeta):
             return not(warning_text in p.stde or warning_text in p.stdo), p.cached
 
     def get_compile_debugfile_args(self, rel_obj: str, pch: bool = False) -> T.List[str]:
-        pdbarr = rel_obj.split('.')[:-1]
-        pdbarr += ['pdb']
-        args = ['/Fd' + '.'.join(pdbarr)]
-        return args
+        return []
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         if self.is_64:
@@ -374,18 +371,6 @@ class MSVCCompiler(VisualStudioLikeCompiler):
     def __init__(self, target: str):
         super().__init__(target)
         self.id = 'msvc'
-
-    def get_compile_debugfile_args(self, rel_obj: str, pch: bool = False) -> T.List[str]:
-        args = super().get_compile_debugfile_args(rel_obj, pch)
-        # When generating a PDB file with PCH, all compile commands write
-        # to the same PDB file. Hence, we need to serialize the PDB
-        # writes using /FS since we do parallel builds. This slows down the
-        # build obviously, which is why we only do this when PCH is on.
-        # This was added in Visual Studio 2013 (MSVC 18.0). Before that it was
-        # always on: https://msdn.microsoft.com/en-us/library/dn502518.aspx
-        if pch and mesonlib.version_compare(self.version, '>=18.0'):
-            args = ['/FS'] + args
-        return args
 
     def get_instruction_set_args(self, instruction_set: str) -> T.Optional[T.List[str]]:
         if self.version.split('.')[0] == '16' and instruction_set == 'avx':
