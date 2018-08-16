@@ -147,8 +147,8 @@ arm_buildtype_args = {'plain': [],
 msvc_buildtype_args = {'plain': [],
                        'debug': ["/MDd", "/Z7", "/Ob0", "/Od", "/RTC1"],
                        'debugoptimized': ["/MD", "/Z7", "/O2", "/Ob1"],
-                       'release': ["/MD", "/O2", "/Ob2"],
-                       'minsize': ["/MD", "/Z7", "/Os", "/Ob1"],
+                       'release': ["/MD", "/O2", "/Ob2", "/Gw", "/Gy"],
+                       'minsize': ["/MD", "/Z7", "/O1", "/Gw", "/Gy"],
                        }
 
 apple_buildtype_linker_args = {'plain': [],
