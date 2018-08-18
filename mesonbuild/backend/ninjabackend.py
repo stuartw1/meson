@@ -32,7 +32,7 @@ from ..compilers import CompilerArgs, CCompiler
 from ..linkers import ArLinker
 from ..mesonlib import File, MesonException, OrderedSet
 from ..mesonlib import get_compiler_for_source, has_path_sep
-from .backends import CleanTrees, InstallData, TargetInstallData
+from .backends import CleanTrees
 from ..build import InvalidArguments
 
 if mesonlib.is_windows():
@@ -826,6 +826,8 @@ int dummy;
         deps = []
         commands = CompilerArgs(compiler, target.extra_args.get('cs', []))
         commands += compiler.get_buildtype_args(buildtype)
+        commands += compiler.get_optimization_args(self.get_option_for_target('optimization', target))
+        commands += compiler.get_debug_args(self.get_option_for_target('debug', target))
         if isinstance(target, build.Executable):
             commands.append('-target:exe')
         elif isinstance(target, build.SharedLibrary):
@@ -1081,12 +1083,8 @@ int dummy;
         dependency_vapis = self.determine_dep_vapis(target)
         extra_dep_files += dependency_vapis
         args += extra_args
-        if target.is_cross:
-            crstr = '_CROSS'
-        else:
-            crstr = ''
         element = NinjaBuildElement(self.all_outputs, valac_outputs,
-                                    '%s%s_COMPILER' % (valac.get_language(), crstr),
+                                    valac.get_language() + '_COMPILER',
                                     all_files + dependency_vapis)
         element.add_item('ARGS', args)
         element.add_dep(extra_dep_files)
@@ -1121,6 +1119,7 @@ int dummy;
         args.append(cratetype)
         args += ['--crate-name', target.name]
         args += rustc.get_buildtype_args(self.get_option_for_target('buildtype', target))
+        args += rustc.get_debug_args(self.get_option_for_target('debug', target))
         depfile = os.path.join(target.subdir, target.name + '.d')
         args += ['--emit', 'dep-info={}'.format(depfile), '--emit', 'link']
         args += target.get_extra_args('rust')
@@ -1245,6 +1244,8 @@ int dummy;
                 raise InvalidArguments('Swift target %s contains a non-swift source file.' % target.get_basename())
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
         compile_args = swiftc.get_compile_only_args()
+        compile_args += swiftc.get_optimization_args(self.get_option_for_target('optimization', target))
+        compile_args += swiftc.get_debug_args(self.get_option_for_target('debug', target))
         compile_args += swiftc.get_module_args(module_name)
         compile_args += self.build.get_project_args(swiftc, target.subproject)
         compile_args += self.build.get_global_args(swiftc)
@@ -1452,14 +1453,9 @@ int dummy;
         outfile.write(description)
         outfile.write('\n')
 
-    def generate_vala_compile_rules(self, compiler, is_cross, outfile):
-        if is_cross:
-            crstr = '_CROSS'
-        else:
-            crstr = ''
-        rule = 'rule %s%s_COMPILER\n' % (compiler.get_language(), crstr)
-        cross_args = self.get_cross_info_lang_args('vala', is_cross)
-        invoc = ' '.join([ninja_quote(i) for i in compiler.get_exelist() + cross_args])
+    def generate_vala_compile_rules(self, compiler, outfile):
+        rule = 'rule %s_COMPILER\n' % compiler.get_language()
+        invoc = ' '.join([ninja_quote(i) for i in compiler.get_exelist()])
         command = ' command = %s $ARGS $in\n' % invoc
         description = ' description = Compiling Vala source $in.\n'
         restat = ' restat = 1\n' # ValaC does this always to take advantage of it.
@@ -1560,7 +1556,8 @@ rule FORTRAN_DEP_HACK%s
                 self.generate_cs_compile_rule(compiler, outfile)
             return
         if langname == 'vala':
-            self.generate_vala_compile_rules(compiler, is_cross, outfile)
+            if not is_cross:
+                self.generate_vala_compile_rules(compiler, outfile)
             return
         if langname == 'rust':
             self.generate_rust_compile_rules(compiler, outfile, is_cross)

@@ -30,8 +30,6 @@ from .compilers import (
     GCC_MINGW,
     get_largefile_args,
     gnu_winlibs,
-    msvc_buildtype_args,
-    msvc_buildtype_linker_args,
     msvc_winlibs,
     vs32_instruction_set_args,
     vs64_instruction_set_args,
@@ -1197,7 +1195,14 @@ class VisualStudioCCompiler(CCompiler):
     ignore_libs = gnu_compiler_internal_libs
     internal_libs = ()
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, machine, runtime):
+    crt_args = {'none': [],
+                'md': ['/MD'],
+                'mdd': ['/MDd'],
+                'mt': ['/MT'],
+                'mtd': ['/MTd'],
+                }
+
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         self.id = 'msvc'
         # /showIncludes is needed for build dependency tracking in Ninja
@@ -1206,10 +1211,8 @@ class VisualStudioCCompiler(CCompiler):
         self.warn_args = {'1': ['/W2'],
                           '2': ['/W3'],
                           '3': ['/W4']}
-        self.base_options = ['b_pch', 'b_ndebug'] # FIXME add lto, pgo and the like
-        self.is_64 = machine.endswith('64')
-        self.machine = machine
-        self.runtime = runtime
+        self.base_options = ['b_pch', 'b_ndebug', 'b_vscrt'] # FIXME add lto, pgo and the like
+        self.is_64 = is_64
 
     # Override CCompiler.get_always_args
     def get_always_args(self):
@@ -1227,13 +1230,10 @@ class VisualStudioCCompiler(CCompiler):
         return ['/MDd']
 
     def get_buildtype_args(self, buildtype):
-        args = msvc_buildtype_args[buildtype]
-        if self.runtime == 'static':
-            args = [arg.replace("/MD", "/MT") for arg in args]
-        return args
+        return compilers.msvc_buildtype_args[buildtype]
 
     def get_buildtype_linker_args(self, buildtype):
-        return msvc_buildtype_linker_args[buildtype]
+        return compilers.msvc_buildtype_linker_args[buildtype]
 
     def get_pch_suffix(self):
         return 'pch'
@@ -1263,6 +1263,12 @@ class VisualStudioCCompiler(CCompiler):
             return ['/Fe' + target]
         return ['/Fo' + target]
 
+    def get_optimization_args(self, optimization_level):
+        return compilers.msvc_optimization_args[optimization_level]
+
+    def get_debug_args(self, is_debug):
+        return compilers.msvc_debug_args[is_debug]
+
     def get_dependency_gen_args(self, outtarget, outfile):
         return []
 
@@ -1273,7 +1279,7 @@ class VisualStudioCCompiler(CCompiler):
         return ['/nologo']
 
     def get_linker_output_args(self, outputname):
-        return ['/MACHINE:' + self.machine, '/OUT:' + outputname]
+        return ['/OUT:' + outputname]
 
     def get_linker_search_args(self, dirname):
         return ['/LIBPATH:' + dirname]
@@ -1381,7 +1387,18 @@ class VisualStudioCCompiler(CCompiler):
             return not(warning_text in p.stde or warning_text in p.stdo)
 
     def get_compile_debugfile_args(self, rel_obj, pch=False):
-        return []
+        pdbarr = rel_obj.split('.')[:-1]
+        pdbarr += ['pdb']
+        args = ['/Fd' + '.'.join(pdbarr)]
+        # When generating a PDB file with PCH, all compile commands write
+        # to the same PDB file. Hence, we need to serialize the PDB
+        # writes using /FS since we do parallel builds. This slows down the
+        # build obviously, which is why we only do this when PCH is on.
+        # This was added in Visual Studio 2013 (MSVC 18.0). Before that it was
+        # always on: https://msdn.microsoft.com/en-us/library/dn502518.aspx
+        if pch and version_compare(self.version, '>=18.0'):
+            args = ['/FS'] + args
+        return args
 
     def get_link_debugfile_args(self, targetfile):
         pdbarr = targetfile.split('.')[:-1]
@@ -1434,6 +1451,24 @@ class VisualStudioCCompiler(CCompiler):
             return []
         return os.environ['INCLUDE'].split(os.pathsep)
 
+    def get_crt_compile_args(self, crt_val, buildtype):
+        if crt_val in self.crt_args:
+            return self.crt_args[crt_val]
+        assert(crt_val == 'from_buildtype')
+        # Match what build type flags used to do.
+        if buildtype == 'plain':
+            return []
+        elif buildtype == 'debug':
+            return self.crt_args['mdd']
+        elif buildtype == 'debugoptimized':
+            return self.crt_args['md']
+        elif buildtype == 'release':
+            return self.crt_args['md']
+        elif buildtype == 'minsize':
+            return self.crt_args['md']
+        else:
+            assert(buildtype == 'custom')
+            raise EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
 
 class ArmCCompiler(ArmCompiler, CCompiler):
     def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):

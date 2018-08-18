@@ -2094,6 +2094,9 @@ int main(int argc, char **argv) {
         self.assertNotEqual(subprocess.call(self.wrap_command + ['promote', 'scommon'],
                                             cwd=workdir,
                                             stdout=subprocess.DEVNULL), 0)
+        self.assertNotEqual(subprocess.call(self.wrap_command + ['promote', 'invalid/path/to/scommon'],
+                                            cwd=workdir,
+                                            stderr=subprocess.DEVNULL), 0)
         self.assertFalse(os.path.isdir(scommondir))
         subprocess.check_call(self.wrap_command + ['promote', 'subprojects/s2/subprojects/scommon'], cwd=workdir)
         self.assertTrue(os.path.isdir(scommondir))
@@ -2103,6 +2106,20 @@ int main(int argc, char **argv) {
         self.assertTrue(os.path.isfile(promoted_wrap))
         self.init(workdir)
         self.build()
+
+    def test_subproject_promotion_wrap(self):
+        testdir = os.path.join(self.unit_test_dir, '42 promote wrap')
+        workdir = os.path.join(self.builddir, 'work')
+        shutil.copytree(testdir, workdir)
+        spdir = os.path.join(workdir, 'subprojects')
+
+        ambiguous_wrap = os.path.join(spdir, 'ambiguous.wrap')
+        self.assertNotEqual(subprocess.call(self.wrap_command + ['promote', 'ambiguous'],
+                                            cwd=workdir,
+                                            stdout=subprocess.DEVNULL), 0)
+        self.assertFalse(os.path.isfile(ambiguous_wrap))
+        subprocess.check_call(self.wrap_command + ['promote', 'subprojects/s2/subprojects/ambiguous.wrap'], cwd=workdir)
+        self.assertTrue(os.path.isfile(ambiguous_wrap))
 
     def test_warning_location(self):
         tdir = os.path.join(self.unit_test_dir, '22 warning location')
@@ -2534,6 +2551,41 @@ recommended as it is not supported on some platforms''')
                                    cwd=builddir,
                                    stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL)
+
+    def get_opts_as_dict(self):
+        result = {}
+        for i in self.introspect('--buildoptions'):
+            result[i['name']] = i['value']
+        return result
+
+    def test_buildtype_setting(self):
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+        self.init(testdir)
+        opts = self.get_opts_as_dict()
+        self.assertEqual(opts['buildtype'], 'debug')
+        self.assertEqual(opts['debug'], True)
+        self.setconf('-Ddebug=false')
+        opts = self.get_opts_as_dict()
+        self.assertEqual(opts['debug'], False)
+        self.assertEqual(opts['buildtype'], 'plain')
+        self.assertEqual(opts['optimization'], '0')
+
+        # Setting optimizations to 3 should cause buildtype
+        # to go to release mode.
+        self.setconf('-Doptimization=3')
+        opts = self.get_opts_as_dict()
+        self.assertEqual(opts['buildtype'], 'release')
+        self.assertEqual(opts['debug'], False)
+        self.assertEqual(opts['optimization'], '3')
+
+        # Going to debug build type should reset debugging
+        # and optimization
+        self.setconf('-Dbuildtype=debug')
+        opts = self.get_opts_as_dict()
+        self.assertEqual(opts['buildtype'], 'debug')
+        self.assertEqual(opts['debug'], True)
+        self.assertEqual(opts['optimization'], '0')
+
 
 class FailureTests(BasePlatformTests):
     '''
@@ -3779,31 +3831,41 @@ endian = 'little'
             # Ensure that the otool output does not contain self.installdir
             self.assertNotRegex(out, self.installdir + '.*dylib ')
 
-    def test_install_subdir_symlinks(self):
+    def install_subdir_invalid_symlinks(self, testdir, subdir_path):
         '''
         Test that installation of broken symlinks works fine.
         https://github.com/mesonbuild/meson/issues/3914
         '''
-        testdir = os.path.join(self.common_test_dir, '66 install subdir')
-        subdir = os.path.join(testdir, 'sub/sub1')
+        testdir = os.path.join(self.common_test_dir, testdir)
+        subdir = os.path.join(testdir, subdir_path)
         curdir = os.getcwd()
         os.chdir(subdir)
         # Can't distribute broken symlinks in the source tree because it breaks
         # the creation of zipapps. Create it dynamically and run the test by
         # hand.
         src = '../../nonexistent.txt'
-        os.symlink(src, 'test.txt')
+        os.symlink(src, 'invalid-symlink.txt')
         try:
             self.init(testdir)
             self.build()
             self.install()
-            link = os.path.join(self.installdir, 'usr', 'share', 'sub1', 'test.txt')
+            install_path = subdir_path.split(os.path.sep)[-1]
+            link = os.path.join(self.installdir, 'usr', 'share', install_path, 'invalid-symlink.txt')
             self.assertTrue(os.path.islink(link), msg=link)
             self.assertEqual(src, os.readlink(link))
             self.assertFalse(os.path.isfile(link), msg=link)
         finally:
-            os.remove(os.path.join(subdir, 'test.txt'))
+            os.remove(os.path.join(subdir, 'invalid-symlink.txt'))
             os.chdir(curdir)
+
+    def test_install_subdir_symlinks(self):
+        self.install_subdir_invalid_symlinks('66 install subdir', os.path.join('sub', 'sub1'))
+
+    def test_install_subdir_symlinks_with_default_umask(self):
+        self.install_subdir_invalid_symlinks('199 install_mode', 'sub2')
+
+    def test_install_subdir_symlinks_with_default_umask_and_mode(self):
+        self.install_subdir_invalid_symlinks('199 install_mode', 'sub1')
 
 
 class LinuxCrossArmTests(BasePlatformTests):
