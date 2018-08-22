@@ -1202,7 +1202,7 @@ class VisualStudioCCompiler(CCompiler):
                 'mtd': ['/MTd'],
                 }
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, machine):
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         self.id = 'msvc'
         # /showIncludes is needed for build dependency tracking in Ninja
@@ -1212,8 +1212,7 @@ class VisualStudioCCompiler(CCompiler):
                           '2': ['/W3'],
                           '3': ['/W4']}
         self.base_options = ['b_pch', 'b_ndebug', 'b_vscrt'] # FIXME add lto, pgo and the like
-        self.is_64 = machine.endswith('64')
-        self.machine = machine
+        self.is_64 = is_64
 
     # Override CCompiler.get_always_args
     def get_always_args(self):
@@ -1280,7 +1279,7 @@ class VisualStudioCCompiler(CCompiler):
         return ['/nologo']
 
     def get_linker_output_args(self, outputname):
-        return ['/MACHINE:' + self.machine, '/OUT:' + outputname]
+        return ['/OUT:' + outputname]
 
     def get_linker_search_args(self, dirname):
         return ['/LIBPATH:' + dirname]
@@ -1388,7 +1387,18 @@ class VisualStudioCCompiler(CCompiler):
             return not(warning_text in p.stde or warning_text in p.stdo)
 
     def get_compile_debugfile_args(self, rel_obj, pch=False):
-        return []
+        pdbarr = rel_obj.split('.')[:-1]
+        pdbarr += ['pdb']
+        args = ['/Fd' + '.'.join(pdbarr)]
+        # When generating a PDB file with PCH, all compile commands write
+        # to the same PDB file. Hence, we need to serialize the PDB
+        # writes using /FS since we do parallel builds. This slows down the
+        # build obviously, which is why we only do this when PCH is on.
+        # This was added in Visual Studio 2013 (MSVC 18.0). Before that it was
+        # always on: https://msdn.microsoft.com/en-us/library/dn502518.aspx
+        if pch and version_compare(self.version, '>=18.0'):
+            args = ['/FS'] + args
+        return args
 
     def get_link_debugfile_args(self, targetfile):
         pdbarr = targetfile.split('.')[:-1]

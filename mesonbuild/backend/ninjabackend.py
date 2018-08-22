@@ -1083,12 +1083,8 @@ int dummy;
         dependency_vapis = self.determine_dep_vapis(target)
         extra_dep_files += dependency_vapis
         args += extra_args
-        if target.is_cross:
-            crstr = '_CROSS'
-        else:
-            crstr = ''
         element = NinjaBuildElement(self.all_outputs, valac_outputs,
-                                    '%s%s_COMPILER' % (valac.get_language(), crstr),
+                                    valac.get_language() + '_COMPILER',
                                     all_files + dependency_vapis)
         element.add_item('ARGS', args)
         element.add_dep(extra_dep_files)
@@ -1457,14 +1453,9 @@ int dummy;
         outfile.write(description)
         outfile.write('\n')
 
-    def generate_vala_compile_rules(self, compiler, is_cross, outfile):
-        if is_cross:
-            crstr = '_CROSS'
-        else:
-            crstr = ''
-        rule = 'rule %s%s_COMPILER\n' % (compiler.get_language(), crstr)
-        cross_args = self.get_cross_info_lang_args('vala', is_cross)
-        invoc = ' '.join([ninja_quote(i) for i in compiler.get_exelist() + cross_args])
+    def generate_vala_compile_rules(self, compiler, outfile):
+        rule = 'rule %s_COMPILER\n' % compiler.get_language()
+        invoc = ' '.join([ninja_quote(i) for i in compiler.get_exelist()])
         command = ' command = %s $ARGS $in\n' % invoc
         description = ' description = Compiling Vala source $in.\n'
         restat = ' restat = 1\n' # ValaC does this always to take advantage of it.
@@ -1565,7 +1556,8 @@ rule FORTRAN_DEP_HACK%s
                 self.generate_cs_compile_rule(compiler, outfile)
             return
         if langname == 'vala':
-            self.generate_vala_compile_rules(compiler, is_cross, outfile)
+            if not is_cross:
+                self.generate_vala_compile_rules(compiler, outfile)
             return
         if langname == 'rust':
             self.generate_rust_compile_rules(compiler, outfile, is_cross)

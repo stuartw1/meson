@@ -26,9 +26,8 @@ class StaticLinker:
 class VisualStudioLinker(StaticLinker):
     always_args = ['/NOLOGO']
 
-    def __init__(self, exelist, machine):
+    def __init__(self, exelist):
         self.exelist = exelist
-        self.machine = machine
 
     def get_exelist(self):
         return self.exelist[:]
@@ -40,7 +39,7 @@ class VisualStudioLinker(StaticLinker):
         return []
 
     def get_output_args(self, target):
-        return ['/MACHINE:' + self.machine, '/OUT:' + target]
+        return ['/OUT:' + target]
 
     def get_coverage_link_args(self):
         return []

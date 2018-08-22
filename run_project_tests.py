@@ -303,7 +303,7 @@ def pass_libdir_to_test(dirname):
         return False
     if '38 libdir must be inside prefix' in dirname:
         return False
-    if '199 install_mode' in dirname:
+    if '196 install_mode' in dirname:
         return False
     return True
 
@@ -653,13 +653,15 @@ def check_format():
                       '.py',
                       '.swift',
                       '.build',
+                      '.md',
                       }
     for (root, _, files) in os.walk('.'):
         if '.dub' in root: # external deps are here
             continue
         for fname in files:
             if os.path.splitext(fname)[1].lower() in check_suffixes:
-                if os.path.split(fname)[1] == 'sitemap.txt':
+                bn = os.path.basename(fname)
+                if bn == 'sitemap.txt' or bn == 'meson-test-run.txt':
                     continue
                 fullname = os.path.join(root, fname)
                 check_file(fullname)

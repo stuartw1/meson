@@ -336,7 +336,6 @@ class Environment:
         self.default_objc = ['cc']
         self.default_objcpp = ['c++']
         self.default_fortran = ['gfortran', 'g95', 'f95', 'f90', 'f77', 'ifort']
-        self.default_vala = ['valac']
         self.default_rust = ['rustc']
         self.default_static_linker = ['ar']
         self.vs_static_linker = ['lib']
@@ -606,9 +605,9 @@ This is probably wrong, it should always point to the native compiler.''' % evar
                 if version == 'unknown version':
                     m = 'Failed to detect MSVC compiler arch: stderr was\n{!r}'
                     raise EnvironmentException(m.format(err))
-                machine = err.split('\n')[0].split(' ')[-1]
+                is_64 = err.split('\n')[0].endswith(' x64')
                 cls = VisualStudioCCompiler if lang == 'c' else VisualStudioCPPCompiler
-                return cls(compiler, version, is_cross, exe_wrap, machine)
+                return cls(compiler, version, is_cross, exe_wrap, is_64)
             if '(ICC)' in out:
                 # TODO: add microsoft add check OSX
                 inteltype = ICC_STANDARD
@@ -772,25 +771,19 @@ This is probably wrong, it should always point to the native compiler.''' % evar
 
         self._handle_exceptions(popen_exceptions, compilers)
 
-    def detect_vala_compiler(self, want_cross):
-        popen_exceptions = {}
-        compilers, ccache, is_cross, exe_wrap = self._get_compilers('vala', 'VALAC', want_cross)
-        for compiler in compilers:
-            if isinstance(compiler, str):
-                compiler = [compiler]
-            arg = ['--version']
-            try:
-                p, out = Popen_safe(compiler + arg)[0:2]
-            except OSError as e:
-                popen_exceptions[' '.join(compiler + arg)] = e
-                continue
-
-            version = search_version(out)
-
-            if 'Vala' in out:
-                return ValaCompiler(compiler, version, is_cross)
-
-        self._handle_exceptions(popen_exceptions, compilers)
+    def detect_vala_compiler(self):
+        if 'VALAC' in os.environ:
+            exelist = shlex.split(os.environ['VALAC'])
+        else:
+            exelist = ['valac']
+        try:
+            p, out = Popen_safe(exelist + ['--version'])[0:2]
+        except OSError:
+            raise EnvironmentException('Could not execute Vala compiler "%s"' % ' '.join(exelist))
+        version = search_version(out)
+        if 'Vala' in out:
+            return ValaCompiler(exelist, version)
+        raise EnvironmentException('Unknown compiler "' + ' '.join(exelist) + '"')
 
     def detect_rust_compiler(self, want_cross):
         popen_exceptions = {}
@@ -891,7 +884,7 @@ This is probably wrong, it should always point to the native compiler.''' % evar
                 popen_exceptions[' '.join(linker + [arg])] = e
                 continue
             if '/OUT:' in out or '/OUT:' in err:
-                return VisualStudioLinker(linker, compiler.machine)
+                return VisualStudioLinker(linker)
             if p.returncode == 0 and ('armar' in linker or 'armar.exe' in linker):
                 return ArmarLinker(linker)
             if p.returncode == 0:
@@ -1050,9 +1043,6 @@ class CrossBuildInfo:
         if self.has_host():
             return self.config['host_machine']['system']
         return None
-
-    def get_binaries(self):
-        return self.config['binaries']
 
     def get_properties(self):
         return self.config['properties']

@@ -14,10 +14,12 @@
 
 import os.path, subprocess
 
-from ..mesonlib import EnvironmentException, version_compare
+from ..mesonlib import EnvironmentException, version_compare, is_windows, is_osx
 
 from .compilers import (
     GCC_STANDARD,
+    GCC_CYGWIN,
+    GCC_OSX,
     d_dmd_buildtype_args,
     d_gdc_buildtype_args,
     d_ldc_buildtype_args,
@@ -53,10 +55,10 @@ ldc_optimization_args = {'0': [],
 
 dmd_optimization_args = {'0': [],
                          'g': [],
-                         '1': ['-O1'],
-                         '2': ['-O2'],
-                         '3': ['-O3'],
-                         's': ['-Os'],
+                         '1': ['-O'],
+                         '2': ['-O'],
+                         '3': ['-O'],
+                         's': ['-O'],
                          }
 
 class DCompiler(Compiler):
@@ -108,8 +110,15 @@ class DCompiler(Compiler):
         return ['-shared']
 
     def get_soname_args(self, prefix, shlib_name, suffix, soversion, is_shared_module):
-        # FIXME: Make this work for Windows, MacOS and cross-compiling
-        return get_gcc_soname_args(GCC_STANDARD, prefix, shlib_name, suffix, soversion, is_shared_module)
+        # FIXME: Make this work for cross-compiling
+        gcc_type = GCC_STANDARD
+        if is_windows():
+            gcc_type = GCC_CYGWIN
+        if is_osx():
+            gcc_type = GCC_OSX
+
+        return get_gcc_soname_args(gcc_type, prefix, shlib_name, suffix, soversion, is_shared_module)
+
 
     def get_feature_args(self, kwargs, build_to_src):
         res = []
@@ -229,6 +238,9 @@ class DCompiler(Compiler):
                 linkargs = arg[arg.index(',') + 1:].split(',')
                 for la in linkargs:
                     dcargs.append('-L' + la.strip())
+                continue
+            elif arg.startswith('-install-name'):
+                dcargs.append('-L' + arg)
                 continue
             elif arg.startswith('-link-defaultlib') or arg.startswith('-linker'):
                 # these are special arguments to the LDC linker call,

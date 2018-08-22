@@ -89,7 +89,11 @@ class ClangCPPCompiler(ClangCompiler, CPPCompiler):
         args = []
         std = options['cpp_std']
         if std.value != 'none':
-            args.append('-std=' + std.value)
+            cpp_std_value = std.value
+            # Clang 3.2, 3.3, 3.4 only understand -std={c,gnu}++1y and not -std={c,gnu}++14
+            if version_compare(self.version, '>=3.2') and version_compare(self.version, '<3.5'):
+                cpp_std_value = cpp_std_value.replace('++14', '++1y')
+            args.append('-std=' + cpp_std_value)
         return args
 
     def get_option_link_args(self, options):
@@ -155,7 +159,11 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
         args = []
         std = options['cpp_std']
         if std.value != 'none':
-            args.append('-std=' + std.value)
+            cpp_std_value = std.value
+            # GCC 4.8 only understands -std={c,gnu}++1y and not -std={c,gnu}++14
+            if version_compare(self.version, '>=4.8') and version_compare(self.version, '<4.9'):
+                cpp_std_value = cpp_std_value.replace('++14', '++1y')
+            args.append('-std=' + cpp_std_value)
         if options['cpp_debugstl'].value:
             args.append('-D_GLIBCXX_DEBUG=1')
         return args
@@ -239,9 +247,9 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
 
 
 class VisualStudioCPPCompiler(VisualStudioCCompiler, CPPCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, machine):
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
         CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
-        VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, machine)
+        VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, is_64)
         self.base_options = ['b_pch', 'b_vscrt'] # FIXME add lto, pgo and the like
 
     def get_options(self):

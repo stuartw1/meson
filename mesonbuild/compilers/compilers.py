@@ -143,10 +143,10 @@ arm_buildtype_args = {'plain': [],
                       }
 
 msvc_buildtype_args = {'plain': [],
-                       'debug': ["/Z7", "/Ob0", "/Od", "/RTC1"],
-                       'debugoptimized': ["/Z7", "/Ob1"],
-                       'release': ["/Ob2", "/Gy", "/Gw"],
-                       'minsize': ["/Z7", "/Gy", "/Gw"],
+                       'debug': ["/ZI", "/Ob0", "/Od", "/RTC1"],
+                       'debugoptimized': ["/Zi", "/Ob1"],
+                       'release': ["/Ob2"],
+                       'minsize': ["/Zi", "/Ob1"],
                        }
 
 apple_buildtype_linker_args = {'plain': [],
@@ -267,7 +267,7 @@ msvc_optimization_args = {'0': [],
                           '1': ['/O1'],
                           '2': ['/O2'],
                           '3': ['/O3'],
-                          's': ['/O1'], # Implies /Os.
+                          's': ['/Os'],
                           }
 
 clike_debug_args = {False: [],
@@ -610,18 +610,17 @@ class CompilerArgs(list):
         if get_compiler_uses_gnuld(self.compiler):
             global soregex
             group_start = -1
-            group_end = -1
-            for i, each in enumerate(self):
+            for each in self:
                 if not each.startswith('-l') and not each.endswith('.a') and \
                    not soregex.match(each):
                     continue
-                group_end = i
+                i = self.index(each)
                 if group_start < 0:
                     # First occurrence of a library
                     group_start = i
             if group_start >= 0:
                 # Last occurrence of a library
-                self.insert(group_end + 1, '-Wl,--end-group')
+                self.insert(i + 1, '-Wl,--end-group')
                 self.insert(group_start, '-Wl,--start-group')
         return self.compiler.unix_args_to_native(self)
 
@@ -859,11 +858,11 @@ class Compiler:
             self.language + '_args': coredata.UserArrayOption(
                 self.language + '_args',
                 description + ' compiler',
-                compile_args, shlex_split=True, user_input=True),
+                compile_args, shlex_split=True, user_input=True, allow_dups=True),
             self.language + '_link_args': coredata.UserArrayOption(
                 self.language + '_link_args',
                 description + ' linker',
-                link_args, shlex_split=True, user_input=True),
+                link_args, shlex_split=True, user_input=True, allow_dups=True),
         })
 
         return opts

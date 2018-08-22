@@ -1608,7 +1608,6 @@ class MesonMain(InterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
-                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'backend': self.backend_method,
                              })
@@ -1779,36 +1778,6 @@ class MesonMain(InterpreterObject):
     @permittedKwargs({})
     def project_name_method(self, args, kwargs):
         return self.interpreter.active_projectname
-
-    @noArgsFlattening
-    @permittedKwargs({})
-    def get_cross_binary_method(self, args, kwargs):
-        if len(args) < 1 or len(args) > 2:
-            raise InterpreterException('Must have one or two arguments.')
-        binname = args[0]
-        if not isinstance(binname, str):
-            raise InterpreterException('Binary name must be string.')
-        try:
-            binaries = self.interpreter.environment.cross_info.get_binaries()
-            return binaries[binname]
-        except Exception:
-            if binname == 'ar':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    return static_linker.exelist[0]
-            elif binname == 'libtool':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    ar_binary = static_linker.exelist[0]
-                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
-                        return os.path.join(os.path.dirname(ar_binary), 'libtool')
-            elif binname == 'strip':
-                return self.build.environment.native_strip_bin[0]
-
-            if len(args) == 2:
-                return args[1]
-
-            raise InterpreterException('Unknown cross binary: %s.' % binname)
 
     @noArgsFlattening
     @permittedKwargs({})
@@ -2589,9 +2558,9 @@ external dependencies (including libraries) must go to "dependencies".''')
             if need_cross_compiler:
                 cross_comp = comp  # C# is platform independent.
         elif lang == 'vala':
-            comp = self.environment.detect_vala_compiler(False)
+            comp = self.environment.detect_vala_compiler()
             if need_cross_compiler:
-                cross_comp = self.environment.detect_vala_compiler(True)
+                cross_comp = comp  # Vala compiles to platform-independent C
         elif lang == 'd':
             comp = self.environment.detect_d_compiler(False)
             if need_cross_compiler:
