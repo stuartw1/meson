@@ -10,6 +10,12 @@ if not dep.found()
   error('MESON_SKIP_TEST boost not found.')
 endif
 
+compiler = meson.get_compiler('cpp')
+if compiler.has_argument('-permissive')
+  # boost 1.64, the version we test against, doesn't work with -permissive
+  add_project_arguments('-permissive', language: 'cpp')
+endif
+
 # We want to have multiple separate configurations of Boost
 # within one project. The need to be independent of each other.
 # Use one without a library dependency and one with it.
@@ -33,3 +39,6 @@ test('Boost nomod', nomodexe)
 test('Boost extralib test', extralibexe)
 
 subdir('partial_dep')
+
+# check we can apply a version constraint
+dependency('boost', version: '>=@0@'.format(dep.version()))

@@ -31,7 +31,7 @@ class ObjCCompiler(CCompiler):
         # TODO try to use sanity_check_impl instead of duplicated code
         source_name = os.path.join(work_dir, 'sanitycheckobjc.m')
         binary_name = os.path.join(work_dir, 'sanitycheckobjc')
-        extra_flags = self.get_cross_extra_flags(environment, link=False)
+        extra_flags = []
         if self.is_cross:
             extra_flags += self.get_compile_only_args()
         with open(source_name, 'w') as ofile:
@@ -51,17 +51,23 @@ class ObjCCompiler(CCompiler):
 
 
 class GnuObjCCompiler(GnuCompiler, ObjCCompiler):
-    def __init__(self, exelist, version, gcc_type, is_cross, exe_wrapper=None, defines=None):
+    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, defines=None):
         ObjCCompiler.__init__(self, exelist, version, is_cross, exe_wrapper)
-        GnuCompiler.__init__(self, gcc_type, defines)
+        GnuCompiler.__init__(self, compiler_type, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
-        self.warn_args = {'1': default_warn_args,
+        self.warn_args = {'0': [],
+                          '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
 
-class ClangObjCCompiler(ClangCompiler, GnuObjCCompiler):
-    def __init__(self, exelist, version, cltype, is_cross, exe_wrapper=None):
-        GnuObjCCompiler.__init__(self, exelist, version, cltype, is_cross, exe_wrapper)
-        ClangCompiler.__init__(self, cltype)
+class ClangObjCCompiler(ClangCompiler, ObjCCompiler):
+    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None):
+        ObjCCompiler.__init__(self, exelist, version, is_cross, exe_wrapper)
+        ClangCompiler.__init__(self, compiler_type)
+        default_warn_args = ['-Wall', '-Winvalid-pch']
+        self.warn_args = {'0': [],
+                          '1': default_warn_args,
+                          '2': default_warn_args + ['-Wextra'],
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
         self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage']

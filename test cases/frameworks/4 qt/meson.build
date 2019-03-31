@@ -33,7 +33,7 @@ foreach qt : ['qt4', 'qt5']
   nocoredep = dependency(qt, modules : ['Gui'], required : qt == 'qt5', method : get_option('method'))
 
   # If qt4 modules are found, test that. qt5 is required.
-  qtdep = dependency(qt, modules : qt_modules, private_headers: true, required : qt == 'qt5', method : get_option('method'))
+  qtdep = dependency(qt, modules : qt_modules, main : true, private_headers: true, required : qt == 'qt5', method : get_option('method'))
   if qtdep.found()
     qtmodule = import(qt)
 
@@ -58,11 +58,16 @@ foreach qt : ['qt4', 'qt5']
     # Test that setting a unique name with a positional argument works
     qtmodule.preprocess(qt + 'teststuff', qresources : files(['stuff.qrc', 'stuff2.qrc']), method : get_option('method'))
 
+    # Test that passing extra arguments to rcc works
+    # qt4-rcc and qt5-rcc take different arguments, for example qt4: ['-compress', '3']; qt5: '--compress=3'
+    qtmodule.preprocess(qt + 'testrccarg', qresources : files(['stuff.qrc', 'stuff2.qrc']), rcc_extra_arguments : '--compress=3', method : get_option('method'))
+
     qexe = executable(qt + 'app',
       sources : ['main.cpp', 'mainWindow.cpp', # Sources that don't need preprocessing.
       prep, prep_rcc],
       dependencies : qtdep,
-      cpp_args: extra_cpp_args)
+      cpp_args: extra_cpp_args,
+      gui_app : true)
 
     # We need a console test application because some test environments
     # do not have an X server.
@@ -100,8 +105,22 @@ foreach qt : ['qt4', 'qt5']
     plugin = library(qt + 'plugin', 'plugin/plugin.cpp', pluginpreprocess,
           include_directories : plugin_includes,
           dependencies : qtcore)
+
+    # implementing Qt interfaces requires passing Qt include paths to moc
+    qtinterfacepreprocess = qtmodule.preprocess(
+      moc_sources : 'qtinterface.cpp',
+      dependencies : qtdep
+    )
+    qtinterface = library(qt + 'qtinterface',
+                          sources : ['qtinterface.cpp', qtinterfacepreprocess],
+                          dependencies : qtdep)
+
     if qt == 'qt5'
       subdir('subfolder')
     endif
+
+    # Check we can apply a version constraint
+    dependency(qt, modules: qt_modules, version: '>=@0@'.format(qtdep.version()), method : get_option('method'))
+
   endif
 endforeach

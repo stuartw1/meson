@@ -13,12 +13,17 @@
 # limitations under the License.
 
 """A library of random helper functionality."""
-
+from pathlib import Path
+from typing import List
+import functools
 import sys
 import stat
 import time
 import platform, subprocess, operator, os, shutil, re
 import collections
+from enum import Enum
+from functools import lru_cache
+
 from mesonbuild import mlog
 
 have_fcntl = False
@@ -47,11 +52,28 @@ else:
     python_command = [sys.executable]
 meson_command = None
 
-def is_ascii_string(astring):
+def set_meson_command(mainfile):
+    global python_command
+    global meson_command
+    # On UNIX-like systems `meson` is a Python script
+    # On Windows `meson` and `meson.exe` are wrapper exes
+    if not mainfile.endswith('.py'):
+        meson_command = [mainfile]
+    elif os.path.isabs(mainfile) and mainfile.endswith('mesonmain.py'):
+        # Can't actually run meson with an absolute path to mesonmain.py, it must be run as -m mesonbuild.mesonmain
+        meson_command = python_command + ['-m', 'mesonbuild.mesonmain']
+    else:
+        # Either run uninstalled, or full path to meson-script.py
+        meson_command = python_command + [mainfile]
+    # We print this value for unit tests.
+    if 'MESON_COMMAND_TESTS' in os.environ:
+        mlog.log('meson_command is {!r}'.format(meson_command))
+
+def is_ascii_string(astring) -> bool:
     try:
         if isinstance(astring, str):
             astring.encode('ascii')
-        if isinstance(astring, bytes):
+        elif isinstance(astring, bytes):
             astring.decode('ascii')
     except UnicodeDecodeError:
         return False
@@ -185,17 +207,17 @@ class FileMode:
         return perms
 
 class File:
-    def __init__(self, is_built, subdir, fname):
+    def __init__(self, is_built: bool, subdir: str, fname: str):
         self.is_built = is_built
         self.subdir = subdir
         self.fname = fname
         assert(isinstance(self.subdir, str))
         assert(isinstance(self.fname, str))
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.relative_name()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         ret = '<File: {0}'
         if not self.is_built:
             ret += ' (not built)'
@@ -203,45 +225,50 @@ class File:
         return ret.format(self.relative_name())
 
     @staticmethod
-    def from_source_file(source_root, subdir, fname):
+    @lru_cache(maxsize=None)
+    def from_source_file(source_root: str, subdir: str, fname: str):
         if not os.path.isfile(os.path.join(source_root, subdir, fname)):
             raise MesonException('File %s does not exist.' % fname)
         return File(False, subdir, fname)
 
     @staticmethod
-    def from_built_file(subdir, fname):
+    def from_built_file(subdir: str, fname: str):
         return File(True, subdir, fname)
 
     @staticmethod
-    def from_absolute_file(fname):
+    def from_absolute_file(fname: str):
         return File(False, '', fname)
 
-    def rel_to_builddir(self, build_to_src):
+    @lru_cache(maxsize=None)
+    def rel_to_builddir(self, build_to_src: str) -> str:
         if self.is_built:
             return self.relative_name()
         else:
             return os.path.join(build_to_src, self.subdir, self.fname)
 
-    def absolute_path(self, srcdir, builddir):
+    @lru_cache(maxsize=None)
+    def absolute_path(self, srcdir: str, builddir: str) -> str:
         absdir = srcdir
         if self.is_built:
             absdir = builddir
         return os.path.join(absdir, self.relative_name())
 
-    def endswith(self, ending):
+    def endswith(self, ending: str) -> bool:
         return self.fname.endswith(ending)
 
-    def split(self, s):
+    def split(self, s: str) -> List[str]:
         return self.fname.split(s)
 
-    def __eq__(self, other):
+    def __eq__(self, other) -> bool:
         return (self.fname, self.subdir, self.is_built) == (other.fname, other.subdir, other.is_built)
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((self.fname, self.subdir, self.is_built))
 
-    def relative_name(self):
+    @lru_cache(maxsize=None)
+    def relative_name(self) -> str:
         return os.path.join(self.subdir, self.fname)
+
 
 def get_compiler_for_source(compilers, src):
     for comp in compilers:
@@ -259,119 +286,207 @@ def classify_unity_sources(compilers, sources):
             compsrclist[comp].append(src)
     return compsrclist
 
-def is_osx():
+class OrderedEnum(Enum):
+    """
+    An Enum which additionally offers homogeneous ordered comparison.
+    """
+    def __ge__(self, other):
+        if self.__class__ is other.__class__:
+            return self.value >= other.value
+        return NotImplemented
+
+    def __gt__(self, other):
+        if self.__class__ is other.__class__:
+            return self.value > other.value
+        return NotImplemented
+
+    def __le__(self, other):
+        if self.__class__ is other.__class__:
+            return self.value <= other.value
+        return NotImplemented
+
+    def __lt__(self, other):
+        if self.__class__ is other.__class__:
+            return self.value < other.value
+        return NotImplemented
+
+class MachineChoice(OrderedEnum):
+
+    """Enum class representing one of the three possible values for binaries,
+    the build, host, and target machines.
+    """
+
+    BUILD = 0
+    HOST = 1
+    TARGET = 2
+
+class PerMachine:
+    def __init__(self, build, host, target):
+        self.build = build
+        self.host = host
+        self.target = target
+
+    def __getitem__(self, machine: MachineChoice):
+        return {
+            MachineChoice.BUILD:  self.build,
+            MachineChoice.HOST:   self.host,
+            MachineChoice.TARGET: self.target
+        }[machine]
+
+    def __setitem__(self, machine: MachineChoice, val):
+        key = {
+            MachineChoice.BUILD:  'build',
+            MachineChoice.HOST:   'host',
+            MachineChoice.TARGET: 'target'
+        }[machine]
+        setattr(self, key, val)
+
+def is_osx() -> bool:
     return platform.system().lower() == 'darwin'
 
-def is_linux():
+def is_linux() -> bool:
     return platform.system().lower() == 'linux'
 
-def is_android():
+def is_android() -> bool:
     return platform.system().lower() == 'android'
 
-def is_haiku():
+def is_haiku() -> bool:
     return platform.system().lower() == 'haiku'
 
-def is_openbsd():
+def is_openbsd() -> bool:
     return platform.system().lower() == 'openbsd'
 
-def is_windows():
+def is_windows() -> bool:
     platname = platform.system().lower()
     return platname == 'windows' or 'mingw' in platname
 
-def is_cygwin():
-    platname = platform.system().lower()
-    return platname.startswith('cygwin')
+def is_cygwin() -> bool:
+    return platform.system().lower().startswith('cygwin')
 
-def is_debianlike():
+def is_debianlike() -> bool:
     return os.path.isfile('/etc/debian_version')
 
-def is_dragonflybsd():
+def is_dragonflybsd() -> bool:
     return platform.system().lower() == 'dragonfly'
 
-def is_freebsd():
+def is_freebsd() -> bool:
     return platform.system().lower() == 'freebsd'
+
+def _get_machine_is_cross(env, is_cross):
+    """
+    This is not morally correct, but works for now. For cross builds the build
+    and host machines differ. `is_cross == true` means the host machine, while
+    `is_cross == false` means the build machine. Both are used in practice,
+    even though the documentation refers to the host machine implying we should
+    hard-code it. For non-cross builds `is_cross == false` is passed but the
+    host and build machines are identical so it doesn't matter.
+
+    Users for `for_*` should instead specify up front which machine they want
+    and query that like:
+
+        env.machines[MachineChoice.HOST].is_haiku()
+
+    """
+    for_machine = MachineChoice.HOST if is_cross else MachineChoice.BUILD
+    return env.machines[for_machine]
 
 def for_windows(is_cross, env):
     """
     Host machine is windows?
 
+    Deprecated: Please use `env.machines[for_machine].is_windows()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_windows()
-    return env.cross_info.get_host_system() == 'windows'
+    return _get_machine_is_cross(env, is_cross).is_windows()
 
 def for_cygwin(is_cross, env):
     """
     Host machine is cygwin?
 
+    Deprecated: Please use `env.machines[for_machine].is_cygwin()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_cygwin()
-    return env.cross_info.get_host_system() == 'cygwin'
+    return _get_machine_is_cross(env, is_cross).is_cygwin()
 
 def for_linux(is_cross, env):
     """
     Host machine is linux?
 
+    Deprecated: Please use `env.machines[for_machine].is_linux()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_linux()
-    return env.cross_info.get_host_system() == 'linux'
+    return _get_machine_is_cross(env, is_cross).is_linux()
 
 def for_darwin(is_cross, env):
     """
     Host machine is Darwin (iOS/OS X)?
 
+    Deprecated: Please use `env.machines[for_machine].is_darwin()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_osx()
-    return env.cross_info.get_host_system() in ('darwin', 'ios')
+    return _get_machine_is_cross(env, is_cross).is_darwin()
 
 def for_android(is_cross, env):
     """
     Host machine is Android?
 
+    Deprecated: Please use `env.machines[for_machine].is_android()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_android()
-    return env.cross_info.get_host_system() == 'android'
+    return _get_machine_is_cross(env, is_cross).is_android()
 
 def for_haiku(is_cross, env):
     """
     Host machine is Haiku?
 
+    Deprecated: Please use `env.machines[for_machine].is_haiku()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_haiku()
-    return env.cross_info.get_host_system() == 'haiku'
+    return _get_machine_is_cross(env, is_cross).is_haiku()
 
 def for_openbsd(is_cross, env):
     """
     Host machine is OpenBSD?
 
+    Deprecated: Please use `env.machines[for_machine].is_openbsd()`.
+
     Note: 'host' is the machine on which compiled binaries will run
     """
-    if not is_cross:
-        return is_openbsd()
-    elif env.cross_info.has_host():
-        return env.cross_info.config['host_machine']['system'] == 'openbsd'
-    return False
+    return _get_machine_is_cross(env, is_cross).is_openbsd()
 
-def exe_exists(arglist):
+def exe_exists(arglist: List[str]) -> bool:
     try:
-        p = subprocess.Popen(arglist, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        p.communicate()
-        if p.returncode == 0:
+        if subprocess.run(arglist, timeout=10).returncode == 0:
             return True
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return False
+
+@lru_cache(maxsize=None)
+def darwin_get_object_archs(objpath):
+    '''
+    For a specific object (executable, static library, dylib, etc), run `lipo`
+    to fetch the list of archs supported by it. Supports both thin objects and
+    'fat' objects.
+    '''
+    _, stdo, stderr = Popen_safe(['lipo', '-info', objpath])
+    if not stdo:
+        mlog.debug('lipo {}: {}'.format(objpath, stderr))
+        return None
+    stdo = stdo.rsplit(': ', 1)[1]
+    # Convert from lipo-style archs to meson-style CPUs
+    stdo = stdo.replace('i386', 'x86')
+    stdo = stdo.replace('arm64', 'aarch64')
+    # Add generic name for armv7 and armv7s
+    if 'armv7' in stdo:
+        stdo += ' arm'
+    return stdo.split()
 
 def detect_vcs(source_dir):
     vcs_systems = [
@@ -380,7 +495,7 @@ def detect_vcs(source_dir):
         dict(name = 'subversion', cmd = 'svn', repo_dir = '.svn', get_rev = 'svn info',               rev_regex = 'Revision: (.*)', dep = '.svn/wc.db'),
         dict(name = 'bazaar',     cmd = 'bzr', repo_dir = '.bzr', get_rev = 'bzr revno',              rev_regex = '(.*)', dep = '.bzr'),
     ]
-
+    # FIXME: this is much cleaner with pathlib.Path
     segs = source_dir.replace('\\', '/').split('/')
     for i in range(len(segs), -1, -1):
         curdir = '/'.join(segs[:i])
@@ -390,33 +505,62 @@ def detect_vcs(source_dir):
                 return vcs
     return None
 
-def grab_leading_numbers(vstr, strict=False):
-    result = []
-    for x in vstr.rstrip('.').split('.'):
-        try:
-            result.append(int(x))
-        except ValueError as e:
-            if strict:
-                msg = 'Invalid version to compare against: {!r}; only ' \
-                      'numeric digits separated by "." are allowed: ' + str(e)
-                raise MesonException(msg.format(vstr))
-            break
-    return result
+# a helper class which implements the same version ordering as RPM
+@functools.total_ordering
+class Version:
+    def __init__(self, s):
+        self._s = s
 
-def make_same_len(listA, listB):
-    maxlen = max(len(listA), len(listB))
-    for i in listA, listB:
-        for n in range(len(i), maxlen):
-            i.append(0)
+        # split into numeric, alphabetic and non-alphanumeric sequences
+        sequences = re.finditer(r'(\d+|[a-zA-Z]+|[^a-zA-Z\d]+)', s)
+        # non-alphanumeric separators are discarded
+        sequences = [m for m in sequences if not re.match(r'[^a-zA-Z\d]+', m.group(1))]
+        # numeric sequences have leading zeroes discarded
+        sequences = [re.sub(r'^0+(\d)', r'\1', m.group(1), 1) for m in sequences]
 
-numpart = re.compile('[0-9.]+')
+        self._v = sequences
 
-def version_compare(vstr1, vstr2, strict=False):
-    match = numpart.match(vstr1.strip())
-    if match is None:
-        msg = 'Uncomparable version string {!r}.'
-        raise MesonException(msg.format(vstr1))
-    vstr1 = match.group(0)
+    def __str__(self):
+        return '%s (V=%s)' % (self._s, str(self._v))
+
+    def __repr__(self):
+        return '<Version: {}>'.format(self._s)
+
+    def __lt__(self, other):
+        return self.__cmp__(other) == -1
+
+    def __eq__(self, other):
+        return self.__cmp__(other) == 0
+
+    def __cmp__(self, other):
+        def cmp(a, b):
+            return (a > b) - (a < b)
+
+        # compare each sequence in order
+        for i in range(0, min(len(self._v), len(other._v))):
+            # sort a non-digit sequence before a digit sequence
+            if self._v[i].isdigit() != other._v[i].isdigit():
+                return 1 if self._v[i].isdigit() else -1
+
+            # compare as numbers
+            if self._v[i].isdigit():
+                # because leading zeros have already been removed, if one number
+                # has more digits, it is greater
+                c = cmp(len(self._v[i]), len(other._v[i]))
+                if c != 0:
+                    return c
+                # fallthrough
+
+            # compare lexicographically
+            c = cmp(self._v[i], other._v[i])
+            if c != 0:
+                return c
+
+        # if equal length, all components have matched, so equal
+        # otherwise, the version with a suffix remaining is greater
+        return cmp(len(self._v), len(other._v))
+
+def _version_extract_cmpop(vstr2):
     if vstr2.startswith('>='):
         cmpop = operator.ge
         vstr2 = vstr2[2:]
@@ -440,10 +584,12 @@ def version_compare(vstr1, vstr2, strict=False):
         vstr2 = vstr2[1:]
     else:
         cmpop = operator.eq
-    varr1 = grab_leading_numbers(vstr1, strict)
-    varr2 = grab_leading_numbers(vstr2, strict)
-    make_same_len(varr1, varr2)
-    return cmpop(varr1, varr2)
+
+    return (cmpop, vstr2)
+
+def version_compare(vstr1, vstr2):
+    (cmpop, vstr2) = _version_extract_cmpop(vstr2)
+    return cmpop(Version(vstr1), Version(vstr2))
 
 def version_compare_many(vstr1, conditions):
     if not isinstance(conditions, (list, tuple, frozenset)):
@@ -451,28 +597,22 @@ def version_compare_many(vstr1, conditions):
     found = []
     not_found = []
     for req in conditions:
-        if not version_compare(vstr1, req, strict=True):
+        if not version_compare(vstr1, req):
             not_found.append(req)
         else:
             found.append(req)
     return not_found == [], not_found, found
 
-
+# determine if the minimum version satisfying the condition |condition| exceeds
+# the minimum version for a feature |minimum|
 def version_compare_condition_with_min(condition, minimum):
-    match = numpart.match(minimum.strip())
-    if match is None:
-        msg = 'Uncomparable version string {!r}.'
-        raise MesonException(msg.format(minimum))
-    minimum = match.group(0)
     if condition.startswith('>='):
         cmpop = operator.le
         condition = condition[2:]
     elif condition.startswith('<='):
-        return True
-        condition = condition[2:]
+        return False
     elif condition.startswith('!='):
-        return True
-        condition = condition[2:]
+        return False
     elif condition.startswith('=='):
         cmpop = operator.le
         condition = condition[2:]
@@ -483,49 +623,25 @@ def version_compare_condition_with_min(condition, minimum):
         cmpop = operator.lt
         condition = condition[1:]
     elif condition.startswith('<'):
-        return True
-        condition = condition[2:]
+        return False
     else:
         cmpop = operator.le
-    varr1 = grab_leading_numbers(minimum, True)
-    varr2 = grab_leading_numbers(condition, True)
-    make_same_len(varr1, varr2)
-    return cmpop(varr1, varr2)
 
-def version_compare_condition_with_max(condition, maximum):
-    match = numpart.match(maximum.strip())
-    if match is None:
-        msg = 'Uncomparable version string {!r}.'
-        raise MesonException(msg.format(maximum))
-    maximum = match.group(0)
-    if condition.startswith('>='):
-        return False
-        condition = condition[2:]
-    elif condition.startswith('<='):
-        cmpop = operator.ge
-        condition = condition[2:]
-    elif condition.startswith('!='):
-        return False
-        condition = condition[2:]
-    elif condition.startswith('=='):
-        cmpop = operator.ge
-        condition = condition[2:]
-    elif condition.startswith('='):
-        cmpop = operator.ge
-        condition = condition[1:]
-    elif condition.startswith('>'):
-        return False
-        condition = condition[1:]
-    elif condition.startswith('<'):
-        cmpop = operator.gt
-        condition = condition[2:]
-    else:
-        cmpop = operator.ge
-    varr1 = grab_leading_numbers(maximum, True)
-    varr2 = grab_leading_numbers(condition, True)
-    make_same_len(varr1, varr2)
-    return cmpop(varr1, varr2)
+    # Declaring a project(meson_version: '>=0.46') and then using features in
+    # 0.46.0 is valid, because (knowing the meson versioning scheme) '0.46.0' is
+    # the lowest version which satisfies the constraint '>=0.46'.
+    #
+    # But this will fail here, because the minimum version required by the
+    # version constraint ('0.46') is strictly less (in our version comparison)
+    # than the minimum version needed for the feature ('0.46.0').
+    #
+    # Map versions in the constraint of the form '0.46' to '0.46.0', to embed
+    # this knowledge of the meson versioning scheme.
+    condition = condition.strip()
+    if re.match(r'^\d+.\d+$', condition):
+        condition += '.0'
 
+    return cmpop(Version(minimum), Version(condition))
 
 def default_libdir():
     if is_debianlike():
@@ -539,6 +655,8 @@ def default_libdir():
                 return 'lib/' + archpath
         except Exception:
             pass
+    if is_freebsd():
+        return 'lib'
     if os.path.isdir('/usr/lib64') and not os.path.islink('/usr/lib64'):
         return 'lib64'
     return 'lib'
@@ -550,7 +668,7 @@ def default_libexecdir():
 def default_prefix():
     return 'c:/' if is_windows() else '/usr/local'
 
-def get_library_dirs():
+def get_library_dirs() -> List[str]:
     if is_windows():
         return ['C:/mingw/lib'] # Fixme
     if is_osx():
@@ -561,20 +679,24 @@ def get_library_dirs():
     # than /usr/lib. If you feel that this search order is
     # problematic, please raise the issue on the mailing list.
     unixdirs = ['/usr/local/lib', '/usr/lib', '/lib']
-    plat = subprocess.check_output(['uname', '-m']).decode().strip()
-    # This is a terrible hack. I admit it and I'm really sorry.
-    # I just don't know what the correct solution is.
-    if plat == 'i686':
+
+    if is_freebsd():
+        return unixdirs
+    # FIXME: this needs to be further genericized for aarch64 etc.
+    machine = platform.machine()
+    if machine in ('i386', 'i486', 'i586', 'i686'):
         plat = 'i386'
-    if plat.startswith('arm'):
+    elif machine.startswith('arm'):
         plat = 'arm'
-    unixdirs += glob('/usr/lib/' + plat + '*')
+
+    unixdirs += [str(x) for x in (Path('/usr/lib/') / plat).iterdir() if x.is_dir()]
     if os.path.exists('/usr/lib64'):
         unixdirs.append('/usr/lib64')
-    unixdirs += glob('/lib/' + plat + '*')
+
+    unixdirs += [str(x) for x in (Path('/lib/') / plat).iterdir() if x.is_dir()]
     if os.path.exists('/lib64'):
         unixdirs.append('/lib64')
-    unixdirs += glob('/lib/' + plat + '*')
+
     return unixdirs
 
 def has_path_sep(name, sep='/\\'):
@@ -643,7 +765,7 @@ def do_mesondefine(line, confdata):
 
 def do_conf_file(src, dst, confdata, format, encoding='utf-8'):
     try:
-        with open(src, encoding=encoding) as f:
+        with open(src, encoding=encoding, newline='') as f:
             data = f.readlines()
     except Exception as e:
         raise MesonException('Could not read input file %s: %s' % (src, str(e)))
@@ -677,7 +799,7 @@ def do_conf_file(src, dst, confdata, format, encoding='utf-8'):
         result.append(line)
     dst_tmp = dst + '~'
     try:
-        with open(dst_tmp, 'w', encoding=encoding) as f:
+        with open(dst_tmp, 'w', encoding=encoding, newline='') as f:
             f.writelines(result)
     except Exception as e:
         raise MesonException('Could not write output file %s: %s' % (dst, str(e)))
@@ -1030,6 +1152,22 @@ def windows_proof_rmtree(f):
     shutil.rmtree(f)
 
 
+def windows_proof_rm(fpath):
+    """Like windows_proof_rmtree, but for a single file."""
+    if os.path.isfile(fpath):
+        os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IWRITE | stat.S_IREAD)
+    delays = [0.1, 0.1, 0.2, 0.2, 0.2, 0.5, 0.5, 1, 1, 1, 1, 2]
+    for d in delays:
+        try:
+            os.unlink(fpath)
+            return
+        except FileNotFoundError:
+            return
+        except (OSError, PermissionError):
+            time.sleep(d)
+    os.unlink(fpath)
+
+
 def detect_subprojects(spdir_name, current_dir='', result=None):
     if result is None:
         result = {}
@@ -1063,7 +1201,7 @@ def substring_is_in_list(substr, strlist):
             return True
     return False
 
-class OrderedSet(collections.MutableSet):
+class OrderedSet(collections.abc.MutableSet):
     """A set that preserves the order in which items are added, by first
     insertion.
     """
@@ -1127,3 +1265,22 @@ class BuildDirLock:
         elif have_msvcrt:
             msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_UNLCK, 1)
         self.lockfile.close()
+
+def relpath(path, start):
+    # On Windows a relative path can't be evaluated for paths on two different
+    # drives (i.e. c:\foo and f:\bar).  The only thing left to do is to use the
+    # original absolute path.
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:
+        return path
+
+
+class LibType(Enum):
+
+    """Enumeration for library types."""
+
+    SHARED = 0
+    STATIC = 1
+    PREFER_SHARED = 2
+    PREFER_STATIC = 3

@@ -1,9 +1,27 @@
 project('library versions', 'c')
 
-some = shared_library('some', 'lib.c',
-  version : '1.2.3',
-  soversion : '0',
-  install : true)
+if run_command(find_program('require_pkgconfig.py'), check: true).stdout().strip() == 'yes'
+  required = true
+else
+  required = false
+endif
+
+zlib_dep = dependency('zlib', required: required)
+if zlib_dep.found()
+  some = shared_library('some', 'lib.c',
+    # duplicate the rpath again, in order
+    # to test Meson's RPATH deduplication
+    build_rpath : zlib_dep.get_pkgconfig_variable('libdir'),
+    dependencies : zlib_dep,
+    version : '1.2.3',
+    soversion : '7',
+    install : true)
+else
+  some = shared_library('some', 'lib.c',
+    version : '1.2.3',
+    soversion : '7',
+    install : true)
+endif
 
 noversion = shared_library('noversion', 'lib.c',
   install : true)
@@ -16,6 +34,21 @@ onlysoversion = shared_library('onlysoversion', 'lib.c',
   # Also test that int soversion is acceptable
   soversion : 5,
   install : true)
+
+shared_library('intver', 'lib.c',
+  darwin_versions : 2)
+
+shared_library('stringver', 'lib.c',
+  darwin_versions : '2.3')
+
+shared_library('stringlistver', 'lib.c',
+  darwin_versions : ['2.4'])
+
+shared_library('intstringver', 'lib.c',
+  darwin_versions : [1111, '2.5'])
+
+shared_library('stringlistvers', 'lib.c',
+  darwin_versions : ['2.6', '2.6.1'])
 
 # Hack to make the executables below depend on the shared libraries above
 # without actually adding them as `link_with` dependencies since we want to try

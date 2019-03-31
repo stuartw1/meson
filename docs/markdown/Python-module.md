@@ -45,7 +45,12 @@ Keyword arguments are the following:
   abort if no python installation can be found. If `required` is set to `false`,
   Meson will continue even if no python installation was found. You can
   then use the `.found()` method on the returned object to check
-  whether it was found or not.
+  whether it was found or not. Since *0.48.0*  the value of a
+  [`feature`](Build-options.md#features) option can also be passed to the
+  `required` keyword argument.
+- `disabler`: if `true` and no python installation can be found, return a
+  [disabler object](Reference-manual.md#disabler-object) instead of a not-found object.
+  *Since 0.49.0*
 
 **Returns**: a [python installation][`python_installation` object]
 
@@ -55,6 +60,17 @@ The `python_installation` object is an [external program], with several
 added methods.
 
 ### Methods
+
+#### `path()`
+
+```meson
+str py_installation.path()
+```
+
+*Added 0.50.0*
+
+Works like the path method of other `ExternalProgram` objects. Was not
+provided prior to 0.50.0 due to a bug.
 
 #### `extension_module()`
 
@@ -215,7 +231,7 @@ It exposes the same methods as its parent class.
 [shared_module]: Reference-manual.md#shared_module
 [external program]: Reference-manual.md#external-program-object
 [dependency]: Reference-manual.md#dependency
-[install_data]: Reference-manual.md#install-data
-[configure_file]: Reference-manual.md#configure-file
+[install_data]: Reference-manual.md#install_data
+[configure_file]: Reference-manual.md#configure_file
 [dependency object]: Reference-manual.md#dependency-object
 [buildtarget object]: Reference-manual.md#build-target-object

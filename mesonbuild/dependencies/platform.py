@@ -15,8 +15,6 @@
 # This file contains the detection logic for external dependencies that are
 # platform-specific (generally speaking).
 
-from .. import mesonlib
-
 from .base import ExternalDependency, DependencyException
 
 
@@ -29,12 +27,19 @@ class AppleFrameworks(ExternalDependency):
         if not modules:
             raise DependencyException("AppleFrameworks dependency requires at least one module.")
         self.frameworks = modules
-        # FIXME: Use self.clib_compiler to check if the frameworks are available
+        if not self.clib_compiler:
+            raise DependencyException('No C-like compilers are available, cannot find the framework')
+        self.is_found = True
         for f in self.frameworks:
-            self.link_args += ['-framework', f]
+            args = self.clib_compiler.find_framework(f, env, [])
+            if args is not None:
+                # No compile args are needed for system frameworks
+                self.link_args += args
+            else:
+                self.is_found = False
 
-    def found(self):
-        return mesonlib.is_osx()
+    def log_info(self):
+        return ', '.join(self.frameworks)
 
-    def get_version(self):
-        return 'unknown'
+    def log_tried(self):
+        return 'framework'

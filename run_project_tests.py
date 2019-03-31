@@ -36,11 +36,12 @@ import argparse
 import xml.etree.ElementTree as ET
 import time
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, CancelledError
 import re
 from run_tests import get_fake_options, run_configure, get_meson_script
 from run_tests import get_backend_commands, get_backend_args_for_dir, Backend
 from run_tests import ensure_backend_detects_changes
+from run_tests import guess_backend
 
 
 class BuildStep(Enum):
@@ -81,7 +82,7 @@ class AutoDeletedDir:
 
 failing_logs = []
 print_debug = 'MESON_PRINT_TEST_OUTPUT' in os.environ
-under_ci = not {'TRAVIS', 'APPVEYOR'}.isdisjoint(os.environ)
+under_ci = 'CI' in os.environ
 do_debug = under_ci or print_debug
 no_meson_log_msg = 'No meson-log.txt found.'
 
@@ -101,26 +102,7 @@ signal.signal(signal.SIGTERM, stop_handler)
 def setup_commands(optbackend):
     global do_debug, backend, backend_flags
     global compile_commands, clean_commands, test_commands, install_commands, uninstall_commands
-    backend = optbackend
-    msbuild_exe = shutil.which('msbuild')
-    # Auto-detect backend if unspecified
-    if backend is None:
-        if msbuild_exe is not None:
-            backend = 'vs' # Meson will auto-detect VS version to use
-        else:
-            backend = 'ninja'
-    # Set backend arguments for Meson
-    if backend.startswith('vs'):
-        backend_flags = ['--backend=' + backend]
-        backend = Backend.vs
-    elif backend == 'xcode':
-        backend_flags = ['--backend=xcode']
-        backend = Backend.xcode
-    elif backend == 'ninja':
-        backend_flags = ['--backend=ninja']
-        backend = Backend.ninja
-    else:
-        raise RuntimeError('Unknown backend: {!r}'.format(backend))
+    backend, backend_flags = guess_backend(optbackend, shutil.which('msbuild'))
     compile_commands, clean_commands, test_commands, install_commands, \
         uninstall_commands = get_backend_commands(backend, do_debug)
 
@@ -136,10 +118,25 @@ def get_relative_files_list_from_dir(fromdir):
     return paths
 
 def platform_fix_name(fname, compiler, env):
+    # canonicalize compiler
+    if compiler == 'clang-cl':
+        canonical_compiler = 'msvc'
+    else:
+        canonical_compiler = compiler
+
     if '?lib' in fname:
-        if mesonlib.for_cygwin(env.is_cross_build(), env):
+        if mesonlib.for_windows(env.is_cross_build(), env) and canonical_compiler == 'msvc':
+            fname = re.sub(r'lib/\?lib(.*)\.', r'bin/\1.', fname)
+            fname = re.sub(r'/\?lib/', r'/bin/', fname)
+        elif mesonlib.for_windows(env.is_cross_build(), env):
+            fname = re.sub(r'lib/\?lib(.*)\.', r'bin/lib\1.', fname)
+            fname = re.sub(r'\?lib(.*)\.dll$', r'lib\1.dll', fname)
+            fname = re.sub(r'/\?lib/', r'/bin/', fname)
+        elif mesonlib.for_cygwin(env.is_cross_build(), env):
             fname = re.sub(r'lib/\?lib(.*)\.so$', r'bin/cyg\1.dll', fname)
+            fname = re.sub(r'lib/\?lib(.*)\.', r'bin/cyg\1.', fname)
             fname = re.sub(r'\?lib(.*)\.dll$', r'cyg\1.dll', fname)
+            fname = re.sub(r'/\?lib/', r'/bin/', fname)
         else:
             fname = re.sub(r'\?lib', 'lib', fname)
 
@@ -150,12 +147,47 @@ def platform_fix_name(fname, compiler, env):
 
     if fname.startswith('?msvc:'):
         fname = fname[6:]
-        if compiler != 'cl':
+        if canonical_compiler != 'msvc':
             return None
 
     if fname.startswith('?gcc:'):
         fname = fname[5:]
-        if compiler == 'cl':
+        if canonical_compiler == 'msvc':
+            return None
+
+    if fname.startswith('?cygwin:'):
+        fname = fname[8:]
+        if not mesonlib.for_cygwin(env.is_cross_build(), env):
+            return None
+
+    if fname.endswith('?so'):
+        if mesonlib.for_windows(env.is_cross_build(), env) and canonical_compiler == 'msvc':
+            fname = re.sub(r'lib/([^/]*)\?so$', r'bin/\1.dll', fname)
+            fname = re.sub(r'/(?:lib|)([^/]*?)\?so$', r'/\1.dll', fname)
+            return fname
+        elif mesonlib.for_windows(env.is_cross_build(), env):
+            fname = re.sub(r'lib/([^/]*)\?so$', r'bin/\1.dll', fname)
+            fname = re.sub(r'/([^/]*?)\?so$', r'/\1.dll', fname)
+            return fname
+        elif mesonlib.for_cygwin(env.is_cross_build(), env):
+            fname = re.sub(r'lib/([^/]*)\?so$', r'bin/\1.dll', fname)
+            fname = re.sub(r'/lib([^/]*?)\?so$', r'/cyg\1.dll', fname)
+            fname = re.sub(r'/([^/]*?)\?so$', r'/\1.dll', fname)
+            return fname
+        elif mesonlib.for_darwin(env.is_cross_build(), env):
+            return fname[:-3] + '.dylib'
+        else:
+            return fname[:-3] + '.so'
+
+    if fname.endswith('?implib') or fname.endswith('?implibempty'):
+        if mesonlib.for_windows(env.is_cross_build(), env) and canonical_compiler == 'msvc':
+            # only MSVC doesn't generate empty implibs
+            if fname.endswith('?implibempty') and compiler == 'msvc':
+                return None
+            return re.sub(r'/(?:lib|)([^/]*?)\?implib(?:empty|)$', r'/\1.lib', fname)
+        elif mesonlib.for_windows(env.is_cross_build(), env) or mesonlib.for_cygwin(env.is_cross_build(), env):
+            return re.sub(r'\?implib(?:empty|)$', r'.dll.a', fname)
+        else:
             return None
 
     return fname
@@ -183,17 +215,11 @@ def validate_install(srcdir, installdir, compiler, env):
             expected[fname] = True
     for (fname, found) in expected.items():
         if not found:
-            # Ignore missing PDB files if we aren't using cl
-            if fname.endswith('.pdb') and compiler != 'cl':
-                continue
             ret_msg += 'Expected file {0} missing.\n'.format(fname)
     # Check if there are any unexpected files
     found = get_relative_files_list_from_dir(installdir)
     for fname in found:
-        # Windows-specific tests check for the existence of installed PDB
-        # files, but common tests do not, for obvious reasons. Ignore any
-        # extra PDB files found.
-        if fname not in expected and not fname.endswith('.pdb') and compiler == 'cl':
+        if fname not in expected:
             ret_msg += 'Extra file {0} found.\n'.format(fname)
     return ret_msg
 
@@ -248,12 +274,12 @@ def run_test_inprocess(testdir):
     os.chdir(testdir)
     test_log_fname = Path('meson-logs', 'testlog.txt')
     try:
-        returncode_test = mtest.run(['--no-rebuild'])
+        returncode_test = mtest.run_with_args(['--no-rebuild'])
         if test_log_fname.exists():
             test_log = test_log_fname.open(errors='ignore').read()
         else:
             test_log = ''
-        returncode_benchmark = mtest.run(['--no-rebuild', '--benchmark', '--logbase', 'benchmarklog'])
+        returncode_benchmark = mtest.run_with_args(['--no-rebuild', '--benchmark', '--logbase', 'benchmarklog'])
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
@@ -319,6 +345,12 @@ def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backen
     if pass_libdir_to_test(testdir):
         gen_args += ['--libdir', 'lib']
     gen_args += [testdir, test_build_dir] + flags + test_args + extra_args
+    nativefile = os.path.join(testdir, 'nativefile.ini')
+    if os.path.exists(nativefile):
+        gen_args.extend(['--native-file', nativefile])
+    crossfile = os.path.join(testdir, 'crossfile.ini')
+    if os.path.exists(crossfile):
+        gen_args.extend(['--cross-file', crossfile])
     (returncode, stdo, stde) = run_configure(gen_args)
     try:
         logfile = Path(test_build_dir, 'meson-logs', 'meson-log.txt')
@@ -394,6 +426,7 @@ def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backen
 
 def gather_tests(testdir: Path):
     tests = [t.name for t in testdir.glob('*')]
+    tests = [t for t in tests if not t.startswith('.')] # Filter non-tests files (dot files, etc)
     testlist = [(int(t.split()[0]), t) for t in tests]
     testlist.sort()
     tests = [testdir / t[1] for t in testlist]
@@ -407,6 +440,14 @@ def have_d_compiler():
     elif shutil.which("gdc"):
         return True
     elif shutil.which("dmd"):
+        # The Windows installer sometimes produces a DMD install
+        # that exists but segfaults every time the compiler is run.
+        # Don't know why. Don't know how to fix. Skip in this case.
+        cp = subprocess.run(['dmd', '--version'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+        if cp.stdout == b'':
+            return False
         return True
     return False
 
@@ -457,6 +498,10 @@ def skippable(suite, test):
     if test.endswith('10 gtk-doc'):
         return True
 
+    # NetCDF is not in the CI image
+    if test.endswith('netcdf'):
+        return True
+
     # No frameworks test should be skipped on linux CI, as we expect all
     # prerequisites to be installed
     if mesonlib.is_linux():
@@ -467,6 +512,10 @@ def skippable(suite, test):
     if test.endswith('1 boost'):
         if mesonlib.is_windows():
             return 'BOOST_ROOT' not in os.environ
+        return False
+
+    # Qt is provided on macOS by Homebrew
+    if test.endswith('4 qt') and mesonlib.is_osx():
         return False
 
     # Other framework tests are allowed to be skipped on other platforms
@@ -498,9 +547,11 @@ def detect_tests_to_run():
     # Name, subdirectory, skip condition.
     all_tests = [
         ('common', 'common', False),
+        ('warning-meson', 'warning', False),
         ('failing-meson', 'failing', False),
         ('failing-build', 'failing build', False),
         ('failing-test',  'failing test', False),
+        ('kconfig', 'kconfig', False),
 
         ('platform-osx', 'osx', not mesonlib.is_osx()),
         ('platform-windows', 'windows', not mesonlib.is_windows() and not mesonlib.is_cygwin()),
@@ -510,12 +561,14 @@ def detect_tests_to_run():
         ('C#', 'csharp', skip_csharp(backend)),
         ('vala', 'vala', backend is not Backend.ninja or not shutil.which('valac')),
         ('rust', 'rust', backend is not Backend.ninja or not shutil.which('rustc')),
-        ('d', 'd', backend is not Backend.ninja or not have_d_compiler()),
+        ('d', 'd', backend is not Backend.ninja or not have_d_compiler() or mesonlib.is_windows()),
         ('objective c', 'objc', backend not in (Backend.ninja, Backend.xcode) or mesonlib.is_windows() or not have_objc_compiler()),
         ('objective c++', 'objcpp', backend not in (Backend.ninja, Backend.xcode) or mesonlib.is_windows() or not have_objcpp_compiler()),
         ('fortran', 'fortran', backend is not Backend.ninja or not shutil.which('gfortran')),
         ('swift', 'swift', backend not in (Backend.ninja, Backend.xcode) or not shutil.which('swiftc')),
+        ('cuda', 'cuda', backend not in (Backend.ninja, Backend.xcode) or not shutil.which('nvcc')),
         ('python3', 'python3', backend is not Backend.ninja),
+        ('python', 'python', backend is not Backend.ninja),
         ('fpga', 'fpga', shutil.which('yosys') is None),
         ('frameworks', 'frameworks', False),
         ('nasm', 'nasm', False),
@@ -523,14 +576,14 @@ def detect_tests_to_run():
     gathered_tests = [(name, gather_tests(Path('test cases', subdir)), skip) for name, subdir, skip in all_tests]
     return gathered_tests
 
-def run_tests(all_tests, log_name_base, extra_args):
+def run_tests(all_tests, log_name_base, failfast, extra_args):
     global logfile
     txtname = log_name_base + '.txt'
     with open(txtname, 'w', encoding='utf-8', errors='ignore') as lf:
         logfile = lf
-        return _run_tests(all_tests, log_name_base, extra_args)
+        return _run_tests(all_tests, log_name_base, failfast, extra_args)
 
-def _run_tests(all_tests, log_name_base, extra_args):
+def _run_tests(all_tests, log_name_base, failfast, extra_args):
     global stop, executor, futures, system_compiler
     xmlname = log_name_base + '.xml'
     junit_root = ET.Element('testsuites')
@@ -572,13 +625,21 @@ def _run_tests(all_tests, log_name_base, extra_args):
             (testnum, testbase) = t.name.split(' ', 1)
             testname = '%.3d %s' % (int(testnum), testbase)
             should_fail = False
+            suite_args = []
             if name.startswith('failing'):
                 should_fail = name.split('failing-')[1]
-            result = executor.submit(run_test, skipped, t.as_posix(), extra_args, system_compiler, backend, backend_flags, commands, should_fail)
+            if name.startswith('warning'):
+                suite_args = ['--fatal-meson-warnings']
+                should_fail = name.split('warning-')[1]
+            result = executor.submit(run_test, skipped, t.as_posix(), extra_args + suite_args,
+                                     system_compiler, backend, backend_flags, commands, should_fail)
             futures.append((testname, t, result))
         for (testname, t, result) in futures:
             sys.stdout.flush()
-            result = result.result()
+            try:
+                result = result.result()
+            except CancelledError:
+                continue
             if (result is None) or (('MESON_SKIP_TEST' in result.stdo) and (skippable(name, t.as_posix()))):
                 print(yellow('Skipping:'), t.as_posix())
                 current_test = ET.SubElement(current_suite, 'testcase', {'name': testname,
@@ -599,6 +660,10 @@ def _run_tests(all_tests, log_name_base, extra_args):
                     else:
                         failing_logs.append(result.stdo)
                     failing_logs.append(result.stde)
+                    if failfast:
+                        print("Cancelling the rest of the tests")
+                        for (_, _, res) in futures:
+                            res.cancel()
                 else:
                     print('Succeeded test%s: %s' % (without_install, t.as_posix()))
                     passing_tests += 1
@@ -616,6 +681,10 @@ def _run_tests(all_tests, log_name_base, extra_args):
                 stdoel.text = result.stdo
                 stdeel = ET.SubElement(current_test, 'system-err')
                 stdeel.text = result.stde
+
+        if failfast and failing_tests > 0:
+            break
+
     print("\nTotal configuration time: %.2fs" % conf_time)
     print("Total build time: %.2fs" % build_time)
     print("Total test time: %.2fs" % test_time)
@@ -694,14 +763,14 @@ def check_meson_commands_work():
 
 def detect_system_compiler():
     global system_compiler
-    if shutil.which('cl'):
-        system_compiler = 'cl'
-    elif shutil.which('cc'):
-        system_compiler = 'cc'
-    elif shutil.which('gcc'):
-        system_compiler = 'gcc'
-    else:
-        raise RuntimeError("Could not find C compiler.")
+
+    with AutoDeletedDir(tempfile.mkdtemp(prefix='b ', dir='.')) as build_dir:
+        env = environment.Environment(None, build_dir, get_fake_options('/'))
+        try:
+            comp = env.detect_c_compiler(env.is_cross_build())
+        except:
+            raise RuntimeError("Could not find C compiler.")
+        system_compiler = comp.get_id()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run the test suite of Meson.")
@@ -709,6 +778,8 @@ if __name__ == '__main__':
                         help='arguments that are passed directly to Meson (remember to have -- before these).')
     parser.add_argument('--backend', default=None, dest='backend',
                         choices=backendlist)
+    parser.add_argument('--failfast', action='store_true',
+                        help='Stop running if test case fails')
     options = parser.parse_args()
     setup_commands(options.backend)
 
@@ -720,7 +791,7 @@ if __name__ == '__main__':
     check_meson_commands_work()
     try:
         all_tests = detect_tests_to_run()
-        (passing_tests, failing_tests, skipped_tests) = run_tests(all_tests, 'meson-test-run', options.extra_args)
+        (passing_tests, failing_tests, skipped_tests) = run_tests(all_tests, 'meson-test-run', options.failfast, options.extra_args)
     except StopException:
         pass
     print('\nTotal passed tests:', green(str(passing_tests)))

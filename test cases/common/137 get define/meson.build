@@ -32,6 +32,12 @@ foreach lang : ['c', 'cpp']
   elif host_system == 'netbsd'
     d = cc.get_define('__NetBSD__')
     assert(d == '1', '__NetBSD__ value is @0@ instead of 1'.format(d))
+  elif host_system == 'openbsd'
+    d = cc.get_define('__OpenBSD__')
+    assert(d == '1', '__OpenBSD__ value is @0@ instead of 1'.format(d))
+  elif host_system == 'gnu'
+    d = cc.get_define('__GNU__')
+    assert(d == '1', '__GNU__ value is @0@ instead of 1'.format(d))
   else
     error('Please report a bug and help us improve support for this platform')
   endif
@@ -41,10 +47,10 @@ foreach lang : ['c', 'cpp']
     # found in the compiler's default search path, GCC inserts an extra comment
     # between the delimiter and the define which causes a parsing error.
     # https://github.com/mesonbuild/meson/issues/1726
-    if host_machine.system() == 'netbsd'
-      # NetBSD's zlib doesn't is version 1.2.3 and doesn't have a
-      # ZLIB_VER_MAJOR, but it does have a ZLIB_VERSION (which is a string), so
-      # check the first non-quote character of that.
+    if host_machine.system() == 'netbsd' or host_machine.system() == 'openbsd'
+      # NetBSD and OpenBSD's zlib don't have a ZLIB_VER_MAJOR, but they do have
+      # a ZLIB_VERSION (which is a string), so check the first non-quote
+      # character of that.
       ver = cc.get_define('ZLIB_VERSION', prefix : '#include <zlib.h>')[1]
       assert(ver == '1', 'ZLIB_VERSION (major) value is "@0@" instead of "1"'.format(ver))
     else
@@ -64,15 +70,9 @@ foreach lang : ['c', 'cpp']
 
   run_1665_test = false
   if meson.is_cross_build()
-    # Can't use an empty array as a fallback here because of
-    # https://github.com/mesonbuild/meson/issues/1481
-    lang_args = meson.get_cross_property(lang + '_args', [])
-    if lang_args.length() != 0
-      foreach lang_arg : lang_args
-        if lang_arg.contains('MESON_TEST_ISSUE_1665')
-          run_1665_test = true
-        endif
-      endforeach
+    lang_arg = meson.get_cross_property(lang + '_args', '')
+    if lang_arg == '-DMESON_TEST_ISSUE_1665=1'
+      run_1665_test = true
     endif
   endif
 

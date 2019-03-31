@@ -44,6 +44,14 @@ PRESET_ARGS = {
         '--flag=g_string_append_printf:2:c-format',
         '--flag=g_error_new:3:c-format',
         '--flag=g_set_error:4:c-format',
+        '--flag=g_markup_printf_escaped:1:c-format',
+        '--flag=g_log:3:c-format',
+        '--flag=g_print:1:c-format',
+        '--flag=g_printerr:1:c-format',
+        '--flag=g_printf:1:c-format',
+        '--flag=g_fprintf:2:c-format',
+        '--flag=g_sprintf:2:c-format',
+        '--flag=g_snprintf:3:c-format',
     ]
 }
 
@@ -56,8 +64,7 @@ class I18nModule(ExtensionModule):
         return [path.join(src_dir, d) for d in dirs]
 
     @FeatureNew('i18n.merge_file', '0.37.0')
-    @permittedKwargs({'languages', 'data_dirs', 'preset', 'args', 'po_dir', 'type',
-                      'input', 'output', 'install', 'install_dir'})
+    @permittedKwargs(build.CustomTarget.known_kwargs | {'data_dirs', 'po_dir', 'type'})
     def merge_file(self, state, args, kwargs):
         podir = kwargs.pop('po_dir', None)
         if not podir:
@@ -80,11 +87,30 @@ class I18nModule(ExtensionModule):
             command.append(datadirs)
 
         kwargs['command'] = command
-        ct = build.CustomTarget(kwargs['output'] + '_merge', state.subdir, state.subproject, kwargs)
+
+        inputfile = kwargs['input']
+        if hasattr(inputfile, 'held_object'):
+            ct = build.CustomTarget(kwargs['output'] + '_merge', state.subdir, state.subproject, kwargs)
+        else:
+            if isinstance(inputfile, list):
+                # We only use this input file to create a name of the custom target.
+                # Thus we can ignore the other entries.
+                inputfile = inputfile[0]
+            if isinstance(inputfile, str):
+                inputfile = mesonlib.File.from_source_file(state.environment.source_dir,
+                                                           state.subdir, inputfile)
+            output = kwargs['output']
+            ifile_abs = inputfile.absolute_path(state.environment.source_dir,
+                                                state.environment.build_dir)
+            values = mesonlib.get_filenames_templates_dict([ifile_abs], None)
+            outputs = mesonlib.substitute_values([output], values)
+            output = outputs[0]
+            ct = build.CustomTarget(output + '_' + state.subdir.replace('/', '@').replace('\\', '@') + '_merge', state.subdir, state.subproject, kwargs)
         return ModuleReturnValue(ct, [ct])
 
     @FeatureNewKwargs('i18n.gettext', '0.37.0', ['preset'])
-    @permittedKwargs({'po_dir', 'data_dirs', 'type', 'languages', 'args', 'preset', 'install'})
+    @FeatureNewKwargs('i18n.gettext', '0.50.0', ['install_dir'])
+    @permittedKwargs({'po_dir', 'data_dirs', 'type', 'languages', 'args', 'preset', 'install', 'install_dir'})
     def gettext(self, state, args, kwargs):
         if len(args) != 1:
             raise coredata.MesonException('Gettext requires one positional argument (package name).')
@@ -133,10 +159,11 @@ class I18nModule(ExtensionModule):
 
         install = kwargs.get('install', True)
         if install:
+            install_dir = kwargs.get('install_dir', state.environment.coredata.get_builtin_option('localedir'))
             script = state.environment.get_build_command()
             args = ['--internal', 'gettext', 'install',
                     '--subdir=' + state.subdir,
-                    '--localedir=' + state.environment.coredata.get_builtin_option('localedir'),
+                    '--localedir=' + install_dir,
                     pkg_arg]
             if lang_arg:
                 args.append(lang_arg)

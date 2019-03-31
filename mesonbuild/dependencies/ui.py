@@ -14,7 +14,6 @@
 
 # This file contains the detection logic for external dependencies that
 # are UI-related.
-
 import functools
 import os
 import re
@@ -24,13 +23,13 @@ from collections import OrderedDict
 from .. import mlog
 from .. import mesonlib
 from ..mesonlib import (
-    MesonException, Popen_safe, extract_as_list, for_windows, for_cygwin,
+    MesonException, Popen_safe, extract_as_list, for_windows,
     version_compare_many
 )
 from ..environment import detect_cpu
 
 from .base import DependencyException, DependencyMethods
-from .base import ExternalDependency, ExternalProgram
+from .base import ExternalDependency, ExternalProgram, NonExistingExternalProgram
 from .base import ExtraFrameworkDependency, PkgConfigDependency
 from .base import ConfigToolDependency
 
@@ -39,19 +38,17 @@ class GLDependency(ExternalDependency):
     def __init__(self, environment, kwargs):
         super().__init__('gl', environment, None, kwargs)
 
-        if mesonlib.is_osx():
+        if mesonlib.for_darwin(self.want_cross, self.env):
             self.is_found = True
             # FIXME: Use AppleFrameworks dependency
             self.link_args = ['-framework', 'OpenGL']
             # FIXME: Detect version using self.clib_compiler
-            self.version = '1'
             return
-        if mesonlib.is_windows():
+        if mesonlib.for_windows(self.want_cross, self.env):
             self.is_found = True
             # FIXME: Use self.clib_compiler.find_library()
             self.link_args = ['-lopengl32']
             # FIXME: Detect version using self.clib_compiler
-            self.version = '1'
             return
 
     @classmethod
@@ -63,7 +60,7 @@ class GLDependency(ExternalDependency):
             candidates.append(functools.partial(PkgConfigDependency, 'gl', environment, kwargs))
 
         if DependencyMethods.SYSTEM in methods:
-            candidates.append(functools.partial(GLDependency), environment, kwargs)
+            candidates.append(functools.partial(GLDependency, environment, kwargs))
 
         return candidates
 
@@ -74,6 +71,8 @@ class GLDependency(ExternalDependency):
         else:
             return [DependencyMethods.PKGCONFIG]
 
+    def log_tried(self):
+        return 'system'
 
 class GnuStepDependency(ConfigToolDependency):
 
@@ -92,9 +91,9 @@ class GnuStepDependency(ConfigToolDependency):
             'link_args'))
 
     def find_config(self, versions=None):
-        tool = self.tools[0]
+        tool = [self.tools[0]]
         try:
-            p, out = Popen_safe([tool, '--help'])[:2]
+            p, out = Popen_safe(tool + ['--help'])[:2]
         except (FileNotFoundError, PermissionError):
             return (None, None)
         if p.returncode != 0:
@@ -178,13 +177,13 @@ def _qt_get_private_includes(mod_inc_dir, module, mod_version):
             os.path.join(private_dir, 'Qt' + module))
 
 class QtExtraFrameworkDependency(ExtraFrameworkDependency):
-    def __init__(self, name, required, path, env, lang, kwargs):
-        super().__init__(name, required, path, env, lang, kwargs)
+    def __init__(self, name, required, paths, env, lang, kwargs):
+        super().__init__(name, required, paths, env, lang, kwargs)
         self.mod_name = name[2:]
 
     def get_compile_args(self, with_private_headers=False, qt_version="0"):
         if self.found():
-            mod_inc_dir = os.path.join(self.path, self.name, 'Headers')
+            mod_inc_dir = os.path.join(self.framework_path, 'Headers')
             args = ['-I' + mod_inc_dir]
             if with_private_headers:
                 args += ['-I' + dirname for dirname in _qt_get_private_includes(mod_inc_dir, self.mod_name, qt_version)]
@@ -209,13 +208,19 @@ class QtBaseDependency(ExternalDependency):
             raise DependencyException('No ' + self.qtname + '  modules specified.')
         self.from_text = 'pkg-config'
 
+        self.qtmain = kwargs.get('main', False)
+        if not isinstance(self.qtmain, bool):
+            raise DependencyException('"main" argument must be a boolean')
+
         # Keep track of the detection methods used, for logging purposes.
         methods = []
         # Prefer pkg-config, then fallback to `qmake -query`
         if DependencyMethods.PKGCONFIG in self.methods:
+            mlog.debug('Trying to find qt with pkg-config')
             self._pkgconfig_detect(mods, kwargs)
             methods.append('pkgconfig')
         if not self.is_found and DependencyMethods.QMAKE in self.methods:
+            mlog.debug('Trying to find qt with qmake')
             self.from_text = self._qmake_detect(mods, kwargs)
             methods.append('qmake-' + self.name)
             methods.append('qmake')
@@ -224,23 +229,50 @@ class QtBaseDependency(ExternalDependency):
             self.compile_args = []
             self.link_args = []
             self.from_text = mlog.format_list(methods)
-            self.version = 'none'
+            self.version = None
 
-    def compilers_detect(self):
+    def compilers_detect(self, interp_obj):
         "Detect Qt (4 or 5) moc, uic, rcc in the specified bindir or in PATH"
-        if self.bindir or for_windows(self.env.is_cross_build(), self.env):
-            moc = ExternalProgram(os.path.join(self.bindir, 'moc'), silent=True)
-            uic = ExternalProgram(os.path.join(self.bindir, 'uic'), silent=True)
-            rcc = ExternalProgram(os.path.join(self.bindir, 'rcc'), silent=True)
-            lrelease = ExternalProgram(os.path.join(self.bindir, 'lrelease'), silent=True)
-        else:
-            # We don't accept unsuffixed 'moc', 'uic', and 'rcc' because they
-            # are sometimes older, or newer versions.
-            moc = ExternalProgram('moc-' + self.name, silent=True)
-            uic = ExternalProgram('uic-' + self.name, silent=True)
-            rcc = ExternalProgram('rcc-' + self.name, silent=True)
-            lrelease = ExternalProgram('lrelease-' + self.name, silent=True)
-        return moc, uic, rcc, lrelease
+        # It is important that this list does not change order as the order of
+        # the returned ExternalPrograms will change as well
+        bins = ['moc', 'uic', 'rcc', 'lrelease']
+        found = {b: NonExistingExternalProgram(name='{}-{}'.format(b, self.name))
+                 for b in bins}
+
+        def gen_bins():
+            for b in bins:
+                if self.bindir:
+                    yield os.path.join(self.bindir, b), b, False
+                yield '{}-{}'.format(b, self.name), b, False
+                yield b, b, self.required if b != 'lrelease' else False
+
+        for b, name, required in gen_bins():
+            if found[name].found():
+                continue
+
+            # prefer the <tool>-qt<version> of the tool to the plain one, as we
+            # don't know what the unsuffixed one points to without calling it.
+            p = interp_obj.find_program_impl([b], silent=True, required=required).held_object
+            if not p.found():
+                continue
+
+            if name == 'lrelease':
+                arg = ['-version']
+            elif mesonlib.version_compare(self.version, '>= 5'):
+                arg = ['--version']
+            else:
+                arg = ['-v']
+
+            # Ensure that the version of qt and each tool are the same
+            _, out, err = mesonlib.Popen_safe(p.get_command() + arg)
+            if b.startswith('lrelease') or not self.version.startswith('4'):
+                care = out
+            else:
+                care = err
+            if mesonlib.version_compare(self.version, '== {}'.format(care.split(' ')[-1])):
+                found[name] = p
+
+        return tuple([found[b] for b in bins])
 
     def _pkgconfig_detect(self, mods, kwargs):
         # We set the value of required to False so that we can try the
@@ -257,21 +289,44 @@ class QtBaseDependency(ExternalDependency):
             self.compile_args += m.get_compile_args()
             if self.private_headers:
                 qt_inc_dir = m.get_pkgconfig_variable('includedir', dict())
-                mod_private_inc = _qt_get_private_includes(os.path.join(qt_inc_dir, 'Qt' + m_name), m_name, m.version)
+                mod_private_dir = os.path.join(qt_inc_dir, 'Qt' + m_name)
+                if not os.path.isdir(mod_private_dir):
+                    # At least some versions of homebrew don't seem to set this
+                    # up correctly. /usr/local/opt/qt/include/Qt + m_name is a
+                    # symlink to /usr/local/opt/qt/include, but the pkg-config
+                    # file points to /usr/local/Cellar/qt/x.y.z/Headers/, and
+                    # the Qt + m_name there is not a symlink, it's a file
+                    mod_private_dir = qt_inc_dir
+                mod_private_inc = _qt_get_private_includes(mod_private_dir, m_name, m.version)
                 for dir in mod_private_inc:
                     self.compile_args.append('-I' + dir)
             self.link_args += m.get_link_args()
-        self.is_found = True
-        self.version = m.version
-        self.pcdep = list(modules.values())
-        # Try to detect moc, uic, rcc
+
         if 'Core' in modules:
             core = modules['Core']
         else:
             corekwargs = {'required': 'false', 'silent': 'true'}
             core = PkgConfigDependency(self.qtpkgname + 'Core', self.env, corekwargs,
                                        language=self.language)
-            self.pcdep.append(core)
+            modules['Core'] = core
+
+        if for_windows(self.env.is_cross_build(), self.env) and self.qtmain:
+            # Check if we link with debug binaries
+            debug_lib_name = self.qtpkgname + 'Core' + self._get_modules_lib_suffix(True)
+            is_debug = False
+            for arg in core.get_link_args():
+                if arg == '-l%s' % debug_lib_name or arg.endswith('%s.lib' % debug_lib_name) or arg.endswith('%s.a' % debug_lib_name):
+                    is_debug = True
+                    break
+            libdir = core.get_pkgconfig_variable('libdir', {})
+            if not self._link_with_qtmain(is_debug, libdir):
+                self.is_found = False
+                return
+
+        self.is_found = True
+        self.version = m.version
+        self.pcdep = list(modules.values())
+        # Try to detect moc, uic, rcc
         # Used by self.compilers_detect()
         self.bindir = self.get_pkgconfig_host_bins(core)
         if not self.bindir:
@@ -280,16 +335,18 @@ class QtBaseDependency(ExternalDependency):
             if prefix:
                 self.bindir = os.path.join(prefix, 'bin')
 
-    def _find_qmake(self, qmake):
-        # Even when cross-compiling, if a cross-info qmake is not specified, we
-        # fallback to using the qmake in PATH because that's what we used to do
-        if self.env.is_cross_build() and 'qmake' in self.env.cross_info.config['binaries']:
-            return ExternalProgram.from_cross_info(self.env.cross_info, 'qmake')
-        return ExternalProgram(qmake, silent=True)
-
     def _qmake_detect(self, mods, kwargs):
         for qmake in ('qmake-' + self.name, 'qmake'):
-            self.qmake = self._find_qmake(qmake)
+            self.qmake = ExternalProgram.from_bin_list(
+                self.env.binaries.host, qmake)
+            if not self.qmake.found():
+                # Even when cross-compiling, if a cross-info qmake is not
+                # specified, we fallback to using the qmake in PATH because
+                # that's what we used to do
+                self.qmake = ExternalProgram.from_bin_list(
+                    self.env.binaries.build, qmake)
+            if not self.qmake.found():
+                self.qmake = ExternalProgram(qmake, silent=True)
             if not self.qmake.found():
                 continue
             # Check that the qmake is for qt5
@@ -305,9 +362,9 @@ class QtBaseDependency(ExternalDependency):
             # Didn't find qmake :(
             self.is_found = False
             return
-        self.version = re.search(self.qtver + '(\.\d+)+', stdo).group(0)
+        self.version = re.search(self.qtver + r'(\.\d+)+', stdo).group(0)
         # Query library path, header path, and binary path
-        mlog.log("Found qmake:", mlog.bold(self.qmake.get_name()), '(%s)' % self.version)
+        mlog.log("Found qmake:", mlog.bold(self.qmake.get_path()), '(%s)' % self.version)
         stdo = Popen_safe(self.qmake.get_command() + ['-query'])[1]
         qvars = {}
         for line in stdo.split('\n'):
@@ -316,47 +373,69 @@ class QtBaseDependency(ExternalDependency):
                 continue
             (k, v) = tuple(line.split(':', 1))
             qvars[k] = v
-        if mesonlib.is_osx():
+        # Qt on macOS uses a framework, but Qt for iOS does not
+        if self.env.machines.host.is_darwin() and 'ios' not in qvars['QMAKE_XSPEC']:
+            mlog.debug("Building for macOS, looking for framework")
             self._framework_detect(qvars, mods, kwargs)
             return qmake
         incdir = qvars['QT_INSTALL_HEADERS']
         self.compile_args.append('-I' + incdir)
         libdir = qvars['QT_INSTALL_LIBS']
-        if for_cygwin(self.env.is_cross_build(), self.env):
-            shlibext = '.dll.a'
-        else:
-            shlibext = '.so'
         # Used by self.compilers_detect()
         self.bindir = self.get_qmake_host_bins(qvars)
         self.is_found = True
+
+        is_debug = self.env.coredata.get_builtin_option('buildtype') == 'debug'
+        modules_lib_suffix = self._get_modules_lib_suffix(is_debug)
+
         for module in mods:
             mincdir = os.path.join(incdir, 'Qt' + module)
             self.compile_args.append('-I' + mincdir)
+
+            if module == 'QuickTest':
+                define_base = 'QMLTEST'
+            elif module == 'Test':
+                define_base = 'TESTLIB'
+            else:
+                define_base = module.upper()
+            self.compile_args.append('-DQT_%s_LIB' % define_base)
+
             if self.private_headers:
                 priv_inc = self.get_private_includes(mincdir, module)
                 for dir in priv_inc:
                     self.compile_args.append('-I' + dir)
-            if for_windows(self.env.is_cross_build(), self.env):
-                is_debug = self.env.coredata.get_builtin_option('buildtype') == 'debug'
-                dbg = 'd' if is_debug else ''
-                if self.qtver == '4':
-                    base_name = 'Qt' + module + dbg + '4'
-                else:
-                    base_name = 'Qt5' + module + dbg
-                libfile = os.path.join(libdir, base_name + '.lib')
-                if not os.path.isfile(libfile):
-                    # MinGW can link directly to .dll
-                    libfile = os.path.join(self.bindir, base_name + '.dll')
-                    if not os.path.isfile(libfile):
-                        self.is_found = False
-                        break
+            libfile = self.clib_compiler.find_library(self.qtpkgname + module + modules_lib_suffix,
+                                                      self.env,
+                                                      libdir)
+            if libfile:
+                libfile = libfile[0]
             else:
-                libfile = os.path.join(libdir, 'lib{}{}{}'.format(self.qtpkgname, module, shlibext))
-                if not os.path.isfile(libfile):
-                    self.is_found = False
-                    break
+                self.is_found = False
+                break
             self.link_args.append(libfile)
+
+        if for_windows(self.env.is_cross_build(), self.env) and self.qtmain:
+            if not self._link_with_qtmain(is_debug, libdir):
+                self.is_found = False
+
         return qmake
+
+    def _get_modules_lib_suffix(self, is_debug):
+        suffix = ''
+        if for_windows(self.env.is_cross_build(), self.env):
+            if is_debug:
+                suffix += 'd'
+            if self.qtver == '4':
+                suffix += '4'
+        return suffix
+
+    def _link_with_qtmain(self, is_debug, libdir):
+        base_name = 'qtmaind' if is_debug else 'qtmain'
+        qtmain = self.clib_compiler.find_library(base_name, self.env, libdir)
+        if qtmain:
+            self.link_args.append(qtmain[0])
+            return True
+        return False
 
     def _framework_detect(self, qvars, modules, kwargs):
         libdir = qvars['QT_INSTALL_LIBS']
@@ -367,7 +446,8 @@ class QtBaseDependency(ExternalDependency):
 
         for m in modules:
             fname = 'Qt' + m
-            fwdep = QtExtraFrameworkDependency(fname, False, libdir, self.env,
+            mlog.debug('Looking for qt framework ' + fname)
+            fwdep = QtExtraFrameworkDependency(fname, False, [libdir], self.env,
                                                self.language, fw_kwargs)
             self.compile_args.append('-F' + libdir)
             if fwdep.found():
@@ -410,7 +490,7 @@ class QtBaseDependency(ExternalDependency):
         return 'modules: ' + module_str
 
     def log_info(self):
-        return '`{}`'.format(self.from_text)
+        return '{}'.format(self.from_text)
 
     def log_tried(self):
         return self.from_text
@@ -487,7 +567,7 @@ class SDL2Dependency(ExternalDependency):
 
 class WxDependency(ConfigToolDependency):
 
-    tools = ['wx-config-3.0', 'wx-config']
+    tools = ['wx-config-3.0', 'wx-config', 'wx-config-gtk3']
     tool_name = 'wx-config'
 
     def __init__(self, environment, kwargs):
@@ -557,7 +637,6 @@ class VulkanDependency(ExternalDependency):
 
             # TODO: find a way to retrieve the version from the sdk?
             # Usually it is a part of the path to it (but does not have to be)
-            self.version = '1'
             return
         else:
             # simply try to guess it, usually works on linux
@@ -565,7 +644,6 @@ class VulkanDependency(ExternalDependency):
             if libs is not None and self.clib_compiler.has_header('vulkan/vulkan.h', '', environment):
                 self.type_name = 'system'
                 self.is_found = True
-                self.version = 1 # TODO
                 for lib in libs:
                     self.link_args.append(lib)
                 return
@@ -578,7 +656,7 @@ class VulkanDependency(ExternalDependency):
         if DependencyMethods.PKGCONFIG in methods:
             candidates.append(functools.partial(PkgConfigDependency, 'vulkan', environment, kwargs))
 
-        if DependencyMethods.PKGCONFIG in methods:
+        if DependencyMethods.SYSTEM in methods:
             candidates.append(functools.partial(VulkanDependency, environment, kwargs))
 
         return candidates
@@ -586,3 +664,6 @@ class VulkanDependency(ExternalDependency):
     @staticmethod
     def get_methods():
         return [DependencyMethods.PKGCONFIG, DependencyMethods.SYSTEM]
+
+    def log_tried(self):
+        return 'system'

@@ -46,11 +46,31 @@ log_file = None
 log_fname = 'meson-log.txt'
 log_depth = 0
 log_timestamp_start = None
+log_fatal_warnings = False
+log_disable_stdout = False
+log_errors_only = False
 
-def initialize(logdir):
-    global log_dir, log_file
+def disable():
+    global log_disable_stdout
+    log_disable_stdout = True
+
+def enable():
+    global log_disable_stdout
+    log_disable_stdout = False
+
+def set_quiet():
+    global log_errors_only
+    log_errors_only = True
+
+def set_verbose():
+    global log_errors_only
+    log_errors_only = False
+
+def initialize(logdir, fatal_warnings=False):
+    global log_dir, log_file, log_fatal_warnings
     log_dir = logdir
     log_file = open(os.path.join(logdir, log_fname), 'w', encoding='utf8')
+    log_fatal_warnings = fatal_warnings
 
 def set_timestamp_start(start):
     global log_timestamp_start
@@ -59,9 +79,12 @@ def set_timestamp_start(start):
 def shutdown():
     global log_file
     if log_file is not None:
+        path = log_file.name
         exception_around_goer = log_file
         log_file = None
         exception_around_goer.close()
+        return path
+    return None
 
 class AnsiDecorator:
     plain_code = "\033[0m"
@@ -91,6 +114,9 @@ def green(text):
 def yellow(text):
     return AnsiDecorator(text, "\033[1;33m")
 
+def blue(text):
+    return AnsiDecorator(text, "\033[1;34m")
+
 def cyan(text):
     return AnsiDecorator(text, "\033[1;36m")
 
@@ -99,6 +125,8 @@ def process_markup(args, keep):
     if log_timestamp_start is not None:
         arr = ['[{:.3f}]'.format(time.monotonic() - log_timestamp_start)]
     for arg in args:
+        if arg is None:
+            continue
         if isinstance(arg, str):
             arr.append(arg)
         elif isinstance(arg, AnsiDecorator):
@@ -108,6 +136,9 @@ def process_markup(args, keep):
     return arr
 
 def force_print(*args, **kwargs):
+    global log_disable_stdout
+    if log_disable_stdout:
+        return
     iostr = io.StringIO()
     kwargs['file'] = iostr
     print(*args, **kwargs)
@@ -130,18 +161,21 @@ def debug(*args, **kwargs):
         print(*arr, file=log_file, **kwargs) # Log file never gets ANSI codes.
         log_file.flush()
 
-def log(*args, **kwargs):
+def log(*args, is_error=False, **kwargs):
+    global log_errors_only
     arr = process_markup(args, False)
     if log_file is not None:
         print(*arr, file=log_file, **kwargs) # Log file never gets ANSI codes.
         log_file.flush()
     if colorize_console:
         arr = process_markup(args, True)
-    force_print(*arr, **kwargs)
+    if not log_errors_only or is_error:
+        force_print(*arr, **kwargs)
 
 def _log_error(severity, *args, **kwargs):
     from .mesonlib import get_error_location_string
     from .environment import build_filename
+    from .mesonlib import MesonException
     if severity == 'warning':
         args = (yellow('WARNING:'),) + args
     elif severity == 'error':
@@ -159,21 +193,28 @@ def _log_error(severity, *args, **kwargs):
 
     log(*args, **kwargs)
 
+    global log_fatal_warnings
+    if log_fatal_warnings:
+        raise MesonException("Fatal warnings enabled, aborting")
+
 def error(*args, **kwargs):
-    return _log_error('error', *args, **kwargs)
+    return _log_error('error', *args, **kwargs, is_error=True)
 
 def warning(*args, **kwargs):
-    return _log_error('warning', *args, **kwargs)
+    return _log_error('warning', *args, **kwargs, is_error=True)
 
 def deprecation(*args, **kwargs):
-    return _log_error('deprecation', *args, **kwargs)
+    return _log_error('deprecation', *args, **kwargs, is_error=True)
 
-def exception(e):
+def exception(e, prefix=red('ERROR:')):
     log()
+    args = []
     if hasattr(e, 'file') and hasattr(e, 'lineno') and hasattr(e, 'colno'):
-        log('%s:%d:%d:' % (e.file, e.lineno, e.colno), red('ERROR: '), e)
-    else:
-        log(red('ERROR:'), e)
+        args.append('%s:%d:%d:' % (e.file, e.lineno, e.colno))
+    if prefix:
+        args.append(prefix)
+    args.append(e)
+    log(*args)
 
 # Format a list for logging purposes as a string. It separates
 # all but the last item with commas, and the last with 'and'.

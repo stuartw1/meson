@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys, pickle, os, shutil, subprocess, gzip, errno
+import sys, pickle, os, shutil, subprocess, errno
 import shlex
-import argparse
 from glob import glob
 from .scripts import depfixer
 from .scripts import destdir_join
@@ -27,17 +26,19 @@ except ImportError:
     # This is only used for pkexec which is not, so this is fine.
     main_file = None
 
+symlink_warning = '''Warning: trying to copy a symlink that points to a file. This will copy the file,
+but this will be changed in a future version of Meson to copy the symlink as is. Please update your
+build definitions so that it will not break when the change happens.'''
+
 selinux_updates = []
 
-def buildparser():
-    parser = argparse.ArgumentParser(prog='meson install')
+def add_arguments(parser):
     parser.add_argument('-C', default='.', dest='wd',
                         help='directory to cd into before running')
     parser.add_argument('--no-rebuild', default=False, action='store_true',
                         help='Do not rebuild before installing.')
     parser.add_argument('--only-changed', default=False, action='store_true',
                         help='Only overwrite files that are older than the copied file.')
-    return parser
 
 class DirMaker:
     def __init__(self, lf):
@@ -100,12 +101,12 @@ def set_chown(path, user=None, group=None, dir_fd=None, follow_symlinks=True):
 def set_chmod(path, mode, dir_fd=None, follow_symlinks=True):
     try:
         os.chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
-    except (NotImplementedError, OSError, SystemError) as e:
+    except (NotImplementedError, OSError, SystemError):
         if not os.path.islink(path):
             os.chmod(path, mode, dir_fd=dir_fd)
 
 def sanitize_permissions(path, umask):
-    if umask is None:
+    if umask == 'preserve':
         return
     new_perms = 0o777 if is_executable(path, follow_symlinks=False) else 0o666
     new_perms &= ~umask
@@ -156,7 +157,7 @@ def restore_selinux_contexts():
     '''
     try:
         subprocess.check_call(['selinuxenabled'])
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError) as e:
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         # If we don't have selinux or selinuxenabled returned 1, failure
         # is ignored quietly.
         return
@@ -210,6 +211,7 @@ def check_for_stampfile(fname):
 class Installer:
 
     def __init__(self, options, lf):
+        self.did_install_something = False
         self.options = options
         self.lf = lf
 
@@ -237,12 +239,20 @@ class Installer:
                                    'a file'.format(to_file))
             if self.should_preserve_existing_file(from_file, to_file):
                 append_to_log(self.lf, '# Preserving old file %s\n' % to_file)
-                print('Preserving existing file %s.' % to_file)
+                print('Preserving existing file %s' % to_file)
                 return False
             os.remove(to_file)
         print('Installing %s to %s' % (from_file, outdir))
         if os.path.islink(from_file):
-            shutil.copy(from_file, outdir, follow_symlinks=False)
+            if not os.path.exists(from_file):
+                # Dangling symlink. Replicate as is.
+                shutil.copy(from_file, outdir, follow_symlinks=False)
+            else:
+                # Remove this entire branch when changing the behaviour to duplicate
+                # symlinks rather than copying what they point to.
+                print(symlink_warning)
+                shutil.copyfile(from_file, to_file)
+                shutil.copystat(from_file, to_file)
         else:
             shutil.copyfile(from_file, to_file)
             shutil.copystat(from_file, to_file)
@@ -307,8 +317,6 @@ class Installer:
                 abs_dst = os.path.join(dst_dir, filepart)
                 if os.path.isdir(abs_dst):
                     print('Tried to copy file %s but a directory of that name already exists.' % abs_dst)
-                if os.path.exists(abs_dst):
-                    os.remove(abs_dst)
                 parent_dir = os.path.dirname(abs_dst)
                 if not os.path.isdir(parent_dir):
                     os.mkdir(parent_dir)
@@ -324,9 +332,10 @@ class Installer:
         d.destdir = os.environ.get('DESTDIR', '')
         d.fullprefix = destdir_join(d.destdir, d.prefix)
 
-        if d.install_umask is not None:
+        if d.install_umask != 'preserve':
             os.umask(d.install_umask)
 
+        self.did_install_something = False
         try:
             d.dirmaker = DirMaker(self.lf)
             with d.dirmaker:
@@ -337,6 +346,8 @@ class Installer:
                 self.install_data(d)
                 restore_selinux_contexts()
                 self.run_install_script(d)
+                if not self.did_install_something:
+                    print('Nothing to install.')
         except PermissionError:
             if shutil.which('pkexec') is not None and 'PKEXEC_UID' not in os.environ:
                 print('Installation failed due to insufficient permissions.')
@@ -348,6 +359,7 @@ class Installer:
 
     def install_subdirs(self, d):
         for (src_dir, dst_dir, mode, exclude) in d.install_subdirs:
+            self.did_install_something = True
             full_dst_dir = get_destdir_path(d, dst_dir)
             print('Installing subdir %s to %s' % (src_dir, full_dst_dir))
             d.dirmaker.makedirs(full_dst_dir, exist_ok=True)
@@ -355,6 +367,7 @@ class Installer:
 
     def install_data(self, d):
         for i in d.data:
+            self.did_install_something = True
             fullfilename = i[0]
             outfilename = get_destdir_path(d, i[1])
             mode = i[2]
@@ -365,26 +378,18 @@ class Installer:
 
     def install_man(self, d):
         for m in d.man:
+            self.did_install_something = True
             full_source_filename = m[0]
             outfilename = get_destdir_path(d, m[1])
             outdir = os.path.dirname(outfilename)
             d.dirmaker.makedirs(outdir, exist_ok=True)
             install_mode = m[2]
-            if outfilename.endswith('.gz') and not full_source_filename.endswith('.gz'):
-                with open(outfilename, 'wb') as of:
-                    with open(full_source_filename, 'rb') as sf:
-                        # Set mtime and filename for reproducibility.
-                        with gzip.GzipFile(fileobj=of, mode='wb', filename='', mtime=0) as gz:
-                            gz.write(sf.read())
-                shutil.copystat(full_source_filename, outfilename)
-                print('Installing %s to %s' % (full_source_filename, outdir))
-                append_to_log(self.lf, outfilename)
-            else:
-                self.do_copyfile(full_source_filename, outfilename)
+            self.do_copyfile(full_source_filename, outfilename)
             set_mode(outfilename, install_mode, d.install_umask)
 
     def install_headers(self, d):
         for t in d.headers:
+            self.did_install_something = True
             fullfilename = t[0]
             fname = os.path.basename(fullfilename)
             outdir = get_destdir_path(d, t[1])
@@ -406,6 +411,7 @@ class Installer:
         child_env.update(env)
 
         for i in d.install_scripts:
+            self.did_install_something = True  # Custom script must report itself if it does nothing.
             script = i['exe']
             args = i['args']
             name = ' '.join(script + args)
@@ -420,6 +426,7 @@ class Installer:
 
     def install_targets(self, d):
         for t in d.targets:
+            self.did_install_something = True
             if not os.path.exists(t.fname):
                 # For example, import libraries of shared modules are optional
                 if t.optional:
@@ -489,9 +496,7 @@ class Installer:
                     else:
                         raise
 
-def run(args):
-    parser = buildparser()
-    opts = parser.parse_args(args)
+def run(opts):
     datafilename = 'meson-private/install.dat'
     private_dir = os.path.dirname(datafilename)
     log_dir = os.path.join(private_dir, '../meson-logs')
@@ -508,6 +513,3 @@ def run(args):
         append_to_log(lf, '# Does not contain files installed by custom scripts.')
         installer.do_install(datafilename)
     return 0
-
-if __name__ == '__main__':
-    sys.exit(run(sys.argv[1:]))

@@ -23,6 +23,10 @@ from mesonbuild.dependencies import ExternalProgram
 from mesonbuild.mesonlib import substring_is_in_list, MesonException
 from mesonbuild import mlog
 
+from collections import namedtuple
+import io
+import re
+import tempfile
 import time, datetime, multiprocessing, json
 import concurrent.futures as conc
 import platform
@@ -34,6 +38,10 @@ import enum
 # GNU autotools interprets a return code of 77 from tests it executes to
 # mean that the test should be skipped.
 GNU_SKIP_RETURNCODE = 77
+
+# GNU autotools interprets a return code of 99 from tests it executes to
+# mean that the test failed even before testing what it is supposed to test.
+GNU_ERROR_RETURNCODE = 99
 
 def is_windows():
     platname = platform.system().lower()
@@ -60,8 +68,7 @@ def determine_worker_count():
             num_workers = 1
     return num_workers
 
-def buildparser():
-    parser = argparse.ArgumentParser(prog='meson test')
+def add_arguments(parser):
     parser.add_argument('--repeat', default=1, dest='repeat', type=int,
                         help='Number of times to run the tests.')
     parser.add_argument('--no-rebuild', default=False, action='store_true',
@@ -102,7 +109,6 @@ def buildparser():
                         help='Arguments to pass to the specified test(s) or all tests')
     parser.add_argument('args', nargs='*',
                         help='Optional list of tests to run')
-    return parser
 
 
 def returncode_to_status(retcode):
@@ -145,11 +151,204 @@ class TestResult(enum.Enum):
     TIMEOUT = 'TIMEOUT'
     SKIP = 'SKIP'
     FAIL = 'FAIL'
+    EXPECTEDFAIL = 'EXPECTEDFAIL'
+    UNEXPECTEDPASS = 'UNEXPECTEDPASS'
+    ERROR = 'ERROR'
+
+
+class TAPParser(object):
+    Plan = namedtuple('Plan', ['count', 'late', 'skipped', 'explanation'])
+    Bailout = namedtuple('Bailout', ['message'])
+    Test = namedtuple('Test', ['number', 'name', 'result', 'explanation'])
+    Error = namedtuple('Error', ['message'])
+    Version = namedtuple('Version', ['version'])
+
+    _MAIN = 1
+    _AFTER_TEST = 2
+    _YAML = 3
+
+    _RE_BAILOUT = r'Bail out!\s*(.*)'
+    _RE_DIRECTIVE = r'(?:\s*\#\s*([Ss][Kk][Ii][Pp]\S*|[Tt][Oo][Dd][Oo])\b\s*(.*))?'
+    _RE_PLAN = r'1\.\.([0-9]+)' + _RE_DIRECTIVE
+    _RE_TEST = r'((?:not )?ok)\s*(?:([0-9]+)\s*)?([^#]*)' + _RE_DIRECTIVE
+    _RE_VERSION = r'TAP version ([0-9]+)'
+    _RE_YAML_START = r'(\s+)---.*'
+    _RE_YAML_END = r'\s+\.\.\.\s*'
+
+    def __init__(self, io):
+        self.io = io
+
+    def parse_test(self, ok, num, name, directive, explanation):
+        name = name.strip()
+        explanation = explanation.strip() if explanation else None
+        if directive is not None:
+            directive = directive.upper()
+            if directive == 'SKIP':
+                if ok:
+                    yield self.Test(num, name, TestResult.SKIP, explanation)
+                    return
+            elif directive == 'TODO':
+                yield self.Test(num, name, TestResult.UNEXPECTEDPASS if ok else TestResult.EXPECTEDFAIL, explanation)
+                return
+            else:
+                yield self.Error('invalid directive "%s"' % (directive,))
+
+        yield self.Test(num, name, TestResult.OK if ok else TestResult.FAIL, explanation)
+
+    def parse(self):
+        found_late_test = False
+        bailed_out = False
+        plan = None
+        lineno = 0
+        num_tests = 0
+        yaml_lineno = None
+        yaml_indent = None
+        state = self._MAIN
+        version = 12
+        while True:
+            lineno += 1
+            try:
+                line = next(self.io).rstrip()
+            except StopIteration:
+                break
+
+            # YAML blocks are only accepted after a test
+            if state == self._AFTER_TEST:
+                if version >= 13:
+                    m = re.match(self._RE_YAML_START, line)
+                    if m:
+                        state = self._YAML
+                        yaml_lineno = lineno
+                        yaml_indent = m.group(1)
+                        continue
+                state = self._MAIN
+
+            elif state == self._YAML:
+                if re.match(self._RE_YAML_END, line):
+                    state = self._MAIN
+                    continue
+                if line.startswith(yaml_indent):
+                    continue
+                yield self.Error('YAML block not terminated (started on line %d)' % (yaml_lineno,))
+                state = self._MAIN
+
+            assert state == self._MAIN
+            if line.startswith('#'):
+                continue
+
+            m = re.match(self._RE_TEST, line)
+            if m:
+                if plan and plan.late and not found_late_test:
+                    yield self.Error('unexpected test after late plan')
+                    found_late_test = True
+                num_tests += 1
+                num = num_tests if m.group(2) is None else int(m.group(2))
+                if num != num_tests:
+                    yield self.Error('out of order test numbers')
+                yield from self.parse_test(m.group(1) == 'ok', num,
+                                           m.group(3), m.group(4), m.group(5))
+                state = self._AFTER_TEST
+                continue
+
+            m = re.match(self._RE_PLAN, line)
+            if m:
+                if plan:
+                    yield self.Error('more than one plan found')
+                else:
+                    count = int(m.group(1))
+                    skipped = (count == 0)
+                    if m.group(2):
+                        if m.group(2).upper().startswith('SKIP'):
+                            if count > 0:
+                                yield self.Error('invalid SKIP directive for plan')
+                            skipped = True
+                        else:
+                            yield self.Error('invalid directive for plan')
+                    plan = self.Plan(count=count, late=(num_tests > 0),
+                                     skipped=skipped, explanation=m.group(3))
+                    yield plan
+                continue
+
+            m = re.match(self._RE_BAILOUT, line)
+            if m:
+                yield self.Bailout(m.group(1))
+                bailed_out = True
+                continue
+
+            m = re.match(self._RE_VERSION, line)
+            if m:
+                # The TAP version is only accepted as the first line
+                if lineno != 1:
+                    yield self.Error('version number must be on the first line')
+                    continue
+                version = int(m.group(1))
+                if version < 13:
+                    yield self.Error('version number should be at least 13')
+                else:
+                    yield self.Version(version=version)
+                continue
+
+            yield self.Error('unexpected input at line %d' % (lineno,))
+
+        if state == self._YAML:
+            yield self.Error('YAML block not terminated (started on line %d)' % (yaml_lineno,))
+
+        if not bailed_out and plan and num_tests != plan.count:
+            if num_tests < plan.count:
+                yield self.Error('Too few tests run (expected %d, got %d)' % (plan.count, num_tests))
+            else:
+                yield self.Error('Too many tests run (expected %d, got %d)' % (plan.count, num_tests))
 
 
 class TestRun:
-    def __init__(self, res, returncode, should_fail, duration, stdo, stde, cmd,
-                 env):
+    @staticmethod
+    def make_exitcode(test, returncode, duration, stdo, stde, cmd):
+        if returncode == GNU_SKIP_RETURNCODE:
+            res = TestResult.SKIP
+        elif returncode == GNU_ERROR_RETURNCODE:
+            res = TestResult.ERROR
+        elif test.should_fail:
+            res = TestResult.EXPECTEDFAIL if bool(returncode) else TestResult.UNEXPECTEDPASS
+        else:
+            res = TestResult.FAIL if bool(returncode) else TestResult.OK
+        return TestRun(test, res, returncode, duration, stdo, stde, cmd)
+
+    def make_tap(test, returncode, duration, stdo, stde, cmd):
+        res = None
+        num_tests = 0
+        failed = False
+        num_skipped = 0
+
+        for i in TAPParser(io.StringIO(stdo)).parse():
+            if isinstance(i, TAPParser.Bailout):
+                res = TestResult.ERROR
+            elif isinstance(i, TAPParser.Test):
+                if i.result == TestResult.SKIP:
+                    num_skipped += 1
+                elif i.result in (TestResult.FAIL, TestResult.UNEXPECTEDPASS):
+                    failed = True
+                num_tests += 1
+            elif isinstance(i, TAPParser.Error):
+                res = TestResult.ERROR
+                stde += '\nTAP parsing error: ' + i.message
+
+        if returncode != 0:
+            res = TestResult.ERROR
+            stde += '\n(test program exited with status code %d)' % (returncode,)
+
+        if res is None:
+            # Now determine the overall result of the test based on the outcome of the subcases
+            if num_skipped == num_tests:
+                # This includes the case where num_tests is zero
+                res = TestResult.SKIP
+            elif test.should_fail:
+                res = TestResult.EXPECTEDFAIL if failed else TestResult.UNEXPECTEDPASS
+            else:
+                res = TestResult.FAIL if failed else TestResult.OK
+
+        return TestRun(test, res, returncode, duration, stdo, stde, cmd)
+
+    def __init__(self, test, res, returncode, duration, stdo, stde, cmd):
         assert isinstance(res, TestResult)
         self.res = res
         self.returncode = returncode
@@ -157,8 +356,8 @@ class TestRun:
         self.stdo = stdo
         self.stde = stde
         self.cmd = cmd
-        self.env = env
-        self.should_fail = should_fail
+        self.env = test.env
+        self.should_fail = test.should_fail
 
     def get_log(self):
         res = '--- command ---\n'
@@ -256,9 +455,8 @@ class SingleTestRunner:
         cmd = self._get_cmd()
         if cmd is None:
             skip_stdout = 'Not run because can not execute cross compiled binaries.'
-            return TestRun(res=TestResult.SKIP, returncode=GNU_SKIP_RETURNCODE,
-                           should_fail=self.test.should_fail, duration=0.0,
-                           stdo=skip_stdout, stde=None, cmd=None, env=self.test.env)
+            return TestRun(test=self.test, res=TestResult.SKIP, returncode=GNU_SKIP_RETURNCODE,
+                           duration=0.0, stdo=skip_stdout, stde=None, cmd=None)
         else:
             wrap = TestHarness.get_wrapper(self.options)
             if self.options.gdb:
@@ -291,8 +489,8 @@ class SingleTestRunner:
         stdout = None
         stderr = None
         if not self.options.verbose:
-            stdout = subprocess.PIPE
-            stderr = subprocess.PIPE if self.options and self.options.split else subprocess.STDOUT
+            stdout = tempfile.TemporaryFile("wb+")
+            stderr = tempfile.TemporaryFile("wb+") if self.options and self.options.split else stdout
 
         # Let gdb handle ^C instead of us
         if self.options.gdb:
@@ -326,7 +524,7 @@ class SingleTestRunner:
         else:
             timeout = self.test.timeout
         try:
-            (stdo, stde) = p.communicate(timeout=timeout)
+            p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             if self.options.verbose:
                 print('%s time out (After %d seconds)' % (self.test.name, timeout))
@@ -338,6 +536,8 @@ class SingleTestRunner:
             if self.options.gdb:
                 # Let us accept ^C again
                 signal.signal(signal.SIGINT, previous_sigint_handler)
+
+        additional_error = None
 
         if kill_test or timed_out:
             # Python does not provide multiplatform support for
@@ -354,21 +554,43 @@ class SingleTestRunner:
                     # There's nothing we can do (maybe the process
                     # already died) so carry on.
                     pass
-            (stdo, stde) = p.communicate()
+            try:
+                p.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                # An earlier kill attempt has not worked for whatever reason.
+                # Try to kill it one last time with a direct call.
+                # If the process has spawned children, they will remain around.
+                p.kill()
+                try:
+                    p.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    additional_error = b'Test process could not be killed.'
+            except ValueError:
+                additional_error = b'Could not read output. Maybe the process has redirected its stdout/stderr?'
         endtime = time.time()
         duration = endtime - starttime
-        stdo = decode(stdo)
-        if stde:
-            stde = decode(stde)
-        if timed_out:
-            res = TestResult.TIMEOUT
-        elif p.returncode == GNU_SKIP_RETURNCODE:
-            res = TestResult.SKIP
-        elif self.test.should_fail == bool(p.returncode):
-            res = TestResult.OK
+        if additional_error is None:
+            if stdout is None:  # if stdout is None stderr should be as well
+                stdo = ''
+                stde = ''
+            else:
+                stdout.seek(0)
+                stdo = decode(stdout.read())
+                if stderr != stdout:
+                    stderr.seek(0)
+                    stde = decode(stderr.read())
+                else:
+                    stde = ""
         else:
-            res = TestResult.FAIL
-        return TestRun(res, p.returncode, self.test.should_fail, duration, stdo, stde, cmd, self.test.env)
+            stdo = ""
+            stde = additional_error
+        if timed_out:
+            return TestRun(self.test, TestResult.TIMEOUT, p.returncode, duration, stdo, stde, cmd)
+        else:
+            if self.test.protocol == 'exitcode':
+                return TestRun.make_exitcode(self.test, p.returncode, duration, stdo, stde, cmd)
+            else:
+                return TestRun.make_tap(self.test, p.returncode, duration, stdo, stde, cmd)
 
 
 class TestHarness:
@@ -376,6 +598,8 @@ class TestHarness:
         self.options = options
         self.collected_logs = []
         self.fail_count = 0
+        self.expectedfail_count = 0
+        self.unexpectedpass_count = 0
         self.success_count = 0
         self.skip_count = 0
         self.timeout_count = 0
@@ -409,6 +633,8 @@ class TestHarness:
             current = self.build_data.test_setups[full_name]
         if not options.gdb:
             options.gdb = current.gdb
+        if options.gdb:
+            options.verbose = True
         if options.timeout_multiplier is None:
             options.timeout_multiplier = current.timeout_multiplier
     #    if options.env is None:
@@ -421,6 +647,8 @@ class TestHarness:
 
     def get_test_runner(self, test):
         options = deepcopy(self.options)
+        if not options.setup:
+            options.setup = self.build_data.test_setup_default_name
         if options.setup:
             env = self.merge_suite_options(options, test)
         else:
@@ -438,8 +666,12 @@ class TestHarness:
             self.skip_count += 1
         elif result.res is TestResult.OK:
             self.success_count += 1
-        elif result.res is TestResult.FAIL:
+        elif result.res is TestResult.FAIL or result.res is TestResult.ERROR:
             self.fail_count += 1
+        elif result.res is TestResult.EXPECTEDFAIL:
+            self.expectedfail_count += 1
+        elif result.res is TestResult.UNEXPECTEDPASS:
+            self.unexpectedpass_count += 1
         else:
             sys.exit('Unknown test result encountered: {}'.format(result.res))
 
@@ -455,9 +687,12 @@ class TestHarness:
         result_str = '%s %s  %s%s%s%5.2f s %s' % \
             (num, name, padding1, result.res.value, padding2, result.duration,
              status)
-        if not self.options.quiet or result.res is not TestResult.OK:
-            if result.res is not TestResult.OK and mlog.colorize_console:
-                if result.res in (TestResult.FAIL, TestResult.TIMEOUT):
+        ok_statuses = (TestResult.OK, TestResult.EXPECTEDFAIL)
+        bad_statuses = (TestResult.FAIL, TestResult.TIMEOUT, TestResult.UNEXPECTEDPASS,
+                        TestResult.ERROR)
+        if not self.options.quiet or result.res not in ok_statuses:
+            if result.res not in ok_statuses and mlog.colorize_console:
+                if result.res in bad_statuses:
                     decorator = mlog.red
                 elif result.res is TestResult.SKIP:
                     decorator = mlog.yellow
@@ -467,8 +702,7 @@ class TestHarness:
             else:
                 print(result_str)
         result_str += "\n\n" + result.get_log()
-        if (result.returncode != GNU_SKIP_RETURNCODE) \
-                and (result.returncode != 0) != result.should_fail:
+        if result.res in bad_statuses:
             if self.options.print_errorlogs:
                 self.collected_logs.append(result_str)
         if self.logfile:
@@ -478,11 +712,14 @@ class TestHarness:
 
     def print_summary(self):
         msg = '''
-OK:      %4d
-FAIL:    %4d
-SKIP:    %4d
-TIMEOUT: %4d
-''' % (self.success_count, self.fail_count, self.skip_count, self.timeout_count)
+Ok:                 %4d
+Expected Fail:      %4d
+Fail:               %4d
+Unexpected Pass:    %4d
+Skipped:            %4d
+Timeout:            %4d
+''' % (self.success_count, self.expectedfail_count, self.fail_count,
+            self.unexpectedpass_count, self.skip_count, self.timeout_count)
         print(msg)
         if self.logfile:
             self.logfile.write(msg)
@@ -500,7 +737,11 @@ TIMEOUT: %4d
                     print('--- Listing only the last 100 lines from a long log. ---')
                     lines = lines[-100:]
                 for line in lines:
-                    print(line)
+                    try:
+                        print(line)
+                    except UnicodeEncodeError:
+                        line = line.encode('ascii', errors='replace').decode()
+                        print(line)
 
     def doit(self):
         if self.is_run:
@@ -604,8 +845,8 @@ TIMEOUT: %4d
         self.logfilename = logfile_base + '.txt'
         self.jsonlogfilename = logfile_base + '.json'
 
-        self.jsonlogfile = open(self.jsonlogfilename, 'w', encoding='utf-8')
-        self.logfile = open(self.logfilename, 'w', encoding='utf-8')
+        self.jsonlogfile = open(self.jsonlogfilename, 'w', encoding='utf-8', errors='replace')
+        self.logfile = open(self.logfilename, 'w', encoding='utf-8', errors='surrogateescape')
 
         self.logfile.write('Log of Meson test suite run on %s\n\n'
                            % datetime.datetime.now().isoformat())
@@ -650,18 +891,17 @@ TIMEOUT: %4d
             for _ in range(self.options.repeat):
                 for i, test in enumerate(tests):
                     visible_name = self.get_pretty_suite(test)
+                    single_test = self.get_test_runner(test)
 
-                    if not test.is_parallel or self.options.gdb:
+                    if not test.is_parallel or self.options.num_processes == 1 or single_test.options.gdb:
                         self.drain_futures(futures)
                         futures = []
-                        single_test = self.get_test_runner(test)
                         res = single_test.run()
                         self.process_test_result(res)
                         self.print_stats(numlen, tests, visible_name, res, i)
                     else:
                         if not executor:
                             executor = conc.ThreadPoolExecutor(max_workers=self.options.num_processes)
-                        single_test = self.get_test_runner(test)
                         f = executor.submit(single_test.run)
                         futures.append((f, numlen, tests, visible_name, i))
                     if self.options.repeat > 1 and self.fail_count:
@@ -703,6 +943,7 @@ def list_tests(th):
     tests = th.get_tests()
     for t in tests:
         print(th.get_pretty_suite(t))
+    return not tests
 
 def rebuild_all(wd):
     if not os.path.isfile(os.path.join(wd, 'build.ninja')):
@@ -723,9 +964,7 @@ def rebuild_all(wd):
 
     return True
 
-def run(args):
-    options = buildparser().parse_args(args)
-
+def run(options):
     if options.benchmark:
         options.num_processes = 1
 
@@ -758,8 +997,7 @@ def run(args):
     try:
         th = TestHarness(options)
         if options.list:
-            list_tests(th)
-            return 0
+            return list_tests(th)
         if not options.args:
             return th.doit()
         return th.run_special()
@@ -770,3 +1008,9 @@ def run(args):
         else:
             print(e)
         return 1
+
+def run_with_args(args):
+    parser = argparse.ArgumentParser(prog='meson test')
+    add_arguments(parser)
+    options = parser.parse_args(args)
+    return run(options)

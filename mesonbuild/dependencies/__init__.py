@@ -16,9 +16,9 @@ from .boost import BoostDependency
 from .base import (  # noqa: F401
     Dependency, DependencyException, DependencyMethods, ExternalProgram, EmptyExternalProgram, NonExistingExternalProgram,
     ExternalDependency, NotFoundDependency, ExternalLibrary, ExtraFrameworkDependency, InternalDependency,
-    PkgConfigDependency, find_external_dependency, get_dep_identifier, packages, _packages_accept_language)
+    PkgConfigDependency, CMakeDependency, find_external_dependency, get_dep_identifier, packages, _packages_accept_language)
 from .dev import GMockDependency, GTestDependency, LLVMDependency, ValgrindDependency
-from .misc import (MPIDependency, OpenMPDependency, Python3Dependency, ThreadDependency, PcapDependency, CupsDependency, LibWmfDependency)
+from .misc import (CoarrayDependency, HDF5Dependency, MPIDependency, NetCDFDependency, OpenMPDependency, Python3Dependency, ThreadDependency, PcapDependency, CupsDependency, LibWmfDependency, LibGCryptDependency)
 from .platform import AppleFrameworks
 from .ui import GLDependency, GnuStepDependency, Qt4Dependency, Qt5Dependency, SDL2Dependency, WxDependency, VulkanDependency
 
@@ -32,13 +32,17 @@ packages.update({
 
     # From misc:
     'boost': BoostDependency,
+    'coarray': CoarrayDependency,
     'mpi': MPIDependency,
+    'hdf5': HDF5Dependency,
+    'netcdf': NetCDFDependency,
     'openmp': OpenMPDependency,
     'python3': Python3Dependency,
     'threads': ThreadDependency,
     'pcap': PcapDependency,
     'cups': CupsDependency,
     'libwmf': LibWmfDependency,
+    'libgcrypt': LibGCryptDependency,
 
     # From platform:
     'appleframeworks': AppleFrameworks,
@@ -53,6 +57,8 @@ packages.update({
     'vulkan': VulkanDependency,
 })
 _packages_accept_language.update({
+    'hdf5',
     'mpi',
+    'netcdf',
     'openmp',
 })

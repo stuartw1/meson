@@ -25,11 +25,22 @@ libc = static_library('cfoo', ['foo.c', 'foo.h'])
 # ourselves at configure time and then 'find' it with cxx.find_library().
 cxx = meson.get_compiler('cpp')
 
-if cxx.get_id() == 'msvc'
+if cxx.get_argument_syntax() == 'msvc'
+  if cxx.get_id() == 'msvc'
+    static_linker = find_program('lib')
+  elif cxx.get_id() == 'clang-cl'
+    static_linker = find_program('llvm-lib')
+  else
+     error('unable to determine static linker to use with this compiler')
+  endif
   compile_cmd = ['/c', '@INPUT@', '/Fo@OUTPUT@']
-  stlib_cmd = ['lib', '/OUT:@OUTPUT@', '@INPUT@']
+  stlib_cmd = [static_linker, '/OUT:@OUTPUT@', '@INPUT@']
 else
-  compile_cmd = ['-c', '-fPIC', '@INPUT@', '-o', '@OUTPUT@']
+ picflag = []
+ if not ['darwin', 'windows'].contains(host_machine.system())
+    picflag = ['-fPIC']
+  endif
+  compile_cmd = ['-c', picflag, '@INPUT@', '-o', '@OUTPUT@']
   stlib_cmd = ['ar', 'csr', '@OUTPUT@', '@INPUT@']
 endif
 

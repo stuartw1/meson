@@ -138,9 +138,9 @@ int main (int argc, char ** argv) {
 }'''
 ```
 
-These are raw strings that do not support the escape sequences listed above.
-These strings can also be combined with the string formatting functionality
-described below.
+These are raw strings that do not support the escape sequences listed
+above.  These strings can also be combined with the string formatting
+functionality described below.
 
 #### String formatting
 
@@ -216,6 +216,14 @@ path = pathsep.join(['/usr/bin', '/bin', '/usr/local/bin'])
 path = join_paths(['/usr', 'local', 'bin'])
 # path now has the value '/usr/local/bin'
 
+# Don't use join_paths for sources files, use files for that:
+my_sources = files('foo.c')
+...
+my_sources += files('bar.c')
+# This has the advantage of always calculating the correct relative path, even
+# if you add files in another directory or use them in a different directory
+# than they're defined in
+
 # Example to set an API version for use in library(), install_header(), etc
 project('project', 'c', version: '0.2.3')
 version_array = meson.project_version().split('.')
@@ -283,6 +291,17 @@ Note appending to an array will always create a new array object and
 assign it to `my_array` instead of modifying the original since all
 objects in Meson are immutable.
 
+Since 0.49.0, you can check if an array contains an element like this:
+```meson
+my_array = [1, 2]
+if 1 in my_array
+# This condition is true
+endif
+if 1 not in my_array
+# This condition is false
+endif
+```
+
 #### Array methods
 
 The following methods are defined for all arrays:
@@ -316,6 +335,20 @@ Dictionaries are available since 0.47.0.
 Visit the [Reference Manual](Reference-manual.md#dictionary-object) to read
 about the methods exposed by dictionaries.
 
+Since 0.49.0, you can check if a dictionary contains a key like this:
+```meson
+my_dict = {'foo': 42, 'foo': 43}
+if 'foo' in my_dict
+# This condition is true
+endif
+if 42 in my_dict
+# This condition is false
+endif
+if 'foo' not in my_dict
+# This condition is false
+endif
+```
+
 Function calls
 --
 
@@ -325,6 +358,42 @@ creating build objects.
 ```meson
 executable('progname', 'prog.c')
 ```
+
+Most functions take only few positional arguments but several keyword
+arguments, which are specified like this:
+
+```meson
+executable('progname',
+  sources: 'prog.c',
+  c_args: '-DFOO=1')
+```
+
+Starting with version 0.49.0 keyword arguments can be specified
+dynamically. This is done by passing dictionary representing the
+keywords to set in the `kwargs` keyword. The previous example would be
+specified like this:
+
+```meson
+d = {'sources': 'prog.c',
+  'c_args': '-DFOO=1'}
+
+executable('progname',
+  kwargs: d)
+```
+
+A single function can take keyword argumets both directly in the
+function call and indirectly via the `kwargs` keyword argument. The
+only limitation is that it is a hard error to pass any particular key
+both as a direct and indirect argument.
+
+```meson
+d = {'c_args': '-DFOO'}
+executable('progname', 'prog.c',
+  c_args: '-DBAZ=1',
+  kwargs: d) # This is an error!
+```
+
+Attempting to do this causes Meson to immediately exit with an error.
 
 Method calls
 --
@@ -354,10 +423,33 @@ else
 endif
 
 opt = get_option('someoption')
-if opt == 'foo'
+if opt != 'foo'
   do_something()
 endif
 ```
+
+Logical operations
+--
+
+Meson has the standard range of logical operations which can be used in
+`if` statements.
+
+```meson
+if a and b
+  # do something
+endif
+if c or d
+  # do something
+endif
+if not e
+  # do something
+endif
+if not (f or g)
+  # do something
+endif
+```
+
+Logical operations work only on boolean values.
 
 ## Foreach statements
 
@@ -409,27 +501,23 @@ foreach name, sources : components
 endforeach
 ```
 
-Logical operations
---
+### Foreach `break` and `continue`
 
-Meson has the standard range of logical operations.
+Since 0.49.0 `break` and `continue` keywords can be used inside foreach loops.
 
 ```meson
-if a and b
-  # do something
-endif
-if c or d
-  # do something
-endif
-if not e
-  # do something
-endif
-if not (f or g)
-  # do something
-endif
+items = ['a', 'continue', 'b', 'break', 'c']
+result = []
+foreach i : items
+  if i == 'continue'
+    continue
+  elif i == 'break'
+    break
+  endif
+  result += i
+endforeach
+# result is ['a', 'b']
 ```
-
-Logical operations work only on boolean values.
 
 Comments
 --

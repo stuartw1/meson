@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import os
 import tempfile
 import unittest
@@ -22,11 +23,6 @@ import zipapp
 from pathlib import Path
 
 from mesonbuild.mesonlib import windows_proof_rmtree, python_command, is_windows
-
-# Find the meson.py adjacent to us
-meson_py = Path(__file__).resolve().parent / 'meson.py'
-if not meson_py.is_file():
-    raise RuntimeError("meson.py not found: test must only run from git")
 
 def get_pypath():
     import sysconfig
@@ -67,15 +63,14 @@ class CommandTests(unittest.TestCase):
 
     def _run(self, command, workdir=None):
         '''
-        Run a command while printing the stdout and stderr to stdout,
-        and also return a copy of it
+        Run a command while printing the stdout, and also return a copy of it
         '''
         # If this call hangs CI will just abort. It is very hard to distinguish
         # between CI issue and test bug in that case. Set timeout and fail loud
         # instead.
         p = subprocess.run(command, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, env=os.environ.copy(),
-                           universal_newlines=True, cwd=workdir, timeout=60 * 5)
+                           env=os.environ.copy(), universal_newlines=True,
+                           cwd=workdir, timeout=60 * 5)
         print(p.stdout)
         if p.returncode != 0:
             raise subprocess.CalledProcessError(p.returncode, command)
@@ -128,7 +123,9 @@ class CommandTests(unittest.TestCase):
         pylibdir = prefix / get_pypath()
         bindir = prefix / get_pybindir()
         pylibdir.mkdir(parents=True)
-        os.environ['PYTHONPATH'] = str(pylibdir)
+        # XXX: join with empty name so it always ends with os.sep otherwise
+        # distutils complains that prefix isn't contained in PYTHONPATH
+        os.environ['PYTHONPATH'] = os.path.join(str(pylibdir), '')
         os.environ['PATH'] = str(bindir) + os.pathsep + os.environ['PATH']
         self._run(python_command + ['setup.py', 'install', '--prefix', str(prefix)])
         # Check that all the files were installed correctly
@@ -176,8 +173,7 @@ class CommandTests(unittest.TestCase):
         builddir = str(self.tmpdir / 'build4')
         (bindir / 'meson').rename(bindir / 'meson.real')
         wrapper = (bindir / 'meson')
-        with open(str(wrapper), 'w') as f:
-            f.write('#!/bin/sh\n\nmeson.real "$@"')
+        wrapper.open('w').write('#!/bin/sh\n\nmeson.real "$@"')
         wrapper.chmod(0o755)
         meson_setup = [str(wrapper), 'setup']
         meson_command = meson_setup + self.meson_args
@@ -195,5 +191,6 @@ class CommandTests(unittest.TestCase):
         zipapp.create_archive(source=source, target=target, interpreter=python_command[0], main=None)
         self._run([target.as_posix(), '--help'])
 
+
 if __name__ == '__main__':
-    unittest.main(buffer=True)
+    sys.exit(unittest.main(buffer=True))

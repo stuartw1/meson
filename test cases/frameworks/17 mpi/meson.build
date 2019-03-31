@@ -1,4 +1,4 @@
-project('mpi', 'c', 'cpp')
+project('mpi', 'c', 'cpp', default_options: ['b_asneeded=false'])
 
 cc = meson.get_compiler('c')
 
@@ -17,7 +17,7 @@ exec = executable('exec',
 test('MPI C', exec)
 
 if build_machine.system() != 'windows'
-  # C++ MPI not supported by MS-MPI used on AppVeyor.
+  # C++ MPI not supported by MS-MPI
   mpicpp = dependency('mpi', language : 'cpp')
   execpp = executable('execpp',
     'main.cpp',
@@ -36,9 +36,16 @@ uburesult = run_command(ubudetector)
 
 if uburesult.returncode() != 0 and add_languages('fortran', required : false)
   mpifort = dependency('mpi', language : 'fortran')
-  exef = executable('exef',
-    'main.f90',
-    dependencies : [mpifort])
+  # Mixing compilers (msvc/clang with gfortran) does not seem to work on Windows.
+  if build_machine.system() != 'windows' or cc.get_id() == 'gnu'
+    exef = executable('exef',
+      'main.f90',
+      dependencies : [mpifort])
+    test('MPI Fortran', exef)
+  endif
+endif
 
-  test('MPI Fortran', exef)
+# Check we can apply a version constraint
+if mpic.version() != 'unknown'
+  dependency('mpi', version: '>=@0@'.format(mpic.version()))
 endif

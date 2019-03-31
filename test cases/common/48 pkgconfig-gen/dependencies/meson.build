@@ -6,6 +6,7 @@ pkgg = import('pkgconfig')
 exposed_lib = shared_library('libexposed', 'exposed.c')
 internal_lib = shared_library('libinternal', 'internal.c')
 main_lib = both_libraries('libmain', link_with : [exposed_lib, internal_lib])
+custom_lib = shared_library('custom', 'custom.c')
 
 pkgg.generate(exposed_lib)
 
@@ -14,7 +15,7 @@ pc_dep = dependency('libfoo', version : '>=1.0')
 pc_dep_dup = dependency('libfoo', version : '>= 1.0')
 notfound_dep = dependency('notfound', required : false)
 threads_dep = dependency('threads')
-custom_dep = declare_dependency(link_args : ['-lcustom'], compile_args : ['-DCUSTOM'])
+custom_dep = declare_dependency(link_with : custom_lib, compile_args : ['-DCUSTOM'])
 custom2_dep = declare_dependency(link_args : ['-lcustom2'], compile_args : ['-DCUSTOM2'])
 
 # Generate a PC file:
@@ -27,8 +28,8 @@ custom2_dep = declare_dependency(link_args : ['-lcustom2'], compile_args : ['-DC
 # - Having pc_dep in libraries_private should add it in Requires.private
 # - pc_dep_dup is the same library and same version, should be ignored
 # - notfound_dep is not required so it shouldn't appear in the pc file.
-pkgg.generate(libraries : [main_lib, exposed_lib, threads_dep , custom_dep],
-  libraries_private : [custom_dep, custom2_dep, pc_dep, pc_dep_dup, notfound_dep],
+pkgg.generate(libraries : [main_lib, exposed_lib, threads_dep, threads_dep, custom_dep, custom_dep, '-pthread'],
+  libraries_private : [custom_dep, custom2_dep, custom2_dep, pc_dep, pc_dep_dup, notfound_dep],
   version : '1.0',
   name : 'dependency-test',
   filebase : 'dependency-test',

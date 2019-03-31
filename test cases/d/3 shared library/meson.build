@@ -14,8 +14,8 @@ test('linktest_dyn', ed)
 # test D attributes for pkg-config
 pkgc = import('pkgconfig')
 pkgc.generate(name: 'test',
-              libraries: ldyn,
-              subdirs: 'd/stuff',
-              description: 'A test of D attributes to pkgconfig.generate.',
-              d_module_versions: ['Use_Static']
+          libraries: ldyn,
+          subdirs: 'd/stuff',
+          description: 'A test of D attributes to pkgconfig.generate.',
+          d_module_versions: ['Use_Static']
 )

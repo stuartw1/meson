@@ -31,14 +31,11 @@ class ObjCPPCompiler(CPPCompiler):
         # TODO try to use sanity_check_impl instead of duplicated code
         source_name = os.path.join(work_dir, 'sanitycheckobjcpp.mm')
         binary_name = os.path.join(work_dir, 'sanitycheckobjcpp')
-        extra_flags = self.get_cross_extra_flags(environment, link=False)
-        if self.is_cross:
-            extra_flags += self.get_compile_only_args()
         with open(source_name, 'w') as ofile:
             ofile.write('#import<stdio.h>\n'
                         'class MyClass;'
                         'int main(int argc, char **argv) { return 0; }\n')
-        pc = subprocess.Popen(self.exelist + extra_flags + [source_name, '-o', binary_name])
+        pc = subprocess.Popen(self.exelist + [source_name, '-o', binary_name])
         pc.wait()
         if pc.returncode != 0:
             raise EnvironmentException('ObjC++ compiler %s can not compile programs.' % self.name_string())
@@ -52,17 +49,23 @@ class ObjCPPCompiler(CPPCompiler):
 
 
 class GnuObjCPPCompiler(GnuCompiler, ObjCPPCompiler):
-    def __init__(self, exelist, version, gcc_type, is_cross, exe_wrapper=None, defines=None):
+    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, defines=None):
         ObjCPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper)
-        GnuCompiler.__init__(self, gcc_type, defines)
+        GnuCompiler.__init__(self, compiler_type, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
-        self.warn_args = {'1': default_warn_args,
+        self.warn_args = {'0': [],
+                          '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
 
-class ClangObjCPPCompiler(ClangCompiler, GnuObjCPPCompiler):
-    def __init__(self, exelist, version, cltype, is_cross, exe_wrapper=None):
-        GnuObjCPPCompiler.__init__(self, exelist, version, cltype, is_cross, exe_wrapper)
-        ClangCompiler.__init__(self, cltype)
+class ClangObjCPPCompiler(ClangCompiler, ObjCPPCompiler):
+    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None):
+        ObjCPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper)
+        ClangCompiler.__init__(self, compiler_type)
+        default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
+        self.warn_args = {'0': [],
+                          '1': default_warn_args,
+                          '2': default_warn_args + ['-Wextra'],
+                          '3': default_warn_args + ['-Wextra', '-Wpedantic']}
         self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage']

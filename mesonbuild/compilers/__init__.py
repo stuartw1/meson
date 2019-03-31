@@ -14,16 +14,8 @@
 
 # Public symbols for compilers sub-package when using 'from . import compilers'
 __all__ = [
-    'CLANG_OSX',
-    'CLANG_STANDARD',
-    'CLANG_WIN',
-    'GCC_CYGWIN',
-    'GCC_MINGW',
-    'GCC_OSX',
-    'GCC_STANDARD',
-    'ICC_OSX',
-    'ICC_STANDARD',
-    'ICC_WIN',
+    'CompilerType',
+    'Compiler',
 
     'all_languages',
     'base_options',
@@ -54,6 +46,8 @@ __all__ = [
     'ClangCPPCompiler',
     'ClangObjCCompiler',
     'ClangObjCPPCompiler',
+    'ClangClCCompiler',
+    'ClangClCPPCompiler',
     'CompilerArgs',
     'CPPCompiler',
     'DCompiler',
@@ -68,6 +62,7 @@ __all__ = [
     'GnuDCompiler',
     'GnuFortranCompiler',
     'ElbrusFortranCompiler',
+    'FlangFortranCompiler',
     'GnuObjCCompiler',
     'GnuObjCPPCompiler',
     'IntelCompiler',
@@ -77,14 +72,20 @@ __all__ = [
     'JavaCompiler',
     'LLVMDCompiler',
     'MonoCompiler',
+    'CudaCompiler',
     'VisualStudioCsCompiler',
     'NAGFortranCompiler',
     'ObjCCompiler',
     'ObjCPPCompiler',
     'Open64FortranCompiler',
     'PathScaleFortranCompiler',
+    'PGICCompiler',
+    'PGICPPCompiler',
     'PGIFortranCompiler',
     'RustCompiler',
+    'CcrxCCompiler',
+    'CcrxCompiler',
+    'CcrxCPPCompiler',
     'SunFortranCompiler',
     'SwiftCompiler',
     'ValaCompiler',
@@ -94,16 +95,8 @@ __all__ = [
 
 # Bring symbols from each module into compilers sub-package namespace
 from .compilers import (
-    GCC_OSX,
-    GCC_MINGW,
-    GCC_CYGWIN,
-    GCC_STANDARD,
-    CLANG_OSX,
-    CLANG_WIN,
-    CLANG_STANDARD,
-    ICC_OSX,
-    ICC_WIN,
-    ICC_STANDARD,
+    CompilerType,
+    Compiler,
     all_languages,
     base_options,
     clib_langs,
@@ -126,15 +119,19 @@ from .compilers import (
     CompilerArgs,
     GnuCompiler,
     IntelCompiler,
+    CcrxCompiler,
 )
 from .c import (
     CCompiler,
     ArmCCompiler,
     ArmclangCCompiler,
     ClangCCompiler,
+    ClangClCCompiler,
     GnuCCompiler,
     ElbrusCCompiler,
     IntelCCompiler,
+    PGICCompiler,
+    CcrxCCompiler,
     VisualStudioCCompiler,
 )
 from .cpp import (
@@ -142,9 +139,12 @@ from .cpp import (
     ArmCPPCompiler,
     ArmclangCPPCompiler,
     ClangCPPCompiler,
+    ClangClCPPCompiler,
     GnuCPPCompiler,
     ElbrusCPPCompiler,
     IntelCPPCompiler,
+    PGICPPCompiler,
+    CcrxCPPCompiler,
     VisualStudioCPPCompiler,
 )
 from .cs import MonoCompiler, VisualStudioCsCompiler
@@ -154,11 +154,13 @@ from .d import (
     GnuDCompiler,
     LLVMDCompiler,
 )
+from .cuda import CudaCompiler
 from .fortran import (
     FortranCompiler,
     G95FortranCompiler,
     GnuFortranCompiler,
     ElbrusFortranCompiler,
+    FlangFortranCompiler,
     IntelFortranCompiler,
     NAGFortranCompiler,
     Open64FortranCompiler,
