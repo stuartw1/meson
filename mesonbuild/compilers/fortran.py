@@ -11,9 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List
-import subprocess, os
-from pathlib import Path
 
 from .c import CCompiler
 from .compilers import (
@@ -25,14 +22,12 @@ from .compilers import (
     clike_debug_args,
     Compiler,
     GnuCompiler,
-    ClangCompiler,
     ElbrusCompiler,
     IntelCompiler,
-    PGICompiler
 )
 
-from mesonbuild.mesonlib import EnvironmentException, is_osx, LibType
-
+from mesonbuild.mesonlib import EnvironmentException, is_osx
+import subprocess, os
 
 class FortranCompiler(Compiler):
     library_dirs_cache = CCompiler.library_dirs_cache
@@ -78,8 +73,12 @@ class FortranCompiler(Compiler):
         source_name = os.path.join(work_dir, 'sanitycheckf.f90')
         binary_name = os.path.join(work_dir, 'sanitycheckf')
         with open(source_name, 'w') as ofile:
-            ofile.write('print *, "Fortran compilation is working."; end')
-        pc = subprocess.Popen(self.exelist + [source_name, '-o', binary_name])
+            ofile.write('''program prog
+     print *, "Fortran compilation is working."
+end program prog
+''')
+        extra_flags = self.get_cross_extra_flags(environment, link=True)
+        pc = subprocess.Popen(self.exelist + extra_flags + [source_name, '-o', binary_name])
         pc.wait()
         if pc.returncode != 0:
             raise EnvironmentException('Compiler %s can not compile programs.' % self.name_string())
@@ -172,26 +171,8 @@ class FortranCompiler(Compiler):
     def get_module_outdir_args(self, path):
         return ['-module', path]
 
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '-L':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-
-        return parameter_list
-
-    def module_name_to_filename(self, module_name: str) -> str:
-        if '_' in module_name:  # submodule
-            s = module_name.lower()
-            if self.id in ('gcc', 'intel'):
-                filename = s.replace('_', '@') + '.smod'
-            elif self.id in ('pgi', 'flang'):
-                filename = s.replace('_', '-') + '.mod'
-            else:
-                filename = s + '.mod'
-        else:  # module
-            filename = module_name.lower() + '.mod'
-
-        return filename
+    def module_name_to_filename(self, module_name):
+        return module_name.lower() + '.mod'
 
     def get_std_shared_lib_link_args(self):
         return CCompiler.get_std_shared_lib_link_args(self)
@@ -238,7 +219,7 @@ class FortranCompiler(Compiler):
                                dependencies=dependencies)
 
     def run(self, code, env, *, extra_args=None, dependencies=None):
-        return CCompiler.run(self, code, env, extra_args=extra_args, dependencies=dependencies)
+        return CCompiler.run(self, code, env, extra_args, dependencies)
 
     def _get_patterns(self, *args, **kwargs):
         return CCompiler._get_patterns(self, *args, **kwargs)
@@ -252,7 +233,7 @@ class FortranCompiler(Compiler):
     def find_library_impl(self, *args):
         return CCompiler.find_library_impl(self, *args)
 
-    def find_library(self, libname, env, extra_dirs, libtype: LibType = LibType.PREFER_SHARED):
+    def find_library(self, libname, env, extra_dirs, libtype='default'):
         code = '''program main
             call exit(0)
         end program main'''
@@ -273,27 +254,13 @@ class FortranCompiler(Compiler):
     def has_multi_arguments(self, args, env):
         return CCompiler.has_multi_arguments(self, args, env)
 
-    def has_header(self, hname, prefix, env, *, extra_args=None, dependencies=None):
-        return CCompiler.has_header(self, hname, prefix, env, extra_args=extra_args, dependencies=dependencies)
-
-    def get_define(self, dname, prefix, env, extra_args, dependencies):
-        return CCompiler.get_define(self, dname, prefix, env, extra_args, dependencies)
-
-    @classmethod
-    def _get_trials_from_pattern(cls, pattern, directory, libname):
-        return CCompiler._get_trials_from_pattern(pattern, directory, libname)
-
-    @staticmethod
-    def _get_file_from_list(env, files: List[str]) -> Path:
-        return CCompiler._get_file_from_list(env, files)
 
 class GnuFortranCompiler(GnuCompiler, FortranCompiler):
     def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, defines=None, **kwargs):
         FortranCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
         GnuCompiler.__init__(self, compiler_type, defines)
         default_warn_args = ['-Wall']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -320,8 +287,7 @@ class G95FortranCompiler(FortranCompiler):
         FortranCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwags)
         self.id = 'g95'
         default_warn_args = ['-Wall']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-pedantic']}
 
@@ -366,8 +332,7 @@ class IntelFortranCompiler(IntelCompiler, FortranCompiler):
         IntelCompiler.__init__(self, CompilerType.ICC_STANDARD)
         self.id = 'intel'
         default_warn_args = ['-warn', 'general', '-warn', 'truncated_source']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-warn', 'unused'],
                           '3': ['-warn', 'all']}
 
@@ -389,8 +354,7 @@ class PathScaleFortranCompiler(FortranCompiler):
         FortranCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwags)
         self.id = 'pathscale'
         default_warn_args = ['-fullwarn']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args,
                           '3': default_warn_args}
 
@@ -398,30 +362,31 @@ class PathScaleFortranCompiler(FortranCompiler):
         return ['-mp']
 
 
-class PGIFortranCompiler(PGICompiler, FortranCompiler):
+class PGIFortranCompiler(FortranCompiler):
     def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwags):
         FortranCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwags)
-        PGICompiler.__init__(self, CompilerType.PGI_STANDARD)
-
-
-class FlangFortranCompiler(ClangCompiler, FortranCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwags):
-        FortranCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwags)
-        ClangCompiler.__init__(self, CompilerType.CLANG_STANDARD)
-        self.id = 'flang'
+        self.id = 'pgi'
         default_warn_args = ['-Minform=inform']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args,
                           '3': default_warn_args}
+
+    def get_module_incdir_args(self):
+        return ('-module', )
+
+    def get_no_warn_args(self):
+        return ['-silent']
+
+    def openmp_flags(self):
+        return ['-fopenmp']
+
 
 class Open64FortranCompiler(FortranCompiler):
     def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwags):
         FortranCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwags)
         self.id = 'open64'
         default_warn_args = ['-fullwarn']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args,
                           '3': default_warn_args}
 

@@ -37,7 +37,7 @@ class MesonUnicodeDecodeError(MesonException):
 def decode_match(match):
     try:
         return codecs.decode(match.group(0), 'unicode_escape')
-    except UnicodeDecodeError:
+    except UnicodeDecodeError as err:
         raise MesonUnicodeDecodeError(match.group(0))
 
 class ParseException(MesonException):
@@ -190,11 +190,7 @@ This will become a hard error in a future Meson release.""", self.getline(line_s
                             line_start = mo.end() - len(lines[-1])
                     elif tid == 'number':
                         value = int(match_text, base=0)
-                    elif tid == 'eol_cont':
-                        lineno += 1
-                        line_start = loc
-                        break
-                    elif tid == 'eol':
+                    elif tid == 'eol' or tid == 'eol_cont':
                         lineno += 1
                         line_start = loc
                         if par_count > 0 or bracket_count > 0 or curl_count > 0:
@@ -212,15 +208,7 @@ This will become a hard error in a future Meson release.""", self.getline(line_s
             if not matched:
                 raise ParseException('lexer', self.getline(line_start), lineno, col)
 
-class BaseNode:
-    def accept(self, visitor):
-        fname = 'visit_{}'.format(type(self).__name__)
-        if hasattr(visitor, fname):
-            func = getattr(visitor, fname)
-            if hasattr(func, '__call__'):
-                func(self)
-
-class ElementaryNode(BaseNode):
+class ElementaryNode:
     def __init__(self, token):
         self.lineno = token.lineno
         self.subdir = token.subdir
@@ -261,32 +249,28 @@ class ContinueNode(ElementaryNode):
 class BreakNode(ElementaryNode):
     pass
 
-class ArrayNode(BaseNode):
-    def __init__(self, args, lineno, colno, end_lineno, end_colno):
+class ArrayNode:
+    def __init__(self, args):
         self.subdir = args.subdir
-        self.lineno = lineno
-        self.colno = colno
-        self.end_lineno = end_lineno
-        self.end_colno = end_colno
+        self.lineno = args.lineno
+        self.colno = args.colno
         self.args = args
 
-class DictNode(BaseNode):
-    def __init__(self, args, lineno, colno, end_lineno, end_colno):
+class DictNode:
+    def __init__(self, args):
         self.subdir = args.subdir
-        self.lineno = lineno
-        self.colno = colno
-        self.end_lineno = end_lineno
-        self.end_colno = end_colno
+        self.lineno = args.lineno
+        self.colno = args.colno
         self.args = args
 
-class EmptyNode(BaseNode):
+class EmptyNode:
     def __init__(self, lineno, colno):
         self.subdir = ''
         self.lineno = lineno
         self.colno = colno
         self.value = None
 
-class OrNode(BaseNode):
+class OrNode:
     def __init__(self, left, right):
         self.subdir = left.subdir
         self.lineno = left.lineno
@@ -294,7 +278,7 @@ class OrNode(BaseNode):
         self.left = left
         self.right = right
 
-class AndNode(BaseNode):
+class AndNode:
     def __init__(self, left, right):
         self.subdir = left.subdir
         self.lineno = left.lineno
@@ -302,7 +286,7 @@ class AndNode(BaseNode):
         self.left = left
         self.right = right
 
-class ComparisonNode(BaseNode):
+class ComparisonNode:
     def __init__(self, ctype, left, right):
         self.lineno = left.lineno
         self.colno = left.colno
@@ -311,7 +295,7 @@ class ComparisonNode(BaseNode):
         self.right = right
         self.ctype = ctype
 
-class ArithmeticNode(BaseNode):
+class ArithmeticNode:
     def __init__(self, operation, left, right):
         self.subdir = left.subdir
         self.lineno = left.lineno
@@ -320,21 +304,21 @@ class ArithmeticNode(BaseNode):
         self.right = right
         self.operation = operation
 
-class NotNode(BaseNode):
+class NotNode:
     def __init__(self, location_node, value):
         self.subdir = location_node.subdir
         self.lineno = location_node.lineno
         self.colno = location_node.colno
         self.value = value
 
-class CodeBlockNode(BaseNode):
+class CodeBlockNode:
     def __init__(self, location_node):
         self.subdir = location_node.subdir
         self.lineno = location_node.lineno
         self.colno = location_node.colno
         self.lines = []
 
-class IndexNode(BaseNode):
+class IndexNode:
     def __init__(self, iobject, index):
         self.iobject = iobject
         self.index = index
@@ -342,7 +326,7 @@ class IndexNode(BaseNode):
         self.lineno = iobject.lineno
         self.colno = iobject.colno
 
-class MethodNode(BaseNode):
+class MethodNode:
     def __init__(self, subdir, lineno, colno, source_object, name, args):
         self.subdir = subdir
         self.lineno = lineno
@@ -352,36 +336,32 @@ class MethodNode(BaseNode):
         assert(isinstance(self.name, str))
         self.args = args
 
-class FunctionNode(BaseNode):
-    def __init__(self, subdir, lineno, colno, end_lineno, end_colno, func_name, args):
+class FunctionNode:
+    def __init__(self, subdir, lineno, colno, func_name, args):
         self.subdir = subdir
         self.lineno = lineno
         self.colno = colno
-        self.end_lineno = end_lineno
-        self.end_colno = end_colno
         self.func_name = func_name
         assert(isinstance(func_name, str))
         self.args = args
 
-class AssignmentNode(BaseNode):
-    def __init__(self, subdir, lineno, colno, var_name, value):
-        self.subdir = subdir
+class AssignmentNode:
+    def __init__(self, lineno, colno, var_name, value):
         self.lineno = lineno
         self.colno = colno
         self.var_name = var_name
         assert(isinstance(var_name, str))
         self.value = value
 
-class PlusAssignmentNode(BaseNode):
-    def __init__(self, subdir, lineno, colno, var_name, value):
-        self.subdir = subdir
+class PlusAssignmentNode:
+    def __init__(self, lineno, colno, var_name, value):
         self.lineno = lineno
         self.colno = colno
         self.var_name = var_name
         assert(isinstance(var_name, str))
         self.value = value
 
-class ForeachClauseNode(BaseNode):
+class ForeachClauseNode:
     def __init__(self, lineno, colno, varnames, items, block):
         self.lineno = lineno
         self.colno = colno
@@ -389,37 +369,36 @@ class ForeachClauseNode(BaseNode):
         self.items = items
         self.block = block
 
-class IfClauseNode(BaseNode):
+class IfClauseNode:
     def __init__(self, lineno, colno):
         self.lineno = lineno
         self.colno = colno
         self.ifs = []
         self.elseblock = EmptyNode(lineno, colno)
 
-class UMinusNode(BaseNode):
+class UMinusNode:
     def __init__(self, current_location, value):
         self.subdir = current_location.subdir
         self.lineno = current_location.lineno
         self.colno = current_location.colno
         self.value = value
 
-class IfNode(BaseNode):
+class IfNode:
     def __init__(self, lineno, colno, condition, block):
         self.lineno = lineno
         self.colno = colno
         self.condition = condition
         self.block = block
 
-class TernaryNode(BaseNode):
-    def __init__(self, subdir, lineno, colno, condition, trueblock, falseblock):
-        self.subdir = subdir
+class TernaryNode:
+    def __init__(self, lineno, colno, condition, trueblock, falseblock):
         self.lineno = lineno
         self.colno = colno
         self.condition = condition
         self.trueblock = trueblock
         self.falseblock = falseblock
 
-class ArgumentNode(BaseNode):
+class ArgumentNode:
     def __init__(self, token):
         self.lineno = token.lineno
         self.colno = token.colno
@@ -531,13 +510,13 @@ class Parser:
             value = self.e1()
             if not isinstance(left, IdNode):
                 raise ParseException('Plusassignment target must be an id.', self.getline(), left.lineno, left.colno)
-            return PlusAssignmentNode(left.subdir, left.lineno, left.colno, left.value, value)
+            return PlusAssignmentNode(left.lineno, left.colno, left.value, value)
         elif self.accept('assign'):
             value = self.e1()
             if not isinstance(left, IdNode):
                 raise ParseException('Assignment target must be an id.',
                                      self.getline(), left.lineno, left.colno)
-            return AssignmentNode(left.subdir, left.lineno, left.colno, left.value, value)
+            return AssignmentNode(left.lineno, left.colno, left.value, value)
         elif self.accept('questionmark'):
             if self.in_ternary:
                 raise ParseException('Nested ternary operators are not allowed.',
@@ -547,7 +526,7 @@ class Parser:
             self.expect('colon')
             falseblock = self.e1()
             self.in_ternary = False
-            return TernaryNode(left.subdir, left.lineno, left.colno, left, trueblock, falseblock)
+            return TernaryNode(left.lineno, left.colno, left, trueblock, falseblock)
         return left
 
     def e2(self):
@@ -626,7 +605,7 @@ class Parser:
             if not isinstance(left, IdNode):
                 raise ParseException('Function call must be applied to plain id',
                                      self.getline(), left.lineno, left.colno)
-            left = FunctionNode(left.subdir, left.lineno, left.colno, self.current.lineno, self.current.colno, left.value, args)
+            left = FunctionNode(left.subdir, left.lineno, left.colno, left.value, args)
         go_again = True
         while go_again:
             go_again = False
@@ -647,11 +626,11 @@ class Parser:
         elif self.accept('lbracket'):
             args = self.args()
             self.block_expect('rbracket', block_start)
-            return ArrayNode(args, block_start.lineno, block_start.colno, self.current.lineno, self.current.colno)
+            return ArrayNode(args)
         elif self.accept('lcurl'):
             key_values = self.key_values()
             self.block_expect('rcurl', block_start)
-            return DictNode(key_values, block_start.lineno, block_start.colno, self.current.lineno, self.current.colno)
+            return DictNode(key_values)
         else:
             return self.e9()
 

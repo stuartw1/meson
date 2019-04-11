@@ -91,13 +91,6 @@ class SwiftCompiler(Compiler):
     def get_compile_only_args(self):
         return ['-c']
 
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '-L':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-
-        return parameter_list
-
     def sanity_check(self, work_dir, environment):
         src = 'swifttest.swift'
         source_name = os.path.join(work_dir, src)
@@ -105,7 +98,8 @@ class SwiftCompiler(Compiler):
         with open(source_name, 'w') as ofile:
             ofile.write('''print("Swift compilation is working.")
 ''')
-        pc = subprocess.Popen(self.exelist + ['-emit-executable', '-o', output_name, src], cwd=work_dir)
+        extra_flags = self.get_cross_extra_flags(environment, link=True)
+        pc = subprocess.Popen(self.exelist + extra_flags + ['-emit-executable', '-o', output_name, src], cwd=work_dir)
         pc.wait()
         if pc.returncode != 0:
             raise EnvironmentException('Swift compiler %s can not compile programs.' % self.name_string())

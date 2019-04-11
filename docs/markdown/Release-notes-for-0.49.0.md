@@ -3,8 +3,6 @@ title: Release 0.49
 short-description: Release notes for 0.49
 ...
 
-# New features
-
 ## Libgcrypt dependency now supports libgcrypt-config
 
 Earlier, `dependency('libgcrypt')` could only detect the library with pkg-config
@@ -46,9 +44,7 @@ target specific arguments to the compiler and linker will need to be
 added explicitly from the
 cross-file(`c_args`/`c_link_args`/`cpp_args`/`cpp_link_args`) or some
 other way.  Refer to the CC-RX User's manual for additional compiler
-and linker options.
-
-## CMake `find_package` dependency backend
+and linker options.## CMake `find_package` dependency backend
 
 Meson can now use the CMake `find_package` ecosystem to
 detect dependencies. Both the old-style `<NAME>_LIBRARIES`
@@ -174,9 +170,8 @@ compression preferences.
 
 ## Native config files
 
-Native files (`--native-file`) are the counterpart to cross files (`--cross-file`),
-and allow specifying information about the build machine, both when cross compiling
-and when not.
+Native files are the counterpart to cross files, and allow specifying
+information about the build machine, both when cross compiling and when not.
 
 Currently the native files only allow specifying the names of binaries, similar
 to the cross file, for example:

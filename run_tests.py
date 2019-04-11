@@ -38,7 +38,7 @@ def guess_backend(backend, msbuild_exe):
     # Auto-detect backend if unspecified
     backend_flags = []
     if backend is None:
-        if msbuild_exe is not None and mesonlib.is_windows():
+        if msbuild_exe is not None:
             backend = 'vs' # Meson will auto-detect VS version to use
         else:
             backend = 'ninja'
@@ -66,7 +66,7 @@ class FakeCompilerOptions:
     def __init__(self):
         self.value = []
 
-def get_fake_options(prefix=''):
+def get_fake_options(prefix):
     import argparse
     opts = argparse.Namespace()
     opts.cross_file = None
@@ -76,12 +76,9 @@ def get_fake_options(prefix=''):
     opts.native_file = []
     return opts
 
-def get_fake_env(sdir='', bdir=None, prefix='', opts=None):
-    if opts is None:
-        opts = get_fake_options(prefix)
-    env = Environment(sdir, bdir, opts)
-    env.coredata.compiler_options.host['c_args'] = FakeCompilerOptions()
-    env.machines.host.cpu_family = 'x86_64' # Used on macOS inside find_library
+def get_fake_env(sdir, bdir, prefix):
+    env = Environment(sdir, bdir, get_fake_options(prefix))
+    env.coredata.compiler_options['c_args'] = FakeCompilerOptions()
     return env
 
 
@@ -214,14 +211,6 @@ def run_mtest_inprocess(commandlist):
         sys.stderr = old_stderr
     return returncode, mystdout.getvalue(), mystderr.getvalue()
 
-def clear_meson_configure_class_caches():
-    mesonbuild.compilers.CCompiler.library_dirs_cache = {}
-    mesonbuild.compilers.CCompiler.program_dirs_cache = {}
-    mesonbuild.compilers.CCompiler.find_library_cache = {}
-    mesonbuild.compilers.CCompiler.find_framework_cache = {}
-    mesonbuild.dependencies.PkgConfigDependency.pkgbin_cache = {}
-    mesonbuild.dependencies.PkgConfigDependency.class_pkgbin = mesonlib.PerMachine(None, None, None)
-
 def run_configure_inprocess(commandlist):
     old_stdout = sys.stdout
     sys.stdout = mystdout = StringIO()
@@ -232,7 +221,6 @@ def run_configure_inprocess(commandlist):
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
-        clear_meson_configure_class_caches()
     return returncode, mystdout.getvalue(), mystderr.getvalue()
 
 def run_configure_external(full_command):

@@ -1,5 +1,6 @@
-use dynamic, only: hello
-implicit none
+program main
+  use dynamic
+  implicit none
 
-call hello()
-end program
+  call hello()
+end program main

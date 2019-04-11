@@ -23,15 +23,11 @@ import argparse
 from . import environment, interpreter, mesonlib
 from . import build
 from . import mlog, coredata
-from . import mintro
-from .mconf import make_lower_case
 from .mesonlib import MesonException
 
 def add_arguments(parser):
     coredata.register_builtin_arguments(parser)
-    parser.add_argument('--cross-file',
-                        default=[],
-                        action='append',
+    parser.add_argument('--cross-file', default=None,
                         help='File describing cross compilation environment.')
     parser.add_argument('--native-file',
                         default=[],
@@ -187,20 +183,16 @@ class MesonApp:
             mlog.log('Target machine cpu:', mlog.bold(intr.builtin['target_machine'].cpu_method([], {})))
         mlog.log('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
         mlog.log('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
-        try:
-            if self.options.profile:
-                fname = os.path.join(self.build_dir, 'meson-private', 'profile-interpreter.log')
-                profile.runctx('intr.run()', globals(), locals(), filename=fname)
-            else:
-                intr.run()
-        except Exception as e:
-            mintro.write_meson_info_file(b, [e])
-            raise
+        if self.options.profile:
+            fname = os.path.join(self.build_dir, 'meson-private', 'profile-interpreter.log')
+            profile.runctx('intr.run()', globals(), locals(), filename=fname)
+        else:
+            intr.run()
         # Print all default option values that don't match the current value
         for def_opt_name, def_opt_value, cur_opt_value in intr.get_non_matching_default_options():
             mlog.log('Option', mlog.bold(def_opt_name), 'is:',
-                     mlog.bold(make_lower_case(cur_opt_value.printable_value())),
-                     '[default: {}]'.format(make_lower_case(def_opt_value)))
+                     mlog.bold(str(cur_opt_value)),
+                     '[default: {}]'.format(str(def_opt_value)))
         try:
             dumpfile = os.path.join(env.get_scratch_dir(), 'build.dat')
             # We would like to write coredata as late as possible since we use the existence of
@@ -223,16 +215,7 @@ class MesonApp:
                 coredata.write_cmd_line_file(self.build_dir, self.options)
             else:
                 coredata.update_cmd_line_file(self.build_dir, self.options)
-
-            # Generate an IDE introspection file with the same syntax as the already existing API
-            if self.options.profile:
-                fname = os.path.join(self.build_dir, 'meson-private', 'profile-introspector.log')
-                profile.runctx('mintro.generate_introspection_file(b, intr.backend)', globals(), locals(), filename=fname)
-            else:
-                mintro.generate_introspection_file(b, intr.backend)
-            mintro.write_meson_info_file(b, [], True)
-        except Exception as e:
-            mintro.write_meson_info_file(b, [e])
+        except:
             if 'cdf' in locals():
                 old_cdf = cdf + '.prev'
                 if os.path.exists(old_cdf):

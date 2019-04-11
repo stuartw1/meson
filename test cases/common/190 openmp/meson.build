@@ -13,9 +13,6 @@ endif
 if cc.get_id() == 'clang-cl'
   error('MESON_SKIP_TEST clang-cl does not support OpenMP.')
 endif
-if cc.get_id() == 'clang' and host_machine.system() == 'windows'
-  error('MESON_SKIP_TEST Windows clang does not support OpenMP.')
-endif
 if host_machine.system() == 'darwin'
   error('MESON_SKIP_TEST macOS does not support OpenMP.')
 endif
@@ -38,19 +35,11 @@ test('OpenMP C++', execpp, env : env)
 
 
 if add_languages('fortran', required : false)
-  # Mixing compilers (msvc/clang with gfortran) does not seem to work on Windows.
-  if build_machine.system() != 'windows' or cc.get_id() == 'gnu'
-    exef = executable('exef',
-      'main.f90',
-      dependencies : [openmp])
-    test('OpenMP Fortran', exef, env : env)
+  exef = executable('exef',
+    'main.f90',
+    dependencies : [openmp])
 
-    openmp_f = dependency('openmp', language : 'fortran')
-    exe_f = executable('exe_f',
-      'main.f90',
-      dependencies : [openmp_f])
-    test('OpenMP Fortran-specific', exe_f, env : env)
-  endif
+  test('OpenMP Fortran', execpp, env : env)
 endif
 
 # Check we can apply a version constraint

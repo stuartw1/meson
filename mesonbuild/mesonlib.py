@@ -13,8 +13,7 @@
 # limitations under the License.
 
 """A library of random helper functionality."""
-from pathlib import Path
-from typing import List
+
 import functools
 import sys
 import stat
@@ -69,11 +68,11 @@ def set_meson_command(mainfile):
     if 'MESON_COMMAND_TESTS' in os.environ:
         mlog.log('meson_command is {!r}'.format(meson_command))
 
-def is_ascii_string(astring) -> bool:
+def is_ascii_string(astring):
     try:
         if isinstance(astring, str):
             astring.encode('ascii')
-        elif isinstance(astring, bytes):
+        if isinstance(astring, bytes):
             astring.decode('ascii')
     except UnicodeDecodeError:
         return False
@@ -207,17 +206,17 @@ class FileMode:
         return perms
 
 class File:
-    def __init__(self, is_built: bool, subdir: str, fname: str):
+    def __init__(self, is_built, subdir, fname):
         self.is_built = is_built
         self.subdir = subdir
         self.fname = fname
         assert(isinstance(self.subdir, str))
         assert(isinstance(self.fname, str))
 
-    def __str__(self) -> str:
+    def __str__(self):
         return self.relative_name()
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         ret = '<File: {0}'
         if not self.is_built:
             ret += ' (not built)'
@@ -226,49 +225,48 @@ class File:
 
     @staticmethod
     @lru_cache(maxsize=None)
-    def from_source_file(source_root: str, subdir: str, fname: str):
+    def from_source_file(source_root, subdir, fname):
         if not os.path.isfile(os.path.join(source_root, subdir, fname)):
             raise MesonException('File %s does not exist.' % fname)
         return File(False, subdir, fname)
 
     @staticmethod
-    def from_built_file(subdir: str, fname: str):
+    def from_built_file(subdir, fname):
         return File(True, subdir, fname)
 
     @staticmethod
-    def from_absolute_file(fname: str):
+    def from_absolute_file(fname):
         return File(False, '', fname)
 
     @lru_cache(maxsize=None)
-    def rel_to_builddir(self, build_to_src: str) -> str:
+    def rel_to_builddir(self, build_to_src):
         if self.is_built:
             return self.relative_name()
         else:
             return os.path.join(build_to_src, self.subdir, self.fname)
 
     @lru_cache(maxsize=None)
-    def absolute_path(self, srcdir: str, builddir: str) -> str:
+    def absolute_path(self, srcdir, builddir):
         absdir = srcdir
         if self.is_built:
             absdir = builddir
         return os.path.join(absdir, self.relative_name())
 
-    def endswith(self, ending: str) -> bool:
+    def endswith(self, ending):
         return self.fname.endswith(ending)
 
-    def split(self, s: str) -> List[str]:
+    def split(self, s):
         return self.fname.split(s)
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other):
         return (self.fname, self.subdir, self.is_built) == (other.fname, other.subdir, other.is_built)
 
-    def __hash__(self) -> int:
+    def __hash__(self):
         return hash((self.fname, self.subdir, self.is_built))
 
     @lru_cache(maxsize=None)
-    def relative_name(self) -> str:
+    def relative_name(self):
         return os.path.join(self.subdir, self.fname)
-
 
 def get_compiler_for_source(compilers, src):
     for comp in compilers:
@@ -310,15 +308,7 @@ class OrderedEnum(Enum):
             return self.value < other.value
         return NotImplemented
 
-class MachineChoice(OrderedEnum):
-
-    """Enum class representing one of the three possible values for binaries,
-    the build, host, and target machines.
-    """
-
-    BUILD = 0
-    HOST = 1
-    TARGET = 2
+MachineChoice = OrderedEnum('MachineChoice', ['BUILD', 'HOST', 'TARGET'])
 
 class PerMachine:
     def __init__(self, build, host, target):
@@ -341,35 +331,36 @@ class PerMachine:
         }[machine]
         setattr(self, key, val)
 
-def is_osx() -> bool:
+def is_osx():
     return platform.system().lower() == 'darwin'
 
-def is_linux() -> bool:
+def is_linux():
     return platform.system().lower() == 'linux'
 
-def is_android() -> bool:
+def is_android():
     return platform.system().lower() == 'android'
 
-def is_haiku() -> bool:
+def is_haiku():
     return platform.system().lower() == 'haiku'
 
-def is_openbsd() -> bool:
+def is_openbsd():
     return platform.system().lower() == 'openbsd'
 
-def is_windows() -> bool:
+def is_windows():
     platname = platform.system().lower()
     return platname == 'windows' or 'mingw' in platname
 
-def is_cygwin() -> bool:
-    return platform.system().lower().startswith('cygwin')
+def is_cygwin():
+    platname = platform.system().lower()
+    return platname.startswith('cygwin')
 
-def is_debianlike() -> bool:
+def is_debianlike():
     return os.path.isfile('/etc/debian_version')
 
-def is_dragonflybsd() -> bool:
+def is_dragonflybsd():
     return platform.system().lower() == 'dragonfly'
 
-def is_freebsd() -> bool:
+def is_freebsd():
     return platform.system().lower() == 'freebsd'
 
 def _get_machine_is_cross(env, is_cross):
@@ -460,33 +451,15 @@ def for_openbsd(is_cross, env):
     """
     return _get_machine_is_cross(env, is_cross).is_openbsd()
 
-def exe_exists(arglist: List[str]) -> bool:
+def exe_exists(arglist):
     try:
-        if subprocess.run(arglist, timeout=10).returncode == 0:
+        p = subprocess.Popen(arglist, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p.communicate()
+        if p.returncode == 0:
             return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
         pass
     return False
-
-@lru_cache(maxsize=None)
-def darwin_get_object_archs(objpath):
-    '''
-    For a specific object (executable, static library, dylib, etc), run `lipo`
-    to fetch the list of archs supported by it. Supports both thin objects and
-    'fat' objects.
-    '''
-    _, stdo, stderr = Popen_safe(['lipo', '-info', objpath])
-    if not stdo:
-        mlog.debug('lipo {}: {}'.format(objpath, stderr))
-        return None
-    stdo = stdo.rsplit(': ', 1)[1]
-    # Convert from lipo-style archs to meson-style CPUs
-    stdo = stdo.replace('i386', 'x86')
-    stdo = stdo.replace('arm64', 'aarch64')
-    # Add generic name for armv7 and armv7s
-    if 'armv7' in stdo:
-        stdo += ' arm'
-    return stdo.split()
 
 def detect_vcs(source_dir):
     vcs_systems = [
@@ -495,7 +468,7 @@ def detect_vcs(source_dir):
         dict(name = 'subversion', cmd = 'svn', repo_dir = '.svn', get_rev = 'svn info',               rev_regex = 'Revision: (.*)', dep = '.svn/wc.db'),
         dict(name = 'bazaar',     cmd = 'bzr', repo_dir = '.bzr', get_rev = 'bzr revno',              rev_regex = '(.*)', dep = '.bzr'),
     ]
-    # FIXME: this is much cleaner with pathlib.Path
+
     segs = source_dir.replace('\\', '/').split('/')
     for i in range(len(segs), -1, -1):
         curdir = '/'.join(segs[:i])
@@ -522,9 +495,6 @@ class Version:
 
     def __str__(self):
         return '%s (V=%s)' % (self._s, str(self._v))
-
-    def __repr__(self):
-        return '<Version: {}>'.format(self._s)
 
     def __lt__(self, other):
         return self.__cmp__(other) == -1
@@ -638,7 +608,7 @@ def version_compare_condition_with_min(condition, minimum):
     # Map versions in the constraint of the form '0.46' to '0.46.0', to embed
     # this knowledge of the meson versioning scheme.
     condition = condition.strip()
-    if re.match(r'^\d+.\d+$', condition):
+    if re.match('^\d+.\d+$', condition):
         condition += '.0'
 
     return cmpop(Version(minimum), Version(condition))
@@ -655,8 +625,6 @@ def default_libdir():
                 return 'lib/' + archpath
         except Exception:
             pass
-    if is_freebsd():
-        return 'lib'
     if os.path.isdir('/usr/lib64') and not os.path.islink('/usr/lib64'):
         return 'lib64'
     return 'lib'
@@ -668,7 +636,7 @@ def default_libexecdir():
 def default_prefix():
     return 'c:/' if is_windows() else '/usr/local'
 
-def get_library_dirs() -> List[str]:
+def get_library_dirs():
     if is_windows():
         return ['C:/mingw/lib'] # Fixme
     if is_osx():
@@ -679,24 +647,20 @@ def get_library_dirs() -> List[str]:
     # than /usr/lib. If you feel that this search order is
     # problematic, please raise the issue on the mailing list.
     unixdirs = ['/usr/local/lib', '/usr/lib', '/lib']
-
-    if is_freebsd():
-        return unixdirs
-    # FIXME: this needs to be further genericized for aarch64 etc.
-    machine = platform.machine()
-    if machine in ('i386', 'i486', 'i586', 'i686'):
+    plat = subprocess.check_output(['uname', '-m']).decode().strip()
+    # This is a terrible hack. I admit it and I'm really sorry.
+    # I just don't know what the correct solution is.
+    if plat == 'i686':
         plat = 'i386'
-    elif machine.startswith('arm'):
+    if plat.startswith('arm'):
         plat = 'arm'
-
-    unixdirs += [str(x) for x in (Path('/usr/lib/') / plat).iterdir() if x.is_dir()]
+    unixdirs += glob('/usr/lib/' + plat + '*')
     if os.path.exists('/usr/lib64'):
         unixdirs.append('/usr/lib64')
-
-    unixdirs += [str(x) for x in (Path('/lib/') / plat).iterdir() if x.is_dir()]
+    unixdirs += glob('/lib/' + plat + '*')
     if os.path.exists('/lib64'):
         unixdirs.append('/lib64')
-
+    unixdirs += glob('/lib/' + plat + '*')
     return unixdirs
 
 def has_path_sep(name, sep='/\\'):
@@ -765,7 +729,7 @@ def do_mesondefine(line, confdata):
 
 def do_conf_file(src, dst, confdata, format, encoding='utf-8'):
     try:
-        with open(src, encoding=encoding, newline='') as f:
+        with open(src, encoding=encoding) as f:
             data = f.readlines()
     except Exception as e:
         raise MesonException('Could not read input file %s: %s' % (src, str(e)))
@@ -799,7 +763,7 @@ def do_conf_file(src, dst, confdata, format, encoding='utf-8'):
         result.append(line)
     dst_tmp = dst + '~'
     try:
-        with open(dst_tmp, 'w', encoding=encoding, newline='') as f:
+        with open(dst_tmp, 'w', encoding=encoding) as f:
             f.writelines(result)
     except Exception as e:
         raise MesonException('Could not write output file %s: %s' % (dst, str(e)))
@@ -1274,13 +1238,3 @@ def relpath(path, start):
         return os.path.relpath(path, start)
     except ValueError:
         return path
-
-
-class LibType(Enum):
-
-    """Enumeration for library types."""
-
-    SHARED = 0
-    STATIC = 1
-    PREFER_SHARED = 2
-    PREFER_STATIC = 3

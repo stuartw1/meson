@@ -13,7 +13,6 @@ These are return values of the `get_id` (Compiler family) and
 | clang     | The Clang compiler               | gcc                            |
 | clang-cl  | The Clang compiler (MSVC compatible driver) | msvc                |
 | dmd       | D lang reference compiler        |                                |
-| flang     | Flang Fortran compiler           |                                |
 | g95       | The G95 Fortran compiler         |                                |
 | gcc       | The GNU Compiler Collection      | gcc                            |
 | intel     | Intel compiler                   | msvc on windows, otherwise gcc |
@@ -24,7 +23,7 @@ These are return values of the `get_id` (Compiler family) and
 | nagfor    | The NAG Fortran compiler         |                                |
 | open64    | The Open64 Fortran Compiler      |                                |
 | pathscale | The Pathscale Fortran compiler   |                                |
-| pgi       |  Portland PGI C/C++/Fortran compilers |                                |
+| pgi       | The Portland Fortran compiler    |                                |
 | rustc     | Rust compiler                    |                                |
 | sun       | Sun Fortran compiler             |                                |
 | valac     | Vala compiler                    |                                |
@@ -60,7 +59,6 @@ set in the cross file.
 | ppc64               | 64 bit PPC processors |
 | riscv32             | 32 bit RISC-V Open ISA|
 | riscv64             | 64 bit RISC-V Open ISA|
-| rl78                | Renesas RL78          |
 | rx                  | Renesas RX 32 bit MCU |
 | s390x               | IBM zSystem s390x     |
 | sparc               | 32 bit SPARC          |
@@ -100,32 +98,24 @@ future releases.
 
 These are the parameter names for passing language specific arguments to your build target.
 
-| Language      | compiler name | linker name       |
-| ------------- | ------------- | ----------------- |
-| C             | c_args        | c_link_args       |
-| C++           | cpp_args      | cpp_link_args     |
-| C#            | cs_args       | cs_link_args      |
-| D             | d_args        | d_link_args       |
-| Fortran       | fortran_args  | fortran_link_args |
-| Java          | java_args     | java_link_args    |
-| Objective C   | objc_args     | objc_link_args    |
-| Objective C++ | objcpp_args   | objcpp_link_args  |
-| Rust          | rust_args     | rust_link_args    |
-| Vala          | vala_args     | vala_link_args    |
+| Language      | Parameter name |
+| -----         | ----- |
+| C             | c_args |
+| C++           | cpp_args |
+| C#            | cs_args |
+| D             | d_args |
+| Fortran       | fortran_args |
+| Java          | java_args |
+| Objective C   | objc_args |
+| Objective C++ | objcpp_args |
+| Rust          | rust_args |
+| Vala          | vala_args |
 
 ## Compiler and linker flag environment variables
 
 These environment variables will be used to modify the compiler and
 linker flags.
 
-It is recommended that you **do not use these**. They are provided purely to
-for backwards compatibility with other build systems. There are many caveats to
-their use, especially when rebuilding the project. It is **highly** recommended
-that you use [the command line arguments](#language-arguments-parameters-names)
-instead.
-
-| Name      | Comment                                  |
-| -----     | -------                                  |
 | CFLAGS    | Flags for the C compiler                 |
 | CXXFLAGS  | Flags for the C++ compiler               |
 | OBJCFLAGS | Flags for the Objective C compiler       |
@@ -196,18 +186,3 @@ which are supported by MSVC, GCC, Clang, and other compilers.
 |----------------------|
 | dllexport            |
 | dllimport            |
-
-
-## Dependency lookup methods
-
-These are the values that can be passed to `dependency` function's
-`method` keyword argument.
-
-| Name              | Comment                                      |
-| -----             | -------                                      |
-| auto              | Automatic method selection                   |
-| pkg-config        | Use Pkg-Config                               |
-| cmake             | Look up as a CMake module                    |
-| config-tool       | Use a custom dep tool such as `cups-config`  |
-| system            | System provided (e.g. OpenGL)                |
-| extraframework    | A macOS/iOS framework                        |

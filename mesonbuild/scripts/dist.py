@@ -188,8 +188,7 @@ def run(args):
 
     dist_name = build.project_name + '-' + build.project_version
 
-    _git = os.path.join(src_root, '.git')
-    if os.path.isdir(_git) or os.path.isfile(_git):
+    if os.path.isdir(os.path.join(src_root, '.git')):
         names = create_dist_git(dist_name, src_root, bld_root, dist_sub, build.dist_scripts)
     elif os.path.isdir(os.path.join(src_root, '.hg')):
         names = create_dist_hg(dist_name, src_root, bld_root, dist_sub, build.dist_scripts)

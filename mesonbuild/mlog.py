@@ -47,24 +47,6 @@ log_fname = 'meson-log.txt'
 log_depth = 0
 log_timestamp_start = None
 log_fatal_warnings = False
-log_disable_stdout = False
-log_errors_only = False
-
-def disable():
-    global log_disable_stdout
-    log_disable_stdout = True
-
-def enable():
-    global log_disable_stdout
-    log_disable_stdout = False
-
-def set_quiet():
-    global log_errors_only
-    log_errors_only = True
-
-def set_verbose():
-    global log_errors_only
-    log_errors_only = False
 
 def initialize(logdir, fatal_warnings=False):
     global log_dir, log_file, log_fatal_warnings
@@ -136,9 +118,6 @@ def process_markup(args, keep):
     return arr
 
 def force_print(*args, **kwargs):
-    global log_disable_stdout
-    if log_disable_stdout:
-        return
     iostr = io.StringIO()
     kwargs['file'] = iostr
     print(*args, **kwargs)
@@ -161,16 +140,14 @@ def debug(*args, **kwargs):
         print(*arr, file=log_file, **kwargs) # Log file never gets ANSI codes.
         log_file.flush()
 
-def log(*args, is_error=False, **kwargs):
-    global log_errors_only
+def log(*args, **kwargs):
     arr = process_markup(args, False)
     if log_file is not None:
         print(*arr, file=log_file, **kwargs) # Log file never gets ANSI codes.
         log_file.flush()
     if colorize_console:
         arr = process_markup(args, True)
-    if not log_errors_only or is_error:
-        force_print(*arr, **kwargs)
+    force_print(*arr, **kwargs)
 
 def _log_error(severity, *args, **kwargs):
     from .mesonlib import get_error_location_string
@@ -198,23 +175,20 @@ def _log_error(severity, *args, **kwargs):
         raise MesonException("Fatal warnings enabled, aborting")
 
 def error(*args, **kwargs):
-    return _log_error('error', *args, **kwargs, is_error=True)
+    return _log_error('error', *args, **kwargs)
 
 def warning(*args, **kwargs):
-    return _log_error('warning', *args, **kwargs, is_error=True)
+    return _log_error('warning', *args, **kwargs)
 
 def deprecation(*args, **kwargs):
-    return _log_error('deprecation', *args, **kwargs, is_error=True)
+    return _log_error('deprecation', *args, **kwargs)
 
-def exception(e, prefix=red('ERROR:')):
+def exception(e):
     log()
-    args = []
     if hasattr(e, 'file') and hasattr(e, 'lineno') and hasattr(e, 'colno'):
-        args.append('%s:%d:%d:' % (e.file, e.lineno, e.colno))
-    if prefix:
-        args.append(prefix)
-    args.append(e)
-    log(*args)
+        log('%s:%d:%d:' % (e.file, e.lineno, e.colno), red('ERROR: '), e)
+    else:
+        log(red('ERROR:'), e)
 
 # Format a list for logging purposes as a string. It separates
 # all but the last item with commas, and the last with 'and'.

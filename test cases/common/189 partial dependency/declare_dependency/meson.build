@@ -12,13 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-dec_sub_dep = declare_dependency(
-  include_directories : include_directories('headers'),
-)
-
 dec_dep = declare_dependency(
   sources : files('headers/foo.c'),
-  dependencies : dec_sub_dep,
+  include_directories : include_directories('headers'),
 )
 
 sub_dep = dec_dep.partial_dependency(includes : true)

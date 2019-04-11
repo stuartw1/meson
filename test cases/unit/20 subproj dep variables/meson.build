@@ -11,6 +11,3 @@ dependency('somenotfounddep', required : false,
 
 dependency('zlibproxy', required : true,
            fallback : ['somesubproj', 'zlibproxy_dep'])
-
-dependency('somedep', required : false,
-           fallback : ['nestedsubproj', 'nestedsubproj_dep'])

@@ -231,11 +231,6 @@ the `@variable@` syntax.
 - `input` the input file name. If it's not specified in configuration
   mode, all the variables in the `configuration:` object (see above)
   are written to the `output:` file.
-- `install` *(added 0.50.0)* When true, this generated file is installed during
-the install step, and `install_dir` must be set and not empty. When false, this
-generated file is not installed regardless of the value of `install_dir`.
-When omitted it defaults to true when `install_dir` is set and not empty,
-false otherwise.
 - `install_dir` the subdirectory to install the generated file to
   (e.g. `share/myproject`), if omitted or given the value of empty
   string, the file is not installed.
@@ -266,13 +261,10 @@ following.
 - `build_by_default` *(added 0.38)* causes, when set to true, to
   have this target be built by default, that is, when invoking plain
   `ninja`; the default value is false
-  *(changed in 0.50)* if `build_by_default` is explicitly set to false, `install`
-  will no longer override it. If `build_by_default` is not set, `install` will
-  still determine its default.
 - `build_always` (deprecated) if `true` this target is always considered out of
   date and is rebuilt every time.  Equivalent to setting both
   `build_always_stale` and `build_by_default` to true.
-- `build_always_stale` *(added 0.47)* if `true` the target is always considered out of date.
+- `build_always_stale` if `true` the target is always considered out of date.
   Useful for things such as build timestamps or revision control tags.
   The associated command is run even if the outputs are up to date.
 - `capture`, there are some compilers that can't be told to write
@@ -334,7 +326,6 @@ the following special string substitutions:
 - `@DEPFILE@` the full path to the dependency file passed to `depfile`
 - `@PLAINNAME@`: the input filename, without a path
 - `@BASENAME@`: the input filename, with extension removed
-- `@PRIVATE_DIR@`: path to a directory where the custom target must store all its intermediate files, available since 0.50.1
 
 The `depfile` keyword argument also accepts the `@BASENAME@` and `@PLAINNAME@`
 substitutions. *(since 0.47)*
@@ -358,8 +349,7 @@ keyword arguments.
 
   - `compile_args`, compile arguments to use
   - `dependencies`, other dependencies needed to use this dependency
-  - `include_directories`, the directories to add to header search path,
-    must be include_directories objects or, since 0.50.0, plain strings
+  - `include_directories`, the directories to add to header search path
   - `link_args`, link arguments to use
   - `link_with`, libraries to link against
   - `link_whole`, libraries to link fully, same as [`executable`](#executable)
@@ -405,8 +395,6 @@ are also supported. This function supports the following keyword arguments:
   the build machine system rather than the host system (i.e. where the
   cross compiled binary will run on), usually only needed if you build
   a tool to be used during compilation.
-- `not_found_message` *(added 0.50.0)* is an optional string that will
-  be printed as a `message()` if the dependency was not found.
 - `required`, when set to false, Meson will proceed with the build
   even if the dependency is not found. Since *0.47.0* the value of a
   [`feature`](Build-options.md#features) option can also be passed.
@@ -457,8 +445,7 @@ Print the argument string and halts the build process.
     environment_object environment()
 ```
 
-Returns an empty [environment variable object](#environment-object). Added in
-0.35.0.
+Returns an empty [environment variable object](#environment-object).
 
 ### executable()
 
@@ -520,18 +507,11 @@ be passed to [shared and static libraries](#library).
   when this file changes.
 - `link_whole` links all contents of the given static libraries
   whether they are used by not, equivalent to the
-  `-Wl,--whole-archive` argument flag of GCC, available since 0.40.0.
-  As of 0.41.0 if passed a list that list will be flattened. Starting
-  from version 0.51.0 this argument also accepts outputs produced by
-  custom targets. The user must ensure that the output is a library in
-  the correct format.
+  `-Wl,--whole-archive` argument flag of GCC, available since
+  0.40.0. As of 0.41.0 if passed a list that list will be flattened.
 - `link_with`, one or more shared or static libraries (built by this
   project) that this target should be linked with, If passed a list
-  this list will be flattened as of 0.41.0. Starting with version
-  0.51.0, the arguments can also be custom targets. In this case Meson
-  will assume that merely adding the output file in the linker command
-  line is sufficient to make linking work. If this is not sufficient,
-  then the build system writer must write all other steps manually.
+  this list will be flattened as of 0.41.0.
 - `export_dynamic` when set to true causes the target's symbols to be
   dynamically exported, allowing modules built using the
   [`shared_module`](#shared_module) function to refer to functions,
@@ -548,8 +528,7 @@ be passed to [shared and static libraries](#library).
   adds the current source and build directories to the include path,
   defaults to `true`, since 0.42.0
 - `include_directories` one or more objects created with the
-  `include_directories` function, or, since 0.50.0, strings, which
-  will be transparently expanded to include directory objects
+  `include_directories` function
 - `install`, when set to true, this executable should be installed
 - `install_dir` override install directory for this file. The value is
   relative to the `prefix` specified. F.ex, if you want to install
@@ -582,8 +561,6 @@ be passed to [shared and static libraries](#library).
 - `d_module_versions` list of module version identifiers set when compiling D sources
 - `d_debug` list of module debug identifiers set when compiling D sources
 - `pie` *(added 0.49.0)* build a position-independent executable
-- `native`, is a boolean controlling whether the target is compiled for the
-  build or host machines. Defaults to false, building for the host machine.
 
 The list of `sources`, `objects`, and `dependencies` is always
 flattened, which means you can freely nest and add lists while
@@ -951,10 +928,6 @@ format and optionally the owner/uid and group/gid for the installed files.
 An example value could be `['rwxr-sr-x', 'root', 'root']`.
 *(Added 0.47.0)*.
 
-Since 0.49.0, [manpages are no longer compressed implicitly][install_man_49].
-
-[install_man_49]: https://mesonbuild.com/Release-notes-for-0-49-0.html#manpages-are-no-longer-compressed-implicitly
-
 ### install_subdir()
 
 ``` meson
@@ -1045,9 +1018,6 @@ Joins the given strings into a file system path segment. For example
 individual segments is an absolute path, all segments before it are
 dropped. That means that `join_paths('foo', '/bar')` returns `/bar`.
 
-**Warning** Don't use `join_paths()` for sources in [`library`](#library) and
-[`executable`](#executable), you should use [`files`](#files) instead.
-
 *Added 0.36.0*
 
 Since 0.49.0 using the`/` operator on strings is equivalent to calling
@@ -1126,8 +1096,8 @@ This function prints its argument to stdout prefixed with WARNING:.
 The first argument to this function must be a string defining the name
 of this project. It is followed by programming languages that the
 project uses. Supported values for languages are `c`, `cpp` (for
-`C++`), `d`, `objc`, `objcpp`, `fortran`, `java`, `cs` (for `C#`),
-`vala` and `rust`. In versions before `0.40.0` you must have at least one
+`C++`), `d`, `objc`, `objcpp`, `fortran`, `java`, `cs` (for `C#`) and
+`vala`. In versions before `0.40.0` you must have at least one
 language listed.
 
 The project name can be any string you want, it's not used for
@@ -1192,14 +1162,12 @@ and Meson will set three environment variables `MESON_SOURCE_ROOT`,
 directory, build directory and subdirectory the target was defined in,
 respectively.
 
-This function supports the following keyword arguments:
+This function has one keyword argument.
 
  - `check` takes a boolean. If `true`, the exit status code of the command will
    be checked, and the configuration will fail if it is non-zero. The default is
    `false`.
    Since 0.47.0
- - `env` an [environment object](#environment-object) to use a custom environment
-   Since 0.50.0
 
 See also [External commands](External-commands.md).
 
@@ -1415,7 +1383,10 @@ executable to run.  The executable can be an [executable build target
 object](#build-target-object) returned by
 [`executable()`](#executable) or an [external program
 object](#external-program-object) returned by
-[`find_program()`](#find_program).
+[`find_program()`](#find_program). The executable's exit code is used
+by the test harness to record the outcome of the test, for example
+exit code zero indicates success. For more on the Meson test harness
+protocol read [Unit Tests](Unit-tests.md).
 
 Keyword arguments are the following:
 
@@ -1451,12 +1422,6 @@ Keyword arguments are the following:
   targets internally, e.g. plugins or globbing. Those targets are built
   before test is executed even if they have `build_by_default : false`.
   Since 0.46.0
-
-- `protocol` specifies how the test results are parsed and can be one
-  of `exitcode` (the executable's exit code is used by the test harness
-  to record the outcome of the test) or `tap` ([Test Anything
-  Protocol](https://www.testanything.org/)). For more on the Meson test
-  harness protocol read [Unit Tests](Unit-tests.md). Since 0.50.0
 
 Defined tests can be run in a backend-agnostic way by calling
 `meson test` inside the build dir, or by using backend-specific
@@ -1576,10 +1541,6 @@ the following methods.
   that is the default. Also, you can use the `files()` function to
   refer to files in the current or any other source directory instead
   of constructing paths manually with `meson.current_source_dir()`.
-
-- `get_cross_binary(binname, fallback_value)` returns the given binary
-  from a cross file, the optional second argument is returned if not
-  cross compiling or the given binary is not specified.
 
 - `get_cross_property(propname, fallback_value)` returns the given
   property from a cross file, the optional second argument is returned
@@ -1734,12 +1695,7 @@ the following methods:
   option can also be passed to the `required` keyword argument.
   *Since 0.49.0* if the keyword argument `disabler` is `true` and the
   dependency couldn't be found, return a [disabler object](#disabler-object)
-  instead of a not-found dependency. *Since 0.50.0* the `has_headers` keyword
-  argument can be a list of header files that must be found as well, using
-  `has_header()` method. All keyword arguments prefixed with `header_` will be
-  passed down to `has_header()` method with the prefix removed. *Since 0.51.0*
-  the `static` keyword (boolean) can be set to `true` to limit the search to
-  static libraries and `false` for dynamic/shared.
+  instead of a not-found dependency.
 
 - `first_supported_argument(list_of_strings)`, given a list of
   strings, returns the first argument that passes the `has_argument`
@@ -1795,9 +1751,7 @@ the following methods:
   the `prefix` keyword. In order to look for headers in a specific
   directory you can use `args : '-I/extra/include/dir`, but this
   should only be used in exceptional cases for includes that can't be
-  detected via pkg-config and passed via `dependencies`. Since *0.50.0* the
-  `required` keyword argument can be used to abort if the header cannot be
-  found.
+  detected via pkg-config and passed via `dependencies`.
 
 - `has_header` returns true if the specified header *exists*, and is
   faster than `check_header()` since it only does a pre-processor check.
@@ -1806,16 +1760,13 @@ the following methods:
   the `prefix` keyword. In order to look for headers in a specific
   directory you can use `args : '-I/extra/include/dir`, but this
   should only be used in exceptional cases for includes that can't be
-  detected via pkg-config and passed via `dependencies`. Since *0.50.0* the
-  `required` keyword argument can be used to abort if the header cannot be
-  found.
+  detected via pkg-config and passed via `dependencies`.
 
 - `has_header_symbol(headername, symbolname)` allows one to detect
   whether a particular symbol (function, variable, #define, type
   definition, etc) is declared in the specified header, you can
   specify external dependencies to use with `dependencies` keyword
-  argument. Since *0.50.0* the `required` keyword argument can be used to abort
-  if the symbol cannot be found.
+  argument.
 
 - `has_member(typename, membername)` takes two arguments, type name
   and member name and returns true if the type has the specified
@@ -2037,13 +1988,11 @@ A build target is either an [executable](#executable),
   previous versions.  The default will eventually be changed to `true`
   in a future version.
 
-- `extract_objects(source1, source2, ...)` takes as its arguments
-  a number of source files as [`string`](#string-object) or
-  [`files()`](#files) and returns an opaque value representing the
-  object files generated for those source files. This is typically used
-  to take single object files and link them to unit tests or to compile
-  some source files with custom flags. To use the object file(s)
-  in another build target, use the `objects:` keyword argument.
+- `extract_objects()` returns an opaque value representing the
+  generated object files of arguments, usually used to take single
+  object files and link them to unit tests or to compile some source
+  files with custom flags. To use the object file(s) in another build
+  target, use the `objects:` keyword argument.
 
 - `full_path()` returns a full path pointing to the result target file.
   NOTE: In most cases using the object itself will do the same job as
@@ -2117,10 +2066,6 @@ an external dependency with the following methods:
 
  - `found()` which returns whether the dependency was found
 
- - `name()` *(Added 0.48.0)* returns the name of the dependency that was
-   searched. Returns `internal` for dependencies created with
-   `declare_dependency()`.
-
  - `get_pkgconfig_variable(varname)` *(Added 0.36.0)* will get the
    pkg-config variable specified, or, if invoked on a non pkg-config
    dependency, error out. *(Added 0.44.0)* You can also redefine a
@@ -2153,17 +2098,14 @@ an external dependency with the following methods:
    partial dependency with the same rules. So , given:
 
    ```meson
-   dep1 = declare_dependency(compile_args : '-Werror=foo', link_with : 'libfoo')
-   dep2 = declare_dependency(compile_args : '-Werror=bar', dependencies : dep1)
+   dep1 = declare_dependency(compiler_args : '-Werror=foo', link_with : 'libfoo')
+   dep2 = declare_dependency(compiler_args : '-Werror=bar', dependencies : dep1)
    dep3 = dep2.partial_dependency(compile_args : true)
    ```
 
    dep3 will add `['-Werror=foo', '-Werror=bar']` to the compiler args
    of any target it is added to, but libfoo will not be added to the
    link_args.
-   
-   *Note*: A bug present until 0.51.0 results in the above behavior
-   not working correctly.
 
    The following arguments will add the following attributes:
 
@@ -2200,7 +2142,7 @@ and has the following methods:
 This object is returned by [`environment()`](#environment) and stores
 detailed information about how environment variables should be set
 during tests. It should be passed as the `env` keyword argument to
-tests and other functions. It has the following methods.
+tests. It has the following methods.
 
 - `append(varname, value1, value2, ...)` appends the given values to
   the old value of the environment variable, e.g.  `env.append('FOO',
@@ -2277,8 +2219,7 @@ sample piece of code with [`compiler.run()`](#compiler-object) or
 [`run_command()`](#run_command). It has the following methods:
 
 - `compiled()` if true, the compilation succeeded, if false it did not
-  and the other methods return unspecified data. This is only available
-  for `compiler.run()` results.
+  and the other methods return unspecified data
 - `returncode()` the return code of executing the compiled binary
 - `stderr()` the standard error produced when the command was run
 - `stdout()` the standard out produced when the command was run

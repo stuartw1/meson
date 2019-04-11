@@ -246,7 +246,7 @@ class PkgConfigModule(ExtensionModule):
         # https://bugs.freedesktop.org/show_bug.cgi?id=103203
         if isinstance(value, PurePath):
             value = value.as_posix()
-        return value.replace(' ', r'\ ')
+        return value.replace(' ', '\ ')
 
     def _make_relative(self, prefix, subdir):
         if isinstance(prefix, PurePath):
@@ -353,9 +353,7 @@ class PkgConfigModule(ExtensionModule):
         default_description = None
         default_name = None
         mainlib = None
-        if not args and 'version' not in kwargs:
-            FeatureNew('pkgconfig.generate implicit version keyword', '0.46.0').use(state.subproject)
-        elif len(args) == 1:
+        if len(args) == 1:
             FeatureNew('pkgconfig.generate optional positional argument', '0.46.0').use(state.subproject)
             mainlib = getattr(args[0], 'held_object', args[0])
             if not isinstance(mainlib, (build.StaticLibrary, build.SharedLibrary)):

@@ -14,18 +14,14 @@
 
 import abc, contextlib, enum, os.path, re, tempfile, shlex
 import subprocess
-from typing import List, Optional, Tuple
 
 from ..linkers import StaticLinker
 from .. import coredata
 from .. import mlog
 from .. import mesonlib
 from ..mesonlib import (
-    EnvironmentException, MesonException, OrderedSet,
-    version_compare, Popen_safe
-)
-from ..envconfig import (
-    Properties,
+    EnvironmentException, MesonException, OrderedSet, version_compare,
+    Popen_safe
 )
 
 """This file contains the data files of all compilers Meson knows
@@ -40,7 +36,6 @@ lib_suffixes = ('a', 'lib', 'dll', 'dylib', 'so')
 lang_suffixes = {
     'c': ('c',),
     'cpp': ('cpp', 'cc', 'cxx', 'c++', 'hh', 'hpp', 'ipp', 'hxx'),
-    'cuda': ('cu',),
     # f90, f95, f03, f08 are for free-form fortran ('f90' recommended)
     # f, for, ftn, fpp are for fixed-form fortran ('f' or 'for' recommended)
     'fortran': ('f90', 'f95', 'f03', 'f08', 'f', 'for', 'ftn', 'fpp'),
@@ -61,7 +56,8 @@ c_suffixes = lang_suffixes['c'] + ('h',)
 clib_langs = ('objcpp', 'cpp', 'objc', 'c', 'fortran',)
 # List of languages that can be linked with C code directly by the linker
 # used in build.py:process_compilers() and build.py:get_dynamic_linker()
-clink_langs = ('d', 'cuda') + clib_langs
+# XXX: Add Rust to this?
+clink_langs = ('d',) + clib_langs
 clink_suffixes = ()
 for _l in clink_langs + ('vala',):
     clink_suffixes += lang_suffixes[_l]
@@ -72,16 +68,12 @@ soregex = re.compile(r'.*\.so(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?$')
 # Environment variables that each lang uses.
 cflags_mapping = {'c': 'CFLAGS',
                   'cpp': 'CXXFLAGS',
-                  'cuda': 'CUFLAGS',
                   'objc': 'OBJCFLAGS',
                   'objcpp': 'OBJCXXFLAGS',
                   'fortran': 'FFLAGS',
                   'd': 'DFLAGS',
                   'vala': 'VALAFLAGS',
                   'rust': 'RUSTFLAGS'}
-
-# execinfo is a compiler lib on BSD
-unixy_compiler_internal_libs = ('m', 'c', 'pthread', 'dl', 'rt', 'execinfo')
 
 # All these are only for C-linkable languages; see `clink_langs` above.
 
@@ -150,13 +142,6 @@ armclang_buildtype_args = {'plain': [],
                            'custom': [],
                            }
 
-cuda_buildtype_args = {'plain': [],
-                       'debug': [],
-                       'debugoptimized': [],
-                       'release': [],
-                       'minsize': [],
-                       }
-
 arm_buildtype_args = {'plain': [],
                       'debug': ['-O0', '--debug'],
                       'debugoptimized': ['-O1', '--debug'],
@@ -174,20 +159,13 @@ ccrx_buildtype_args = {'plain': [],
                        }
 
 msvc_buildtype_args = {'plain': [],
-                       'debug': ["/Z7", "/Ob0", "/Od", "/RTC1"],
-                       'debugoptimized': ["/Z7", "/Ob1"],
+                       'debug': ["/ZI", "/Ob0", "/Od", "/RTC1"],
+                       'debugoptimized': ["/Zi", "/Ob1"],
                        'release': ["/Ob2", "/Gw"],
-                       'minsize': ["/Z7", "/Gw"],
+                       'minsize': ["/Zi", "/Gw"],
                        'custom': [],
                        }
 
-pgi_buildtype_args = {'plain': [],
-                      'debug': [],
-                      'debugoptimized': [],
-                      'release': [],
-                      'minsize': [],
-                      'custom': [],
-                      }
 apple_buildtype_linker_args = {'plain': [],
                                'debug': [],
                                'debugoptimized': [],
@@ -219,13 +197,6 @@ ccrx_buildtype_linker_args = {'plain': [],
                               'minsize': [],
                               'custom': [],
                               }
-pgi_buildtype_linker_args = {'plain': [],
-                             'debug': [],
-                             'debugoptimized': [],
-                             'release': [],
-                             'minsize': [],
-                             'custom': [],
-                             }
 
 msvc_buildtype_linker_args = {'plain': [],
                               'debug': [],
@@ -358,17 +329,6 @@ msvc_optimization_args = {'0': [],
                           '3': ['/O2'],
                           's': ['/O1'], # Implies /Os.
                           }
-
-cuda_optimization_args = {'0': [],
-                          'g': ['-O0'],
-                          '1': ['-O1'],
-                          '2': ['-O2'],
-                          '3': ['-O3', '-Otime'],
-                          's': ['-O3', '-Ospace']
-                          }
-
-cuda_debug_args = {False: [],
-                   True: ['-g']}
 
 clike_debug_args = {False: [],
                     True: ['-g']}
@@ -510,7 +470,7 @@ def get_base_compile_args(options, compiler):
     try:
         if (options['b_ndebug'].value == 'true' or
                 (options['b_ndebug'].value == 'if-release' and
-                 options['buildtype'].value in {'release', 'plain'})):
+                 options['buildtype'].value == 'release')):
             args += ['-DNDEBUG']
     except KeyError:
         pass
@@ -661,9 +621,6 @@ class CompilerArgs(list):
     # Only UNIX shared libraries require this. Others have a fixed extension.
     dedup1_regex = re.compile(r'([\/\\]|\A)lib.*\.so(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?$')
     dedup1_args = ('-c', '-S', '-E', '-pipe', '-pthread')
-    # In generate_link() we add external libs without de-dup, but we must
-    # *always* de-dup these because they're special arguments to the linker
-    always_dedup_args = tuple('-l' + lib for lib in unixy_compiler_internal_libs)
     compiler = None
 
     def _check_args(self, args):
@@ -798,7 +755,7 @@ class CompilerArgs(list):
         normal_flags = []
         lflags = []
         for i in iterable:
-            if i not in self.always_dedup_args and (i.startswith('-l') or i.startswith('-L')):
+            if i.startswith('-l') or i.startswith('-L'):
                 lflags.append(i)
             else:
                 normal_flags.append(i)
@@ -927,9 +884,6 @@ class Compiler:
     def compute_int(self, expression, low, high, guess, prefix, env, extra_args, dependencies):
         raise EnvironmentException('%s does not support compute_int ' % self.get_id())
 
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        raise EnvironmentException('%s does not support compute_parameters_with_absolute_paths ' % self.get_id())
-
     def has_members(self, typename, membernames, prefix, env, *, extra_args=None, dependencies=None):
         raise EnvironmentException('%s does not support has_member(s) ' % self.get_id())
 
@@ -970,22 +924,19 @@ class Compiler:
         """
         return []
 
-    def use_preproc_flags(self) -> bool:
-        """
-        Whether the compiler (or processes it spawns) cares about CPPFLAGS
-        """
-        return self.get_language() in {'c', 'cpp', 'objc', 'objcpp'}
+    def get_preproc_flags(self):
+        if self.get_language() in ('c', 'cpp', 'objc', 'objcpp'):
+            return os.environ.get('CPPFLAGS', '')
+        return ''
 
     def get_args_from_envvars(self):
         """
         Returns a tuple of (compile_flags, link_flags) for the specified language
         from the inherited environment
         """
-        def log_var(var, val: Optional[str]):
+        def log_var(var, val):
             if val:
                 mlog.log('Appending {} from environment: {!r}'.format(var, val))
-            else:
-                mlog.debug('No {} in the environment, not changing global flags.'.format(var))
 
         lang = self.get_language()
         compiler_is_linker = False
@@ -995,19 +946,14 @@ class Compiler:
         if lang not in cflags_mapping:
             return [], []
 
-        compile_flags = []
-        link_flags = []
-
-        env_compile_flags = os.environ.get(cflags_mapping[lang])
-        log_var(cflags_mapping[lang], env_compile_flags)
-        if env_compile_flags is not None:
-            compile_flags += shlex.split(env_compile_flags)
+        compile_flags = os.environ.get(cflags_mapping[lang], '')
+        log_var(cflags_mapping[lang], compile_flags)
+        compile_flags = shlex.split(compile_flags)
 
         # Link flags (same for all languages)
-        env_link_flags = os.environ.get('LDFLAGS')
-        log_var('LDFLAGS', env_link_flags)
-        if env_link_flags is not None:
-            link_flags += shlex.split(env_link_flags)
+        link_flags = os.environ.get('LDFLAGS', '')
+        log_var('LDFLAGS', link_flags)
+        link_flags = shlex.split(link_flags)
         if compiler_is_linker:
             # When the compiler is used as a wrapper around the linker (such as
             # with GCC and Clang), the compile flags can be needed while linking
@@ -1015,52 +961,30 @@ class Compiler:
             # this when the linker is stand-alone such as with MSVC C/C++, etc.
             link_flags = compile_flags + link_flags
 
-        # Pre-processor flags for certain languages
-        if self.use_preproc_flags():
-            env_preproc_flags = os.environ.get('CPPFLAGS')
-            log_var('CPPFLAGS', env_preproc_flags)
-            if env_preproc_flags is not None:
-                compile_flags += shlex.split(env_preproc_flags)
+        # Pre-processor flags (not for fortran or D)
+        preproc_flags = self.get_preproc_flags()
+        log_var('CPPFLAGS', preproc_flags)
+        preproc_flags = shlex.split(preproc_flags)
+        compile_flags += preproc_flags
 
         return compile_flags, link_flags
 
     def get_options(self):
         opts = {} # build afresh every time
+
+        # Take default values from env variables.
+        compile_args, link_args = self.get_args_from_envvars()
         description = 'Extra arguments passed to the {}'.format(self.get_display_language())
         opts.update({
             self.language + '_args': coredata.UserArrayOption(
                 self.language + '_args',
                 description + ' compiler',
-                [], shlex_split=True, user_input=True, allow_dups=True),
+                compile_args, shlex_split=True, user_input=True, allow_dups=True),
             self.language + '_link_args': coredata.UserArrayOption(
                 self.language + '_link_args',
                 description + ' linker',
-                [], shlex_split=True, user_input=True, allow_dups=True),
+                link_args, shlex_split=True, user_input=True, allow_dups=True),
         })
-
-        return opts
-
-    def get_and_default_options(self, properties: Properties):
-        """
-        Take default values from env variables and/or config files.
-        """
-        opts = self.get_options()
-
-        if properties.fallback:
-            # Get from env vars.
-            compile_args, link_args = self.get_args_from_envvars()
-        else:
-            compile_args = []
-            link_args = []
-
-        for k, o in opts.items():
-            if k in properties:
-                # Get from configuration files.
-                o.set_value(properties[k])
-            elif k == self.language + '_args':
-                o.set_value(compile_args)
-            elif k == self.language + '_link_args':
-                o.set_value(link_args)
 
         return opts
 
@@ -1117,6 +1041,18 @@ class Compiler:
         raise EnvironmentException(
             'Language {} does not support has_multi_link_arguments.'.format(
                 self.get_display_language()))
+
+    def get_cross_extra_flags(self, environment, link):
+        extra_flags = []
+        if self.is_cross and environment:
+            if 'properties' in environment.cross_info.config:
+                props = environment.cross_info.config['properties']
+                lang_args_key = self.language + '_args'
+                extra_flags += props.get(lang_args_key, [])
+                lang_link_args_key = self.language + '_link_args'
+                if link:
+                    extra_flags += props.get(lang_link_args_key, [])
+        return extra_flags
 
     def _get_compile_output(self, dirname, mode):
         # In pre-processor mode, the output is sent to stdout and discarded
@@ -1373,8 +1309,6 @@ class CompilerType(enum.Enum):
 
     CCRX_WIN = 40
 
-    PGI_STANDARD = 50
-
     @property
     def is_standard_compiler(self):
         return self.name in ('GCC_STANDARD', 'CLANG_STANDARD', 'ICC_STANDARD')
@@ -1499,9 +1433,7 @@ class GnuLikeCompiler(abc.ABC):
         self.compiler_type = compiler_type
         self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage',
                              'b_ndebug', 'b_staticpic', 'b_pie']
-        if (not self.compiler_type.is_osx_compiler and
-                not self.compiler_type.is_windows_compiler and
-                not mesonlib.is_openbsd()):
+        if not self.compiler_type.is_osx_compiler and not self.compiler_type.is_windows_compiler:
             self.base_options.append('b_lundef')
         if not self.compiler_type.is_windows_compiler:
             self.base_options.append('b_asneeded')
@@ -1613,35 +1545,24 @@ class GnuLikeCompiler(abc.ABC):
             # GNU ld and LLVM lld
             return ['-Wl,--allow-shlib-undefined']
 
-    def get_gui_app_args(self, value):
-        if self.compiler_type.is_windows_compiler:
-            return ['-mwindows' if value else '-mconsole']
-        return []
-
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '-L':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-
-        return parameter_list
 
 class GnuCompiler(GnuLikeCompiler):
     """
     GnuCompiler represents an actual GCC in its many incarnations.
     Compilers imitating GCC (Clang/Intel) should use the GnuLikeCompiler ABC.
     """
-    def __init__(self, compiler_type, defines: dict):
+    def __init__(self, compiler_type, defines):
         super().__init__(compiler_type)
         self.id = 'gcc'
         self.defines = defines or {}
         self.base_options.append('b_colorout')
 
-    def get_colorout_args(self, colortype: str) -> List[str]:
+    def get_colorout_args(self, colortype):
         if mesonlib.version_compare(self.version, '>=4.9.0'):
             return gnu_color_args[colortype][:]
         return []
 
-    def get_warn_args(self, level: str) -> list:
+    def get_warn_args(self, level):
         args = super().get_warn_args(level)
         if mesonlib.version_compare(self.version, '<4.8.0') and '-Wpedantic' in args:
             # -Wpedantic was added in 4.8.0
@@ -1649,68 +1570,26 @@ class GnuCompiler(GnuLikeCompiler):
             args[args.index('-Wpedantic')] = '-pedantic'
         return args
 
-    def has_builtin_define(self, define: str) -> bool:
+    def has_builtin_define(self, define):
         return define in self.defines
 
     def get_builtin_define(self, define):
         if define in self.defines:
             return self.defines[define]
 
-    def get_optimization_args(self, optimization_level: str):
+    def get_optimization_args(self, optimization_level):
         return gnu_optimization_args[optimization_level]
 
-    def get_pch_suffix(self) -> str:
+    def get_pch_suffix(self):
         return 'gch'
 
-    def openmp_flags(self) -> List[str]:
+    def get_gui_app_args(self, value):
+        if self.compiler_type.is_windows_compiler and value:
+            return ['-mwindows']
+        return []
+
+    def openmp_flags(self):
         return ['-fopenmp']
-
-
-class PGICompiler:
-    def __init__(self, compiler_type=None):
-        self.id = 'pgi'
-        self.compiler_type = compiler_type
-
-        default_warn_args = ['-Minform=inform']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
-                          '2': default_warn_args,
-                          '3': default_warn_args}
-
-    def get_module_incdir_args(self) -> Tuple[str]:
-        return ('-module', )
-
-    def get_no_warn_args(self) -> List[str]:
-        return ['-silent']
-
-    def openmp_flags(self) -> List[str]:
-        return ['-mp']
-
-    def get_buildtype_args(self, buildtype: str) -> List[str]:
-        return pgi_buildtype_args[buildtype]
-
-    def get_buildtype_linker_args(self, buildtype: str) -> List[str]:
-        return pgi_buildtype_linker_args[buildtype]
-
-    def get_optimization_args(self, optimization_level: str):
-        return clike_optimization_args[optimization_level]
-
-    def get_debug_args(self, is_debug: bool):
-        return clike_debug_args[is_debug]
-
-    def compute_parameters_with_absolute_paths(self, parameter_list: List[str], build_dir: str):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '-L':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-
-    def get_allow_undefined_link_args(self):
-        return []
-
-    def get_dependency_gen_args(self, outtarget, outfile):
-        return []
-
-    def get_always_args(self):
-        return []
 
 
 class ElbrusCompiler(GnuCompiler):
@@ -1827,7 +1706,7 @@ class ArmclangCompiler:
             EnvironmentException('armlink version string not found')
         # Using the regular expression from environment.search_version,
         # which is used for searching compiler version
-        version_regex = r'(?<!(\d|\.))(\d{1,2}(\.\d+)+(-[a-zA-Z0-9]+)?)'
+        version_regex = '(?<!(\d|\.))(\d{1,2}(\.\d+)+(-[a-zA-Z0-9]+)?)'
         linker_ver = re.search(version_regex, ver_str)
         if linker_ver:
             linker_ver = linker_ver.group(0)
@@ -1901,13 +1780,6 @@ class ArmclangCompiler:
         """
         return ['--symdefs=' + implibname]
 
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '-L':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-
-        return parameter_list
-
 
 # Tested on linux for ICC 14.0.3, 15.0.6, 16.0.4, 17.0.1, 19.0.0
 class IntelCompiler(GnuLikeCompiler):
@@ -1927,7 +1799,7 @@ class IntelCompiler(GnuLikeCompiler):
     def get_optimization_args(self, optimization_level):
         return clike_optimization_args[optimization_level]
 
-    def get_pch_suffix(self) -> str:
+    def get_pch_suffix(self):
         return 'pchi'
 
     def get_pch_use_args(self, pch_dir, header):
@@ -1937,7 +1809,7 @@ class IntelCompiler(GnuLikeCompiler):
     def get_pch_name(self, header_name):
         return os.path.basename(header_name) + '.' + self.get_pch_suffix()
 
-    def openmp_flags(self) -> List[str]:
+    def openmp_flags(self):
         if version_compare(self.version, '>=15.0.0'):
             return ['-qopenmp']
         else:
@@ -1951,10 +1823,6 @@ class IntelCompiler(GnuLikeCompiler):
             extra_args,
             '-diag-error', '10006',  # ignoring unknown option
             '-diag-error', '10148',  # Option not supported
-            '-diag-error', '10155',  # ignoring argument required
-            '-diag-error', '10156',  # ignoring not argument allowed
-            '-diag-error', '10157',  # Ignoring argument of the wrong type
-            '-diag-error', '10158',  # Argument must be separate. Can be hit by trying an option like -foo-bar=foo when -foo=bar is a valid option but -foo-bar isn't
             '-diag-error', '1292',   # unknown __attribute__
         ]
         return super().compiles(*args, **kwargs)
@@ -1974,8 +1842,7 @@ class ArmCompiler:
         self.id = 'arm'
         self.compiler_type = compiler_type
         default_warn_args = []
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + [],
                           '3': default_warn_args + []}
         # Assembly
@@ -2043,13 +1910,6 @@ class ArmCompiler:
     def get_debug_args(self, is_debug):
         return clike_debug_args[is_debug]
 
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '-L':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-
-        return parameter_list
-
 class CcrxCompiler:
     def __init__(self, compiler_type):
         if not self.is_cross:
@@ -2067,8 +1927,7 @@ class CcrxCompiler:
         # Assembly
         self.can_compile_suffixes.update('s')
         default_warn_args = []
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + [],
                           '3': default_warn_args + []}
 
@@ -2144,10 +2003,3 @@ class CcrxCompiler:
                 continue
             result.append(i)
         return result
-
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:9] == '-include=':
-                parameter_list[idx] = i[:9] + os.path.normpath(os.path.join(build_dir, i[9:]))
-
-        return parameter_list

@@ -1,5 +1,4 @@
-project('multiple files', 'c')
-add_languages('vala')
+project('multiple files', 'vala', 'c')
 
 glib = dependency('glib-2.0')
 gobject = dependency('gobject-2.0')

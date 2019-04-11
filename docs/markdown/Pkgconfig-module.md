@@ -29,11 +29,11 @@ keyword arguments.
   shared_library) that the user needs to link against. Arbitrary strings can
   also be provided and they will be added into the `Libs` field. Since 0.45.0
   dependencies of built libraries will be automatically added, see the
-  [Implicit dependencies](#implicit-dependencies) section below for the exact
+  [Implicit dependencies](#Implicit_dependencies) section below for the exact
   rules.
 - `libraries_private` list of built libraries or strings to put in the
   `Libs.private` field. Since 0.45.0 dependencies of built libraries will be
-  automatically added, see the [Implicit dependencies](#implicit-dependencies)
+  automatically added, see the [Implicit dependencies](#Implicit_dependencies)
   section below for the exact rules.
 - `name` the name of this library, used to set the `Name:` field
 - `subdirs` which subdirs of `include` should be added to the header
@@ -51,7 +51,7 @@ keyword arguments.
   e.g. `datadir=${prefix}/share`. The names `prefix`, `libdir` and
   `installdir` are reserved and may not be used.
 - `version` a string describing the version of this library, used to set the
-  `Version:` field. (*since 0.46.0*) Defaults to the project version if unspecified.
+  `Version:` field. Defaults to the project version if unspecified.
 - `d_module_versions` a list of module version flags used when compiling
    D sources referred to by this pkg-config file
 

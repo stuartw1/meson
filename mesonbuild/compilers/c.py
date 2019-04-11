@@ -19,15 +19,13 @@ import subprocess
 import functools
 import itertools
 from pathlib import Path
-from typing import List
 
 from .. import mlog
 from .. import coredata
 from . import compilers
 from ..mesonlib import (
-    EnvironmentException, MachineChoice, MesonException, Popen_safe, listify,
-    version_compare, for_windows, for_darwin, for_cygwin, for_haiku,
-    for_openbsd, darwin_get_object_archs, LibType
+    EnvironmentException, MesonException, version_compare, Popen_safe, listify,
+    for_windows, for_darwin, for_cygwin, for_haiku, for_openbsd,
 )
 from .c_function_attributes import C_FUNC_ATTRIBUTES
 
@@ -35,7 +33,6 @@ from .compilers import (
     get_largefile_args,
     gnu_winlibs,
     msvc_winlibs,
-    unixy_compiler_internal_libs,
     vs32_instruction_set_args,
     vs64_instruction_set_args,
     ArmCompiler,
@@ -43,15 +40,15 @@ from .compilers import (
     ClangCompiler,
     Compiler,
     CompilerArgs,
-    CompilerType,
     CrossNoRunException,
     GnuCompiler,
     ElbrusCompiler,
     IntelCompiler,
-    PGICompiler,
     RunResult,
     CcrxCompiler,
 )
+
+gnu_compiler_internal_libs = ('m', 'c', 'pthread', 'dl', 'rt')
 
 
 class CCompiler(Compiler):
@@ -59,8 +56,7 @@ class CCompiler(Compiler):
     library_dirs_cache = {}
     program_dirs_cache = {}
     find_library_cache = {}
-    find_framework_cache = {}
-    internal_libs = unixy_compiler_internal_libs
+    internal_libs = gnu_compiler_internal_libs
 
     @staticmethod
     def attribute_check_func(name):
@@ -320,7 +316,10 @@ class CCompiler(Compiler):
                 # on OSX the compiler binary is the same but you need
                 # a ton of compiler flags to differentiate between
                 # arm and x86_64. So just compile.
+                extra_flags += self.get_cross_extra_flags(environment, link=False)
                 extra_flags += self.get_compile_only_args()
+            else:
+                extra_flags += self.get_cross_extra_flags(environment, link=True)
         # Is a valid executable output for all toolchains and platforms
         binname += '.exe'
         # Write binary check source
@@ -410,6 +409,8 @@ class CCompiler(Compiler):
             args += d.get_compile_args()
             if d.need_threads():
                 args += self.thread_flags(env)
+            elif d.need_openmp():
+                args += self.openmp_flags()
             if mode == 'link':
                 # Add link flags needed to find dependencies
                 args += d.get_link_args()
@@ -418,22 +419,24 @@ class CCompiler(Compiler):
         # Select a CRT if needed since we're linking
         if mode == 'link':
             args += self.get_linker_debug_crt_args()
-        if env.is_cross_build() and not self.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
-        if mode in {'compile', 'preprocess'}:
-            # Add CFLAGS/CXXFLAGS/OBJCFLAGS/OBJCXXFLAGS and CPPFLAGS from the env
-            sys_args = env.coredata.get_external_args(for_machine, self.language)
-            # Apparently it is a thing to inject linker flags both
-            # via CFLAGS _and_ LDFLAGS, even though the former are
-            # also used during linking. These flags can break
-            # argument checks. Thanks, Autotools.
-            cleaned_sys_args = self.remove_linkerlike_args(sys_args)
-            args += cleaned_sys_args
-        elif mode == 'link':
-            # Add LDFLAGS from the env
-            args += env.coredata.get_external_link_args(for_machine, self.language)
+        # Read c_args/cpp_args/etc from the cross-info file (if needed)
+        args += self.get_cross_extra_flags(env, link=(mode == 'link'))
+        if not self.is_cross:
+            if mode == 'preprocess':
+                # Add CPPFLAGS from the env.
+                args += env.coredata.get_external_preprocess_args(self.language)
+            elif mode == 'compile':
+                # Add CFLAGS/CXXFLAGS/OBJCFLAGS/OBJCXXFLAGS from the env
+                sys_args = env.coredata.get_external_args(self.language)
+                # Apparently it is a thing to inject linker flags both
+                # via CFLAGS _and_ LDFLAGS, even though the former are
+                # also used during linking. These flags can break
+                # argument checks. Thanks, Autotools.
+                cleaned_sys_args = self.remove_linkerlike_args(sys_args)
+                args += cleaned_sys_args
+            elif mode == 'link':
+                # Add LDFLAGS from the env
+                args += env.coredata.get_external_link_args(self.language)
         args += self.get_compiler_check_args()
         # extra_args must override all other arguments, so we add them last
         args += extra_args
@@ -451,7 +454,7 @@ class CCompiler(Compiler):
         return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode='link')
 
-    def run(self, code: str, env, *, extra_args=None, dependencies=None):
+    def run(self, code, env, *, extra_args=None, dependencies=None):
         if self.is_cross and self.exe_wrapper is None:
             raise CrossNoRunException('Can not run test applications in this cross environment.')
         with self._build_wrapper(code, env, extra_args, dependencies, mode='link', want_output=True) as p:
@@ -754,7 +757,7 @@ class CCompiler(Compiler):
         varname = 'has function ' + funcname
         varname = varname.replace(' ', '_')
         if self.is_cross:
-            val = env.properties.host.get(varname, None)
+            val = env.cross_info.config['properties'].get(varname, None)
             if val is not None:
                 if isinstance(val, bool):
                     return val
@@ -863,7 +866,8 @@ class CCompiler(Compiler):
         }
         #endif
         '''
-        args = self.get_compiler_check_args()
+        args = self.get_cross_extra_flags(env, link=False)
+        args += self.get_compiler_check_args()
         n = 'symbols_have_underscore_prefix'
         with self.compile(code, args, 'compile', want_output=True) as p:
             if p.returncode != 0:
@@ -896,20 +900,17 @@ class CCompiler(Compiler):
             # is expensive. It's wrong in many edge cases, but it will match
             # correctly-named libraries and hopefully no one on OpenBSD names
             # their files libfoo.so.9a.7b.1.0
-            for p in prefixes:
-                patterns.append(p + '{}.so.[0-9]*.[0-9]*')
+            patterns.append('lib{}.so.[0-9]*.[0-9]*')
         return patterns
 
-    def get_library_naming(self, env, libtype: LibType, strict=False):
+    def get_library_naming(self, env, libtype, strict=False):
         '''
         Get library prefixes and suffixes for the target platform ordered by
         priority
         '''
         stlibext = ['a']
-        # We've always allowed libname to be both `foo` and `libfoo`, and now
-        # people depend on it. Also, some people use prebuilt `foo.so` instead
-        # of `libfoo.so` for unknown reasons, and may also want to create
-        # `foo.so` by setting name_prefix to ''
+        # We've always allowed libname to be both `foo` and `libfoo`,
+        # and now people depend on it
         if strict and not isinstance(self, VisualStudioCCompiler): # lib prefix is not usually used with msvc
             prefixes = ['lib']
         else:
@@ -932,18 +933,20 @@ class CCompiler(Compiler):
         else:
             # Linux/BSDs
             shlibext = ['so']
+        patterns = []
         # Search priority
-        if libtype is LibType.PREFER_SHARED:
-            patterns = self._get_patterns(env, prefixes, shlibext, True)
-            patterns.extend([x for x in self._get_patterns(env, prefixes, stlibext, False) if x not in patterns])
-        elif libtype is LibType.PREFER_STATIC:
-            patterns = self._get_patterns(env, prefixes, stlibext, False)
-            patterns.extend([x for x in self._get_patterns(env, prefixes, shlibext, True) if x not in patterns])
-        elif libtype is LibType.SHARED:
-            patterns = self._get_patterns(env, prefixes, shlibext, True)
+        if libtype in ('default', 'shared-static'):
+            patterns += self._get_patterns(env, prefixes, shlibext, True)
+            patterns += self._get_patterns(env, prefixes, stlibext, False)
+        elif libtype == 'static-shared':
+            patterns += self._get_patterns(env, prefixes, stlibext, False)
+            patterns += self._get_patterns(env, prefixes, shlibext, True)
+        elif libtype == 'shared':
+            patterns += self._get_patterns(env, prefixes, shlibext, True)
+        elif libtype == 'static':
+            patterns += self._get_patterns(env, prefixes, stlibext, False)
         else:
-            assert libtype is LibType.STATIC
-            patterns = self._get_patterns(env, prefixes, stlibext, False)
+            raise AssertionError('BUG: unknown libtype {!r}'.format(libtype))
         return tuple(patterns)
 
     @staticmethod
@@ -969,33 +972,14 @@ class CCompiler(Compiler):
         if '*' in pattern:
             # NOTE: globbing matches directories and broken symlinks
             # so we have to do an isfile test on it later
-            return [Path(x) for x in cls._sort_shlibs_openbsd(glob.glob(str(f)))]
-        return [f]
+            return cls._sort_shlibs_openbsd(glob.glob(str(f)))
+        return [f.as_posix()]
 
     @staticmethod
-    def _get_file_from_list(env, files: List[str]) -> Path:
-        '''
-        We just check whether the library exists. We can't do a link check
-        because the library might have unresolved symbols that require other
-        libraries. On macOS we check if the library matches our target
-        architecture.
-        '''
-        # If not building on macOS for Darwin, do a simple file check
-        files = [Path(f) for f in files]
-        if not env.machines.host.is_darwin() or not env.machines.build.is_darwin():
-            for f in files:
-                if f.is_file():
-                    return f
-        # Run `lipo` and check if the library supports the arch we want
+    def _get_file_from_list(files):
         for f in files:
-            if not f.is_file():
-                continue
-            archs = darwin_get_object_archs(f)
-            if archs and env.machines.host.cpu_family in archs:
+            if os.path.isfile(f):
                 return f
-            else:
-                mlog.debug('Rejected {}, supports {} but need {}'
-                           .format(f, archs, env.machines.host.cpu_family))
         return None
 
     @functools.lru_cache()
@@ -1005,14 +989,11 @@ class CCompiler(Compiler):
         '''
         return self.sizeof('void *', '', env) == 8
 
-    def find_library_real(self, libname, env, extra_dirs, code, libtype: LibType):
+    def find_library_real(self, libname, env, extra_dirs, code, libtype):
         # First try if we can just add the library as -l.
         # Gcc + co seem to prefer builtin lib dirs to -L dirs.
         # Only try to find std libs if no extra dirs specified.
-        # The built-in search procedure will always favour .so and then always
-        # search for .a. This is only allowed if libtype is LibType.PREFER_SHARED
-        if ((not extra_dirs and libtype is LibType.PREFER_SHARED) or
-                libname in self.internal_libs):
+        if not extra_dirs or libname in self.internal_libs:
             args = ['-l' + libname]
             largs = self.linker_to_compiler_args(self.get_allow_undefined_link_args())
             if self.links(code, env, extra_args=(args + largs)):
@@ -1039,13 +1020,16 @@ class CCompiler(Compiler):
                 trial = self._get_trials_from_pattern(p, d, libname)
                 if not trial:
                     continue
-                trial = self._get_file_from_list(env, trial)
+                # We just check whether the library exists. We can't do a link
+                # check because the library might have unresolved symbols that
+                # require other libraries.
+                trial = self._get_file_from_list(trial)
                 if not trial:
                     continue
-                return [trial.as_posix()]
+                return [trial]
         return None
 
-    def find_library_impl(self, libname, env, extra_dirs, code, libtype: LibType):
+    def find_library_impl(self, libname, env, extra_dirs, code, libtype):
         # These libraries are either built-in or invalid
         if libname in self.ignore_libs:
             return []
@@ -1061,73 +1045,9 @@ class CCompiler(Compiler):
             return None
         return value[:]
 
-    def find_library(self, libname, env, extra_dirs, libtype: LibType = LibType.PREFER_SHARED):
+    def find_library(self, libname, env, extra_dirs, libtype='default'):
         code = 'int main(int argc, char **argv) { return 0; }'
         return self.find_library_impl(libname, env, extra_dirs, code, libtype)
-
-    def find_framework_paths(self, env):
-        '''
-        These are usually /Library/Frameworks and /System/Library/Frameworks,
-        unless you select a particular macOS SDK with the -isysroot flag.
-        You can also add to this by setting -F in CFLAGS.
-        '''
-        if self.id != 'clang':
-            raise MesonException('Cannot find framework path with non-clang compiler')
-        # Construct the compiler command-line
-        commands = self.get_exelist() + ['-v', '-E', '-']
-        commands += self.get_always_args()
-        # Add CFLAGS/CXXFLAGS/OBJCFLAGS/OBJCXXFLAGS from the env
-        if env.is_cross_build() and not self.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
-        commands += env.coredata.get_external_args(for_machine, self.language)
-        mlog.debug('Finding framework path by running: ', ' '.join(commands), '\n')
-        os_env = os.environ.copy()
-        os_env['LC_ALL'] = 'C'
-        _, _, stde = Popen_safe(commands, env=os_env, stdin=subprocess.PIPE)
-        paths = []
-        for line in stde.split('\n'):
-            if '(framework directory)' not in line:
-                continue
-            # line is of the form:
-            # ` /path/to/framework (framework directory)`
-            paths.append(line[:-21].strip())
-        return paths
-
-    def find_framework_real(self, name, env, extra_dirs, allow_system):
-        code = 'int main(int argc, char **argv) { return 0; }'
-        link_args = []
-        for d in extra_dirs:
-            link_args += ['-F' + d]
-        # We can pass -Z to disable searching in the system frameworks, but
-        # then we must also pass -L/usr/lib to pick up libSystem.dylib
-        extra_args = [] if allow_system else ['-Z', '-L/usr/lib']
-        link_args += ['-framework', name]
-        if self.links(code, env, extra_args=(extra_args + link_args)):
-            return link_args
-
-    def find_framework_impl(self, name, env, extra_dirs, allow_system):
-        if isinstance(extra_dirs, str):
-            extra_dirs = [extra_dirs]
-        key = (tuple(self.exelist), name, tuple(extra_dirs), allow_system)
-        if key in self.find_framework_cache:
-            value = self.find_framework_cache[key]
-        else:
-            value = self.find_framework_real(name, env, extra_dirs, allow_system)
-            self.find_framework_cache[key] = value
-        if value is None:
-            return None
-        return value[:]
-
-    def find_framework(self, name, env, extra_dirs, allow_system=True):
-        '''
-        Finds the framework with the specified name, and returns link args for
-        the same or returns None when the framework is not found.
-        '''
-        if self.id != 'clang':
-            raise MesonException('Cannot find frameworks with non-clang compiler')
-        return self.find_framework_impl(name, env, extra_dirs, allow_system)
 
     def thread_flags(self, env):
         if for_haiku(self.is_cross, env) or for_darwin(self.is_cross, env):
@@ -1151,7 +1071,7 @@ class CCompiler(Compiler):
             # flags, so when we are testing a flag like "-Wno-forgotten-towel", also
             # check the equivalent enable flag too "-Wforgotten-towel"
             if arg.startswith('-Wno-'):
-                args.append('-W' + arg[5:])
+                    args.append('-W' + arg[5:])
             if arg.startswith('-Wl,'):
                 mlog.warning('{} looks like a linker argument, '
                              'but has_argument and other similar methods only '
@@ -1208,8 +1128,7 @@ class ClangCCompiler(ClangCompiler, CCompiler):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
         ClangCompiler.__init__(self, compiler_type)
         default_warn_args = ['-Wall', '-Winvalid-pch']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -1243,8 +1162,7 @@ class ArmclangCCompiler(ArmclangCompiler, CCompiler):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
         ArmclangCompiler.__init__(self, compiler_type)
         default_warn_args = ['-Wall', '-Winvalid-pch']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -1272,8 +1190,7 @@ class GnuCCompiler(GnuCompiler, CCompiler):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
         GnuCompiler.__init__(self, compiler_type, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -1303,12 +1220,6 @@ class GnuCCompiler(GnuCompiler, CCompiler):
 
     def get_pch_use_args(self, pch_dir, header):
         return ['-fpch-preprocess', '-include', os.path.basename(header)]
-
-
-class PGICCompiler(PGICompiler, CCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
-        CCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
-        PGICompiler.__init__(self, CompilerType.PGI_STANDARD)
 
 
 class ElbrusCCompiler(GnuCCompiler, ElbrusCompiler):
@@ -1343,8 +1254,7 @@ class IntelCCompiler(IntelCompiler, CCompiler):
         IntelCompiler.__init__(self, compiler_type)
         self.lang_header = 'c-header'
         default_warn_args = ['-Wall', '-w3', '-diag-disable:remark']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra']}
 
@@ -1370,7 +1280,7 @@ class IntelCCompiler(IntelCompiler, CCompiler):
 class VisualStudioCCompiler(CCompiler):
     std_warn_args = ['/W3']
     std_opt_args = ['/O2']
-    ignore_libs = unixy_compiler_internal_libs
+    ignore_libs = gnu_compiler_internal_libs
     internal_libs = ()
 
     crt_args = {'none': [],
@@ -1380,26 +1290,17 @@ class VisualStudioCCompiler(CCompiler):
                 'mtd': ['/MTd'],
                 }
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
         CCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
         self.id = 'msvc'
         # /showIncludes is needed for build dependency tracking in Ninja
         # See: https://ninja-build.org/manual.html#_deps
         self.always_args = ['/nologo', '/showIncludes']
-        self.warn_args = {'0': ['/W1'],
-                          '1': ['/W2'],
+        self.warn_args = {'1': ['/W2'],
                           '2': ['/W3'],
                           '3': ['/W4']}
         self.base_options = ['b_pch', 'b_ndebug', 'b_vscrt'] # FIXME add lto, pgo and the like
-        self.target = target
-        self.is_64 = ('x64' in target) or ('x86_64' in target)
-        # do some canonicalization of target machine
-        if 'x86_64' in target:
-            self.machine = 'x64'
-        elif '86' in target:
-            self.machine = 'x86'
-        else:
-            self.machine = target
+        self.is_64 = is_64
 
     # Override CCompiler.get_always_args
     def get_always_args(self):
@@ -1476,7 +1377,7 @@ class VisualStudioCCompiler(CCompiler):
         return ['/nologo']
 
     def get_linker_output_args(self, outputname):
-        return ['/MACHINE:' + self.machine, '/OUT:' + outputname]
+        return ['/OUT:' + outputname]
 
     def get_linker_search_args(self, dirname):
         return ['/LIBPATH:' + dirname]
@@ -1573,15 +1474,6 @@ class VisualStudioCCompiler(CCompiler):
         # msvc does not have a concept of system header dirs.
         return ['-I' + path]
 
-    def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
-        for idx, i in enumerate(parameter_list):
-            if i[:2] == '-I' or i[:2] == '/I':
-                parameter_list[idx] = i[:2] + os.path.normpath(os.path.join(build_dir, i[2:]))
-            elif i[:9] == '/LIBPATH:':
-                parameter_list[idx] = i[:9] + os.path.normpath(os.path.join(build_dir, i[9:]))
-
-        return parameter_list
-
     # Visual Studio is special. It ignores some arguments it does not
     # understand and you can't tell it to error out on those.
     # http://stackoverflow.com/questions/15259720/how-can-i-make-the-microsoft-c-compiler-treat-unknown-flags-as-errors-rather-t
@@ -1595,7 +1487,18 @@ class VisualStudioCCompiler(CCompiler):
             return not(warning_text in p.stde or warning_text in p.stdo)
 
     def get_compile_debugfile_args(self, rel_obj, pch=False):
-        return []
+        pdbarr = rel_obj.split('.')[:-1]
+        pdbarr += ['pdb']
+        args = ['/Fd' + '.'.join(pdbarr)]
+        # When generating a PDB file with PCH, all compile commands write
+        # to the same PDB file. Hence, we need to serialize the PDB
+        # writes using /FS since we do parallel builds. This slows down the
+        # build obviously, which is why we only do this when PCH is on.
+        # This was added in Visual Studio 2013 (MSVC 18.0). Before that it was
+        # always on: https://msdn.microsoft.com/en-us/library/dn502518.aspx
+        if pch and self.id == 'msvc' and version_compare(self.version, '>=18.0'):
+            args = ['/FS'] + args
+        return args
 
     def get_link_debugfile_args(self, targetfile):
         pdbarr = targetfile.split('.')[:-1]
@@ -1685,8 +1588,8 @@ class VisualStudioCCompiler(CCompiler):
 
 
 class ClangClCCompiler(VisualStudioCCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
-        super().__init__(exelist, version, is_cross, exe_wrap, target)
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
+        super().__init__(exelist, version, is_cross, exe_wrap, is_64)
         self.id = 'clang-cl'
 
 
@@ -1745,9 +1648,6 @@ class CcrxCCompiler(CcrxCompiler, CCompiler):
 
     def get_linker_output_args(self, outputname):
         return ['-output=%s' % outputname]
-
-    def get_werror_args(self):
-        return ['-change_message=error']
 
     def get_include_args(self, path, is_system):
         if path == '':

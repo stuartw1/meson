@@ -14,11 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List
-from pathlib import Path
-import sys
+import sys, os
 import re
-
 
 class Token:
     def __init__(self, tid, value):
@@ -86,7 +83,7 @@ class Lexer:
                 raise RuntimeError('Lexer got confused line %d column %d' % (lineno, col))
 
 class Parser:
-    def __init__(self, code: str):
+    def __init__(self, code):
         self.stream = Lexer().lex(code)
         self.getsym()
 
@@ -143,13 +140,13 @@ class Converter:
                      'enable_testing': True,
                      'include': True}
 
-    def __init__(self, cmake_root: str):
-        self.cmake_root = Path(cmake_root).expanduser()
+    def __init__(self, cmake_root):
+        self.cmake_root = cmake_root
         self.indent_unit = '  '
         self.indent_level = 0
-        self.options = []  # type: List[tuple]
+        self.options = []
 
-    def convert_args(self, args: List[Token], as_array: bool = True):
+    def convert_args(self, args, as_array=True):
         res = []
         if as_array:
             start = '['
@@ -203,7 +200,7 @@ class Converter:
                 libcmd = 'static_library'
                 args = [t.args[0]] + t.args[2:]
             else:
-                libcmd = 'library'
+                libcmd = 'static_library'
                 args = t.args
             line = '%s_lib = %s(%s)' % (t.args[0].value, libcmd, self.convert_args(args, False))
         elif t.name == 'add_test':
@@ -226,24 +223,13 @@ class Converter:
                     l = 'cpp'
                 args.append(l)
             args = ["'%s'" % i for i in args]
-            line = 'project(' + ', '.join(args) + ", default_options : ['default_library=static'])"
+            line = 'project(' + ', '.join(args) + ')'
         elif t.name == 'set':
             varname = t.args[0].value.lower()
             line = '%s = %s\n' % (varname, self.convert_args(t.args[1:]))
         elif t.name == 'if':
             postincrement = 1
-            try:
-                line = 'if %s' % self.convert_args(t.args, False)
-            except AttributeError:  # complex if statements
-                line = t.name
-                for arg in t.args:
-                    if isinstance(arg, Token):
-                        line += ' ' + arg.value
-                    elif isinstance(arg, list):
-                        line += ' ('
-                        for a in arg:
-                            line += ' ' + a.value
-                        line += ' )'
+            line = 'if %s' % self.convert_args(t.args, False)
         elif t.name == 'elseif':
             preincrement = -1
             postincrement = 1
@@ -265,32 +251,32 @@ class Converter:
             outfile.write('\n')
         self.indent_level += postincrement
 
-    def convert(self, subdir: Path = None):
-        if not subdir:
+    def convert(self, subdir=''):
+        if subdir == '':
             subdir = self.cmake_root
-        cfile = Path(subdir).expanduser() / 'CMakeLists.txt'
+        cfile = os.path.join(subdir, 'CMakeLists.txt')
         try:
-            with cfile.open() as f:
+            with open(cfile) as f:
                 cmakecode = f.read()
         except FileNotFoundError:
-            print('\nWarning: No CMakeLists.txt in', subdir, '\n', file=sys.stderr)
+            print('\nWarning: No CMakeLists.txt in', subdir, '\n')
             return
         p = Parser(cmakecode)
-        with (subdir / 'meson.build').open('w') as outfile:
+        with open(os.path.join(subdir, 'meson.build'), 'w') as outfile:
             for t in p.parse():
                 if t.name == 'add_subdirectory':
                     # print('\nRecursing to subdir',
-                    #       self.cmake_root / t.args[0].value,
+                    #       os.path.join(self.cmake_root, t.args[0].value),
                     #       '\n')
-                    self.convert(subdir / t.args[0].value)
+                    self.convert(os.path.join(subdir, t.args[0].value))
                     # print('\nReturning to', self.cmake_root, '\n')
                 self.write_entry(outfile, t)
         if subdir == self.cmake_root and len(self.options) > 0:
             self.write_options()
 
     def write_options(self):
-        filename = self.cmake_root / 'meson_options.txt'
-        with filename.open('w') as optfile:
+        filename = os.path.join(self.cmake_root, 'meson_options.txt')
+        with open(filename, 'w') as optfile:
             for o in self.options:
                 (optname, description, default) = o
                 if default is None:

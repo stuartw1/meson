@@ -44,14 +44,6 @@ PRESET_ARGS = {
         '--flag=g_string_append_printf:2:c-format',
         '--flag=g_error_new:3:c-format',
         '--flag=g_set_error:4:c-format',
-        '--flag=g_markup_printf_escaped:1:c-format',
-        '--flag=g_log:3:c-format',
-        '--flag=g_print:1:c-format',
-        '--flag=g_printerr:1:c-format',
-        '--flag=g_printf:1:c-format',
-        '--flag=g_fprintf:2:c-format',
-        '--flag=g_sprintf:2:c-format',
-        '--flag=g_snprintf:3:c-format',
     ]
 }
 
@@ -64,7 +56,8 @@ class I18nModule(ExtensionModule):
         return [path.join(src_dir, d) for d in dirs]
 
     @FeatureNew('i18n.merge_file', '0.37.0')
-    @permittedKwargs(build.CustomTarget.known_kwargs | {'data_dirs', 'po_dir', 'type'})
+    @permittedKwargs({'languages', 'data_dirs', 'preset', 'args', 'po_dir', 'type',
+                      'input', 'output', 'install', 'install_dir'})
     def merge_file(self, state, args, kwargs):
         podir = kwargs.pop('po_dir', None)
         if not podir:
@@ -109,8 +102,7 @@ class I18nModule(ExtensionModule):
         return ModuleReturnValue(ct, [ct])
 
     @FeatureNewKwargs('i18n.gettext', '0.37.0', ['preset'])
-    @FeatureNewKwargs('i18n.gettext', '0.50.0', ['install_dir'])
-    @permittedKwargs({'po_dir', 'data_dirs', 'type', 'languages', 'args', 'preset', 'install', 'install_dir'})
+    @permittedKwargs({'po_dir', 'data_dirs', 'type', 'languages', 'args', 'preset', 'install'})
     def gettext(self, state, args, kwargs):
         if len(args) != 1:
             raise coredata.MesonException('Gettext requires one positional argument (package name).')
@@ -159,11 +151,10 @@ class I18nModule(ExtensionModule):
 
         install = kwargs.get('install', True)
         if install:
-            install_dir = kwargs.get('install_dir', state.environment.coredata.get_builtin_option('localedir'))
             script = state.environment.get_build_command()
             args = ['--internal', 'gettext', 'install',
                     '--subdir=' + state.subdir,
-                    '--localedir=' + install_dir,
+                    '--localedir=' + state.environment.coredata.get_builtin_option('localedir'),
                     pkg_arg]
             if lang_arg:
                 args.append(lang_arg)

@@ -15,19 +15,17 @@
 from . import mlog
 import pickle, os, uuid, shlex
 import sys
-from itertools import chain
 from pathlib import PurePath
 from collections import OrderedDict
 from .mesonlib import (
-    MesonException, MachineChoice, PerMachine,
-    default_libdir, default_libexecdir, default_prefix, stringlistify
+    MesonException, default_libdir, default_libexecdir, default_prefix
 )
 from .wrap import WrapMode
 import ast
 import argparse
 import configparser
 
-version = '0.50.999'
+version = '0.49.2'
 backendlist = ['ninja', 'vs', 'vs2010', 'vs2015', 'vs2017', 'xcode']
 
 default_yielding = False
@@ -43,9 +41,6 @@ class UserOption:
         if not isinstance(yielding, bool):
             raise MesonException('Value of "yielding" must be a boolean.')
         self.yielding = yielding
-
-    def printable_value(self):
-        return self.value
 
     # Check that the input is a valid value and return the
     # "cleaned" or "native" version. For example the Boolean
@@ -118,14 +113,9 @@ class UserUmaskOption(UserIntegerOption):
         super().__init__(name, description, 0, 0o777, value, yielding)
         self.choices = ['preserve', '0000-0777']
 
-    def printable_value(self):
-        if self.value == 'preserve':
-            return self.value
-        return format(self.value, '04o')
-
     def validate_value(self, value):
         if value is None or value == 'preserve':
-            return 'preserve'
+            return None
         return super().validate_value(value)
 
     def toint(self, valuestring):
@@ -211,8 +201,8 @@ class UserFeatureOption(UserComboOption):
         return self.value == 'auto'
 
 
-def load_configs(filenames, subdir):
-    """Load configuration files from a named subdirectory."""
+def load_configs(filenames):
+    """Load native files."""
     def gen():
         for f in filenames:
             f = os.path.expanduser(os.path.expandvars(f))
@@ -225,7 +215,7 @@ def load_configs(filenames, subdir):
                     os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share')),
                 ] + os.environ.get('XDG_DATA_DIRS', '/usr/local/share:/usr/share').split(':')
                 for path in paths:
-                    path_to_try = os.path.join(path, 'meson', subdir, f)
+                    path_to_try = os.path.join(path, 'meson', 'native', f)
                     if os.path.isfile(path_to_try):
                         yield path_to_try
                         break
@@ -235,9 +225,45 @@ def load_configs(filenames, subdir):
 
             raise MesonException('Cannot find specified native file: ' + f)
 
-    config = configparser.ConfigParser()
+    config = configparser.SafeConfigParser()
     config.read(gen())
     return config
+
+
+def _get_section(config, section):
+    if config.has_section(section):
+        final = {}
+        for k, v in config.items(section):
+            # Windows paths...
+            v = v.replace('\\', '\\\\')
+            try:
+                final[k] = ast.literal_eval(v)
+            except SyntaxError:
+                raise MesonException(
+                    'Malformed value in native file variable: {}'.format(v))
+        return final
+    return {}
+
+
+class ConfigData:
+
+    """Contains configuration information provided by the user for the build."""
+
+    def __init__(self, config=None):
+        if config:
+            self.binaries = _get_section(config, 'binaries')
+            # global is a keyword and globals is a builtin, rather than mangle it,
+            # use a similar word
+            self.universal = _get_section(config, 'globals')
+            self.subprojects = {s: _get_section(config, s) for s in config.sections()
+                                if s not in {'binaries', 'globals'}}
+        else:
+            self.binaries = {}
+            self.universal = {}
+            self.subprojects = {}
+
+    def get_binaries(self, name):
+        return self.binaries.get(name, None)
 
 
 # This class contains all data that must persist over multiple
@@ -262,33 +288,64 @@ class CoreData:
         self.init_builtins()
         self.backend_options = {}
         self.user_options = {}
-        self.compiler_options = PerMachine({}, {}, {})
+        self.compiler_options = {}
         self.base_options = {}
-        self.cross_files = self.__load_config_files(options.cross_file)
+        self.external_preprocess_args = {} # CPPFLAGS only
+        self.cross_file = self.__load_cross_file(options.cross_file)
         self.compilers = OrderedDict()
         self.cross_compilers = OrderedDict()
         self.deps = OrderedDict()
         # Only to print a warning if it changes between Meson invocations.
         self.pkgconf_envvar = os.environ.get('PKG_CONFIG_PATH', '')
         self.config_files = self.__load_config_files(options.native_file)
-        self.libdir_cross_fixup()
 
     @staticmethod
     def __load_config_files(filenames):
-        # Need to try and make the passed filenames absolute because when the
-        # files are parsed later we'll have chdir()d.
         if not filenames:
             return []
         filenames = [os.path.abspath(os.path.expanduser(os.path.expanduser(f)))
                      for f in filenames]
         return filenames
 
-    def libdir_cross_fixup(self):
-        # By default set libdir to "lib" when cross compiling since
-        # getting the "system default" is always wrong on multiarch
-        # platforms as it gets a value like lib/x86_64-linux-gnu.
-        if self.cross_files:
-            self.builtins['libdir'].value = 'lib'
+    @staticmethod
+    def __load_cross_file(filename):
+        """Try to load the cross file.
+
+        If the filename is None return None. If the filename is an absolute
+        (after resolving variables and ~), return that absolute path. Next,
+        check if the file is relative to the current source dir. If the path
+        still isn't resolved do the following:
+            Windows:
+                - Error
+            *:
+                - $XDG_DATA_HOME/meson/cross (or ~/.local/share/meson/cross if
+                  undefined)
+                - $XDG_DATA_DIRS/meson/cross (or
+                  /usr/local/share/meson/cross:/usr/share/meson/cross if undefined)
+                - Error
+
+        Non-Windows follows the Linux path and will honor XDG_* if set. This
+        simplifies the implementation somewhat.
+        """
+        if filename is None:
+            return None
+        filename = os.path.expanduser(os.path.expandvars(filename))
+        if os.path.isabs(filename):
+            return filename
+        path_to_try = os.path.abspath(filename)
+        if os.path.isfile(path_to_try):
+            return path_to_try
+        if sys.platform != 'win32':
+            paths = [
+                os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share')),
+            ] + os.environ.get('XDG_DATA_DIRS', '/usr/local/share:/usr/share').split(':')
+            for path in paths:
+                path_to_try = os.path.join(path, 'meson', 'cross', filename)
+                if os.path.isfile(path_to_try):
+                    return path_to_try
+            raise MesonException('Cannot find specified cross file: ' + filename)
+
+        raise MesonException('Cannot find specified cross file: ' + filename)
 
     def sanitize_prefix(self, prefix):
         if not os.path.isabs(prefix):
@@ -419,31 +476,21 @@ class CoreData:
             mode = 'custom'
         self.builtins['buildtype'].set_value(mode)
 
-    def get_all_compiler_options(self):
-        # TODO think about cross and command-line interface. (Only .build is mentioned here.)
-        yield self.compiler_options.build
-
-    def _get_all_nonbuiltin_options(self):
-        yield self.backend_options
-        yield self.user_options
-        yield from self.get_all_compiler_options()
-        yield self.base_options
-
-    def get_all_options(self):
-        return chain([self.builtins], self._get_all_nonbuiltin_options())
-
     def validate_option_value(self, option_name, override_value):
-        for opts in self.get_all_options():
+        for opts in (self.builtins, self.base_options, self.compiler_options, self.user_options):
             if option_name in opts:
                 opt = opts[option_name]
                 return opt.validate_value(override_value)
         raise MesonException('Tried to validate unknown option %s.' % option_name)
 
-    def get_external_args(self, for_machine: MachineChoice, lang):
-        return self.compiler_options[for_machine][lang + '_args'].value
+    def get_external_args(self, lang):
+        return self.compiler_options[lang + '_args'].value
 
-    def get_external_link_args(self, for_machine: MachineChoice, lang):
-        return self.compiler_options[for_machine][lang + '_link_args'].value
+    def get_external_link_args(self, lang):
+        return self.compiler_options[lang + '_link_args'].value
+
+    def get_external_preprocess_args(self, lang):
+        return self.external_preprocess_args[lang]
 
     def merge_user_options(self, options):
         for (name, value) in options.items():
@@ -454,7 +501,7 @@ class CoreData:
                 if type(oldval) != type(value):
                     self.user_options[name] = value
 
-    def set_options(self, options, subproject='', warn_unknown=True):
+    def set_options(self, options, subproject=''):
         # Set prefix first because it's needed to sanitize other options
         prefix = self.builtins['prefix'].value
         if 'prefix' in options:
@@ -470,100 +517,25 @@ class CoreData:
                 pass
             elif k in self.builtins:
                 self.set_builtin_option(k, v)
+            elif k in self.backend_options:
+                tgt = self.backend_options[k]
+                tgt.set_value(v)
+            elif k in self.user_options:
+                tgt = self.user_options[k]
+                tgt.set_value(v)
+            elif k in self.compiler_options:
+                tgt = self.compiler_options[k]
+                tgt.set_value(v)
+            elif k in self.base_options:
+                tgt = self.base_options[k]
+                tgt.set_value(v)
             else:
-                for opts in self._get_all_nonbuiltin_options():
-                    if k in opts:
-                        tgt = opts[k]
-                        tgt.set_value(v)
-                        break
-                else:
-                    unknown_options.append(k)
-        if unknown_options and warn_unknown:
+                unknown_options.append(k)
+
+        if unknown_options:
             unknown_options = ', '.join(sorted(unknown_options))
             sub = 'In subproject {}: '.format(subproject) if subproject else ''
             mlog.warning('{}Unknown options: "{}"'.format(sub, unknown_options))
-
-    def set_default_options(self, default_options, subproject, env):
-        # Set defaults first from conf files (cross or native), then
-        # override them as nec as necessary.
-        for k, v in env.paths.host:
-            if v is not None:
-                env.cmd_line_options.setdefault(k, v)
-
-        # Set default options as if they were passed to the command line.
-        # Subprojects can only define default for user options.
-        from . import optinterpreter
-        for k, v in default_options.items():
-            if subproject:
-                if optinterpreter.is_invalid_name(k):
-                    continue
-                k = subproject + ':' + k
-            env.cmd_line_options.setdefault(k, v)
-
-        # Create a subset of cmd_line_options, keeping only options for this
-        # subproject. Also take builtin options if it's the main project.
-        # Language and backend specific options will be set later when adding
-        # languages and setting the backend (builtin options must be set first
-        # to know which backend we'll use).
-        options = {}
-        for k, v in env.cmd_line_options.items():
-            if subproject:
-                if not k.startswith(subproject + ':'):
-                    continue
-            elif k not in get_builtin_options():
-                if ':' in k:
-                    continue
-                if optinterpreter.is_invalid_name(k):
-                    continue
-            options[k] = v
-
-        self.set_options(options, subproject)
-
-    def process_new_compilers(self, lang: str, comp, cross_comp, env):
-        from . import compilers
-
-        self.compilers[lang] = comp
-        if cross_comp is not None:
-            self.cross_compilers[lang] = cross_comp
-
-        # Native compiler always exist so always add its options.
-        new_options_for_build = comp.get_and_default_options(env.properties.build)
-        if cross_comp is not None:
-            new_options_for_host = cross_comp.get_and_default_options(env.properties.host)
-        else:
-            new_options_for_host = comp.get_and_default_options(env.properties.host)
-
-        opts_machines_list = [
-            (new_options_for_build, MachineChoice.BUILD),
-            (new_options_for_host, MachineChoice.HOST),
-        ]
-
-        optprefix = lang + '_'
-        for new_options, for_machine in opts_machines_list:
-            for k, o in new_options.items():
-                if not k.startswith(optprefix):
-                    raise MesonException('Internal error, %s has incorrect prefix.' % k)
-                if (env.machines.matches_build_machine(for_machine) and
-                        k in env.cmd_line_options):
-                    # TODO think about cross and command-line interface.
-                    o.set_value(env.cmd_line_options[k])
-                self.compiler_options[for_machine].setdefault(k, o)
-
-        enabled_opts = []
-        for optname in comp.base_options:
-            if optname in self.base_options:
-                continue
-            oobj = compilers.base_options[optname]
-            if optname in env.cmd_line_options:
-                oobj.set_value(env.cmd_line_options[optname])
-                enabled_opts.append(optname)
-            self.base_options[optname] = oobj
-        self.emit_base_options_warnings(enabled_opts)
-
-    def emit_base_options_warnings(self, enabled_opts: list):
-        if 'b_bitcode' in enabled_opts:
-            mlog.warning('Base option \'b_bitcode\' is enabled, which is incompatible with many linker options. Incompatible options such as such as \'b_asneeded\' have been disabled.')
-            mlog.warning('Please see https://mesonbuild.com/Builtin-options.html#Notes_about_Apple_Bitcode_support for more details.')
 
 class CmdLineFileParser(configparser.ConfigParser):
     def __init__(self):
@@ -586,8 +558,8 @@ def read_cmd_line_file(build_dir, options):
     options.cmd_line_options = d
 
     properties = config['properties']
-    if not options.cross_file:
-        options.cross_file = ast.literal_eval(properties.get('cross_file', '[]'))
+    if options.cross_file is None:
+        options.cross_file = properties.get('cross_file', None)
     if not options.native_file:
         # This will be a string in the form: "['first', 'second', ...]", use
         # literal_eval to get it into the list of strings.
@@ -598,7 +570,7 @@ def write_cmd_line_file(build_dir, options):
     config = CmdLineFileParser()
 
     properties = {}
-    if options.cross_file:
+    if options.cross_file is not None:
         properties['cross_file'] = options.cross_file
     if options.native_file:
         properties['native_file'] = options.native_file
@@ -775,7 +747,7 @@ builtin_options = {
     'localstatedir':   [UserStringOption, 'Localstate data directory', 'var'],
     'sharedstatedir':  [UserStringOption, 'Architecture-independent data directory', 'com'],
     'werror':          [UserBooleanOption, 'Treat warnings as errors', False],
-    'warning_level':   [UserComboOption, 'Compiler warning level to use', ['0', '1', '2', '3'], '1'],
+    'warning_level':   [UserComboOption, 'Compiler warning level to use', ['1', '2', '3'], '1'],
     'layout':          [UserComboOption, 'Build directory layout', ['mirror', 'flat'], 'mirror'],
     'default_library': [UserComboOption, 'Default library type', ['shared', 'static', 'both'], 'shared'],
     'backend':         [UserComboOption, 'Backend to use', backendlist, 'ninja'],

@@ -52,9 +52,7 @@ executable(..., dependencies : thread_dep)
 
 ## Set extra compiler and linker flags from the outside (when e.g. building distro packages)
 
-The behavior is the same as with other build systems, with environment
-variables during first invocation. Do not use these when you need to rebuild
-the source
+The behavior is the same as with other build systems, with environment variables during first invocation.
 
 ```console
 $ CFLAGS=-fsomething LDFLAGS=-Wl,--linker-flag meson <options>
@@ -203,20 +201,3 @@ executable(..., dependencies : m_dep)
 ```meson
 executable(..., install : true, install_dir : get_option('libexecdir'))
 ```
-
-## Use existing `Find<name>.cmake` files
-
-Meson can use the CMake `find_package()` ecosystem if CMake is installed.
-To find a dependency with custom `Find<name>.cmake`, set the `cmake_module_path`
-property to the path in your project where the CMake scripts are stored.
-
-Example for a `FindCmakeOnlyDep.cmake` in a `cmake` subdirectory:
-
-```meson
-cm_dep = dependency('CmakeOnlyDep', cmake_module_path : 'cmake')
-```
-
-The `cmake_module_path` property is only needed for custom CMake scripts. System
-wide CMake scripts are found automatically.
-
-More information can be found [here](Dependencies.md#cmake)

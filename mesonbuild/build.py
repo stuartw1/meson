@@ -36,7 +36,6 @@ pch_kwargs = set(['c_pch', 'cpp_pch'])
 lang_arg_kwargs = set([
     'c_args',
     'cpp_args',
-    'cuda_args',
     'd_args',
     'd_import_dirs',
     'd_unittest',
@@ -112,9 +111,8 @@ class Build:
         self.environment = environment
         self.projects = {}
         self.targets = OrderedDict()
-        # Coredata holds the state. This is just here for convenience.
-        self.compilers = environment.coredata.compilers
-        self.cross_compilers = environment.coredata.cross_compilers
+        self.compilers = OrderedDict()
+        self.cross_compilers = OrderedDict()
         self.global_args = {}
         self.projects_args = {}
         self.global_link_args = {}
@@ -147,10 +145,6 @@ class Build:
     def copy(self):
         other = Build(self.environment)
         for k, v in self.__dict__.items():
-            if k in ['compilers', 'cross_compilers']:
-                # These alias coredata's fields of the same name, and must not
-                # become copies.
-                continue
             if isinstance(v, (list, dict, set, OrderedDict)):
                 other.__dict__[k] = v.copy()
             else:
@@ -161,13 +155,19 @@ class Build:
         for k, v in other.__dict__.items():
             self.__dict__[k] = v
 
-    def ensure_static_linker(self, compiler):
+    def add_compiler(self, compiler):
         if self.static_linker is None and compiler.needs_static_linker():
             self.static_linker = self.environment.detect_static_linker(compiler)
+        lang = compiler.get_language()
+        if lang not in self.compilers:
+            self.compilers[lang] = compiler
 
-    def ensure_static_cross_linker(self, compiler):
-        if self.static_cross_linker is None and compiler.needs_static_linker():
+    def add_cross_compiler(self, compiler):
+        if not self.cross_compilers:
             self.static_cross_linker = self.environment.detect_static_linker(compiler)
+        lang = compiler.get_language()
+        if lang not in self.cross_compilers:
+            self.cross_compilers[lang] = compiler
 
     def get_project(self):
         return self.projects['']
@@ -345,8 +345,6 @@ a hard error in the future.''' % name)
         self.install = False
         self.build_always_stale = False
         self.option_overrides = {}
-        if not hasattr(self, 'typename'):
-            raise RuntimeError('Target type is not set for target class "{}". This is a bug'.format(type(self).__name__))
 
     def get_install_dir(self, environment):
         # Find the installation directory.
@@ -367,9 +365,6 @@ a hard error in the future.''' % name)
 
     def get_subdir(self):
         return self.subdir
-
-    def get_typename(self):
-        return self.typename
 
     @staticmethod
     def _get_id_hash(target_id):
@@ -409,11 +404,6 @@ a hard error in the future.''' % name)
             self.build_by_default = kwargs['build_by_default']
             if not isinstance(self.build_by_default, bool):
                 raise InvalidArguments('build_by_default must be a boolean value.')
-        elif kwargs.get('install', False):
-            # For backward compatibility, if build_by_default is not explicitly
-            # set, use the value of 'install' if it's enabled.
-            self.build_by_default = True
-
         self.option_overrides = self.parse_overrides(kwargs)
 
     def parse_overrides(self, kwargs):
@@ -567,8 +557,6 @@ class BuildTarget(Target):
         if self.link_targets or self.link_whole_targets:
             extra = set()
             for t in itertools.chain(self.link_targets, self.link_whole_targets):
-                if isinstance(t, CustomTarget):
-                    continue # We can't know anything about these.
                 for name, compiler in t.compilers.items():
                     if name in clink_langs:
                         extra.add((name, compiler))
@@ -724,12 +712,9 @@ class BuildTarget(Target):
     def extract_objects(self, srclist):
         obj_src = []
         for src in srclist:
-            if isinstance(src, str):
-                src = File(False, self.subdir, src)
-            elif isinstance(src, File):
-                FeatureNew('File argument for extract_objects', '0.50.0').use(self.subproject)
-            else:
-                raise MesonException('Object extraction arguments must be strings or Files.')
+            if not isinstance(src, str):
+                raise MesonException('Object extraction arguments must be strings.')
+            src = File(False, self.subdir, src)
             # FIXME: It could be a generated source
             if src not in self.sources:
                 raise MesonException('Tried to extract unknown source %s.' % src)
@@ -803,13 +788,13 @@ just like those detected with the dependency() function.''')
         for linktarget in lwhole:
             self.link_whole(linktarget)
 
-        c_pchlist, cpp_pchlist, clist, cpplist, cudalist, cslist, valalist,  objclist, objcpplist, fortranlist, rustlist \
-            = extract_as_list(kwargs, 'c_pch', 'cpp_pch', 'c_args', 'cpp_args', 'cuda_args', 'cs_args', 'vala_args', 'objc_args',
+        c_pchlist, cpp_pchlist, clist, cpplist, cslist, valalist,  objclist, objcpplist, fortranlist, rustlist \
+            = extract_as_list(kwargs, 'c_pch', 'cpp_pch', 'c_args', 'cpp_args', 'cs_args', 'vala_args', 'objc_args',
                               'objcpp_args', 'fortran_args', 'rust_args')
 
         self.add_pch('c', c_pchlist)
         self.add_pch('cpp', cpp_pchlist)
-        compiler_args = {'c': clist, 'cpp': cpplist, 'cuda': cudalist, 'cs': cslist, 'vala': valalist, 'objc': objclist, 'objcpp': objcpplist,
+        compiler_args = {'c': clist, 'cpp': cpplist, 'cs': cslist, 'vala': valalist, 'objc': objclist, 'objcpp': objcpplist,
                          'fortran': fortranlist, 'rust': rustlist
                          }
         for key, value in compiler_args.items():
@@ -1032,9 +1017,8 @@ This will become a hard error in a future Meson release.''')
                 # Deps of deps.
                 self.add_deps(dep.ext_deps)
             elif isinstance(dep, dependencies.Dependency):
-                if dep not in self.external_deps:
-                    self.external_deps.append(dep)
-                    self.process_sourcelist(dep.get_sources())
+                self.external_deps.append(dep)
+                self.process_sourcelist(dep.get_sources())
             elif isinstance(dep, BuildTarget):
                 raise InvalidArguments('''Tried to use a build target as a dependency.
 You probably should put it in link_with instead.''')
@@ -1064,24 +1048,19 @@ You probably should put it in link_with instead.''')
                 msg = "Can't link non-PIC static library {!r} into shared library {!r}. ".format(t.name, self.name)
                 msg += "Use the 'pic' option to static_library to build with PIC."
                 raise InvalidArguments(msg)
-            if not isinstance(t, CustomTarget) and self.is_cross != t.is_cross:
+            if self.is_cross != t.is_cross:
                 raise InvalidArguments('Tried to mix cross built and native libraries in target {!r}'.format(self.name))
             self.link_targets.append(t)
 
     def link_whole(self, target):
         for t in listify(target, unholder=True):
-            if isinstance(t, CustomTarget):
-                if not t.is_linkable_target():
-                    raise InvalidArguments('Custom target {!r} is not linkable.'.format(t))
-                if not t.get_filename().endswith('.a'):
-                    raise InvalidArguments('Can only link_whole custom targets that are .a archives.')
-            elif not isinstance(t, StaticLibrary):
+            if not isinstance(t, StaticLibrary):
                 raise InvalidArguments('{!r} is not a static library.'.format(t))
             if isinstance(self, SharedLibrary) and not t.pic:
                 msg = "Can't link non-PIC static library {!r} into shared library {!r}. ".format(t.name, self.name)
                 msg += "Use the 'pic' option to static_library to build with PIC."
                 raise InvalidArguments(msg)
-            if not isinstance(t, CustomTarget) and self.is_cross != t.is_cross:
+            if self.is_cross != t.is_cross:
                 raise InvalidArguments('Tried to mix cross built and native libraries in target {!r}'.format(self.name))
             self.link_whole_targets.append(t)
 
@@ -1101,18 +1080,8 @@ You probably should put it in link_with instead.''')
                 pchlist = [pchlist[1], pchlist[0]]
             else:
                 raise InvalidArguments('PCH argument %s is of unknown type.' % pchlist[0])
-
-            if (os.path.dirname(pchlist[0]) != os.path.dirname(pchlist[1])):
-                raise InvalidArguments('PCH files must be stored in the same folder.')
-
-            mlog.warning('PCH source files are deprecated, only a single header file should be used.')
         elif len(pchlist) > 2:
             raise InvalidArguments('PCH definition may have a maximum of 2 files.')
-        for f in pchlist:
-            if not isinstance(f, str):
-                raise MesonException('PCH arguments must be strings.')
-            if not os.path.isfile(os.path.join(self.environment.source_dir, self.subdir, f)):
-                raise MesonException('File %s does not exist.' % f)
         self.pch[language] = pchlist
 
     def add_include_dirs(self, args):
@@ -1158,8 +1127,6 @@ You probably should put it in link_with instead.''')
         # Check if any of the internal libraries this target links to were
         # written in this language
         for link_target in itertools.chain(self.link_targets, self.link_whole_targets):
-            if isinstance(link_target, CustomTarget):
-                continue
             for language in link_target.compilers:
                 if language not in langs:
                     langs.append(language)
@@ -1203,10 +1170,6 @@ You probably should put it in link_with instead.''')
 
         m = 'Could not get a dynamic linker for build target {!r}'
         raise AssertionError(m.format(self.name))
-
-    def get_using_rustc(self):
-        if len(self.sources) > 0 and self.sources[0].fname.endswith('.rs'):
-            return True
 
     def get_using_msvc(self):
         '''
@@ -1395,7 +1358,6 @@ class Executable(BuildTarget):
     known_kwargs = known_exe_kwargs
 
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
-        self.typename = 'executable'
         if 'pie' not in kwargs and 'b_pie' in environment.coredata.base_options:
             kwargs['pie'] = environment.coredata.base_options['b_pie'].value
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
@@ -1485,7 +1447,6 @@ class StaticLibrary(BuildTarget):
     known_kwargs = known_stlib_kwargs
 
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
-        self.typename = 'static library'
         if 'pic' not in kwargs and 'b_staticpic' in environment.coredata.base_options:
             kwargs['pic'] = environment.coredata.base_options['b_staticpic'].value
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
@@ -1545,7 +1506,6 @@ class SharedLibrary(BuildTarget):
     known_kwargs = known_shlib_kwargs
 
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
-        self.typename = 'shared library'
         self.soversion = None
         self.ltversion = None
         # Max length 2, first element is compatibility_version, second is current_version
@@ -1625,12 +1585,7 @@ class SharedLibrary(BuildTarget):
             suffix = 'dll'
             self.vs_import_filename = '{0}{1}.lib'.format(self.prefix if self.prefix is not None else '', self.name)
             self.gcc_import_filename = '{0}{1}.dll.a'.format(self.prefix if self.prefix is not None else 'lib', self.name)
-            if self.get_using_rustc():
-                # Shared library is of the form foo.dll
-                prefix = ''
-                # Import library is called foo.dll.lib
-                self.import_filename = '{0}.dll.lib'.format(self.name)
-            elif self.get_using_msvc():
+            if self.get_using_msvc():
                 # Shared library is of the form foo.dll
                 prefix = ''
                 # Import library is called foo.lib
@@ -1859,7 +1814,6 @@ class SharedModule(SharedLibrary):
         if 'soversion' in kwargs:
             raise MesonException('Shared modules must not specify the soversion kwarg.')
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
-        self.typename = 'shared module'
 
     def get_default_install_dir(self, environment):
         return environment.get_shared_module_dir()
@@ -1885,7 +1839,6 @@ class CustomTarget(Target):
     ])
 
     def __init__(self, name, subdir, subproject, kwargs, absolute_paths=False):
-        self.typename = 'custom'
         super().__init__(name, subdir, subproject, False)
         self.dependencies = []
         self.extra_depends = []
@@ -1912,6 +1865,9 @@ class CustomTarget(Target):
     def __repr__(self):
         repr_str = "<{0} {1}: {2}>"
         return repr_str.format(self.__class__.__name__, self.get_id(), self.command)
+
+    def get_id(self):
+        return self.name + self.type_suffix()
 
     def get_target_dependencies(self):
         deps = self.dependencies[:]
@@ -2110,22 +2066,6 @@ class CustomTarget(Target):
                 raise InvalidArguments('Substitution in depfile for custom_target that does not have an input file.')
             return self.depfile
 
-    def is_linkable_target(self):
-        if len(self.outputs) != 1:
-            return False
-        suf = os.path.splitext(self.outputs[0])[-1]
-        if suf == '.a' or suf == '.dll' or suf == '.lib' or suf == '.so':
-            return True
-
-    def get_link_deps_mapping(self, prefix, environment):
-        return {}
-
-    def get_link_dep_subdirs(self):
-        return OrderedSet()
-
-    def get_all_link_deps(self):
-        return []
-
     def type_suffix(self):
         return "@cus"
 
@@ -2140,7 +2080,6 @@ class CustomTarget(Target):
 
 class RunTarget(Target):
     def __init__(self, name, command, args, dependencies, subdir, subproject):
-        self.typename = 'run'
         super().__init__(name, subdir, subproject, False)
         self.command = command
         self.args = args
@@ -2168,14 +2107,6 @@ class RunTarget(Target):
     def get_filename(self):
         return self.name
 
-    def get_outputs(self):
-        if isinstance(self.name, str):
-            return [self.name]
-        elif isinstance(self.name, list):
-            return self.name
-        else:
-            raise RuntimeError('RunTarget: self.name is neither a list nor a string. This is a bug')
-
     def type_suffix(self):
         return "@run"
 
@@ -2183,7 +2114,6 @@ class Jar(BuildTarget):
     known_kwargs = known_jar_kwargs
 
     def __init__(self, name, subdir, subproject, is_cross, sources, objects, environment, kwargs):
-        self.typename = 'jar'
         super().__init__(name, subdir, subproject, is_cross, sources, objects, environment, kwargs)
         for s in self.sources:
             if not s.endswith('.java'):
@@ -2227,7 +2157,6 @@ class CustomTargetIndex:
     """
 
     def __init__(self, target, output):
-        self.typename = 'custom'
         self.target = target
         self.output = output
 
@@ -2344,13 +2273,8 @@ def load(build_dir):
             obj = pickle.load(f)
     except FileNotFoundError:
         raise MesonException(nonexisting_fail_msg)
-    except (pickle.UnpicklingError, EOFError):
+    except pickle.UnpicklingError:
         raise MesonException(load_fail_msg)
-    except AttributeError:
-        raise MesonException(
-            "Build data file {!r} references functions or classes that don't "
-            "exist. This probably means that it was generated with an old "
-            "version of meson. Try running meson {} --wipe".format(filename, build_dir))
     if not isinstance(obj, Build):
         raise MesonException(load_fail_msg)
     return obj

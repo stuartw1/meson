@@ -345,12 +345,6 @@ def _run_test(testdir, test_build_dir, install_dir, extra_args, compiler, backen
     if pass_libdir_to_test(testdir):
         gen_args += ['--libdir', 'lib']
     gen_args += [testdir, test_build_dir] + flags + test_args + extra_args
-    nativefile = os.path.join(testdir, 'nativefile.ini')
-    if os.path.exists(nativefile):
-        gen_args.extend(['--native-file', nativefile])
-    crossfile = os.path.join(testdir, 'crossfile.ini')
-    if os.path.exists(crossfile):
-        gen_args.extend(['--cross-file', crossfile])
     (returncode, stdo, stde) = run_configure(gen_args)
     try:
         logfile = Path(test_build_dir, 'meson-logs', 'meson-log.txt')
@@ -440,14 +434,6 @@ def have_d_compiler():
     elif shutil.which("gdc"):
         return True
     elif shutil.which("dmd"):
-        # The Windows installer sometimes produces a DMD install
-        # that exists but segfaults every time the compiler is run.
-        # Don't know why. Don't know how to fix. Skip in this case.
-        cp = subprocess.run(['dmd', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
-        if cp.stdout == b'':
-            return False
         return True
     return False
 
@@ -498,10 +484,6 @@ def skippable(suite, test):
     if test.endswith('10 gtk-doc'):
         return True
 
-    # NetCDF is not in the CI image
-    if test.endswith('netcdf'):
-        return True
-
     # No frameworks test should be skipped on linux CI, as we expect all
     # prerequisites to be installed
     if mesonlib.is_linux():
@@ -512,10 +494,6 @@ def skippable(suite, test):
     if test.endswith('1 boost'):
         if mesonlib.is_windows():
             return 'BOOST_ROOT' not in os.environ
-        return False
-
-    # Qt is provided on macOS by Homebrew
-    if test.endswith('4 qt') and mesonlib.is_osx():
         return False
 
     # Other framework tests are allowed to be skipped on other platforms
@@ -547,11 +525,9 @@ def detect_tests_to_run():
     # Name, subdirectory, skip condition.
     all_tests = [
         ('common', 'common', False),
-        ('warning-meson', 'warning', False),
         ('failing-meson', 'failing', False),
         ('failing-build', 'failing build', False),
         ('failing-test',  'failing test', False),
-        ('kconfig', 'kconfig', False),
 
         ('platform-osx', 'osx', not mesonlib.is_osx()),
         ('platform-windows', 'windows', not mesonlib.is_windows() and not mesonlib.is_cygwin()),
@@ -561,14 +537,12 @@ def detect_tests_to_run():
         ('C#', 'csharp', skip_csharp(backend)),
         ('vala', 'vala', backend is not Backend.ninja or not shutil.which('valac')),
         ('rust', 'rust', backend is not Backend.ninja or not shutil.which('rustc')),
-        ('d', 'd', backend is not Backend.ninja or not have_d_compiler() or mesonlib.is_windows()),
+        ('d', 'd', backend is not Backend.ninja or not have_d_compiler()),
         ('objective c', 'objc', backend not in (Backend.ninja, Backend.xcode) or mesonlib.is_windows() or not have_objc_compiler()),
         ('objective c++', 'objcpp', backend not in (Backend.ninja, Backend.xcode) or mesonlib.is_windows() or not have_objcpp_compiler()),
         ('fortran', 'fortran', backend is not Backend.ninja or not shutil.which('gfortran')),
         ('swift', 'swift', backend not in (Backend.ninja, Backend.xcode) or not shutil.which('swiftc')),
-        ('cuda', 'cuda', backend not in (Backend.ninja, Backend.xcode) or not shutil.which('nvcc')),
         ('python3', 'python3', backend is not Backend.ninja),
-        ('python', 'python', backend is not Backend.ninja),
         ('fpga', 'fpga', shutil.which('yosys') is None),
         ('frameworks', 'frameworks', False),
         ('nasm', 'nasm', False),
@@ -625,14 +599,9 @@ def _run_tests(all_tests, log_name_base, failfast, extra_args):
             (testnum, testbase) = t.name.split(' ', 1)
             testname = '%.3d %s' % (int(testnum), testbase)
             should_fail = False
-            suite_args = []
             if name.startswith('failing'):
                 should_fail = name.split('failing-')[1]
-            if name.startswith('warning'):
-                suite_args = ['--fatal-meson-warnings']
-                should_fail = name.split('warning-')[1]
-            result = executor.submit(run_test, skipped, t.as_posix(), extra_args + suite_args,
-                                     system_compiler, backend, backend_flags, commands, should_fail)
+            result = executor.submit(run_test, skipped, t.as_posix(), extra_args, system_compiler, backend, backend_flags, commands, should_fail)
             futures.append((testname, t, result))
         for (testname, t, result) in futures:
             sys.stdout.flush()

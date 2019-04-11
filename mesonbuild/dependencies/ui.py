@@ -91,9 +91,9 @@ class GnuStepDependency(ConfigToolDependency):
             'link_args'))
 
     def find_config(self, versions=None):
-        tool = [self.tools[0]]
+        tool = self.tools[0]
         try:
-            p, out = Popen_safe(tool + ['--help'])[:2]
+            p, out = Popen_safe([tool, '--help'])[:2]
         except (FileNotFoundError, PermissionError):
             return (None, None)
         if p.returncode != 0:
@@ -177,13 +177,13 @@ def _qt_get_private_includes(mod_inc_dir, module, mod_version):
             os.path.join(private_dir, 'Qt' + module))
 
 class QtExtraFrameworkDependency(ExtraFrameworkDependency):
-    def __init__(self, name, required, paths, env, lang, kwargs):
-        super().__init__(name, required, paths, env, lang, kwargs)
+    def __init__(self, name, required, path, env, lang, kwargs):
+        super().__init__(name, required, path, env, lang, kwargs)
         self.mod_name = name[2:]
 
     def get_compile_args(self, with_private_headers=False, qt_version="0"):
         if self.found():
-            mod_inc_dir = os.path.join(self.framework_path, 'Headers')
+            mod_inc_dir = os.path.join(self.path, self.name, 'Headers')
             args = ['-I' + mod_inc_dir]
             if with_private_headers:
                 args += ['-I' + dirname for dirname in _qt_get_private_includes(mod_inc_dir, self.mod_name, qt_version)]
@@ -216,11 +216,9 @@ class QtBaseDependency(ExternalDependency):
         methods = []
         # Prefer pkg-config, then fallback to `qmake -query`
         if DependencyMethods.PKGCONFIG in self.methods:
-            mlog.debug('Trying to find qt with pkg-config')
             self._pkgconfig_detect(mods, kwargs)
             methods.append('pkgconfig')
         if not self.is_found and DependencyMethods.QMAKE in self.methods:
-            mlog.debug('Trying to find qt with qmake')
             self.from_text = self._qmake_detect(mods, kwargs)
             methods.append('qmake-' + self.name)
             methods.append('qmake')
@@ -335,18 +333,22 @@ class QtBaseDependency(ExternalDependency):
             if prefix:
                 self.bindir = os.path.join(prefix, 'bin')
 
+    def _find_qmake(self, qmake):
+        # Even when cross-compiling, if a cross-info qmake is not specified, we
+        # fallback to using the qmake in PATH because that's what we used to do
+        if self.env.is_cross_build():
+            if 'qmake' in self.env.cross_info.config['binaries']:
+                return ExternalProgram.from_bin_list(self.env.cross_info.config['binaries'], 'qmake')
+        elif self.env.config_info:
+            # Prefer suffixed to unsuffixed version
+            p = ExternalProgram.from_bin_list(self.env.config_info.binaries, 'qmake')
+            if p.found():
+                return p
+        return ExternalProgram(qmake, silent=True)
+
     def _qmake_detect(self, mods, kwargs):
         for qmake in ('qmake-' + self.name, 'qmake'):
-            self.qmake = ExternalProgram.from_bin_list(
-                self.env.binaries.host, qmake)
-            if not self.qmake.found():
-                # Even when cross-compiling, if a cross-info qmake is not
-                # specified, we fallback to using the qmake in PATH because
-                # that's what we used to do
-                self.qmake = ExternalProgram.from_bin_list(
-                    self.env.binaries.build, qmake)
-            if not self.qmake.found():
-                self.qmake = ExternalProgram(qmake, silent=True)
+            self.qmake = self._find_qmake(qmake)
             if not self.qmake.found():
                 continue
             # Check that the qmake is for qt5
@@ -362,7 +364,7 @@ class QtBaseDependency(ExternalDependency):
             # Didn't find qmake :(
             self.is_found = False
             return
-        self.version = re.search(self.qtver + r'(\.\d+)+', stdo).group(0)
+        self.version = re.search(self.qtver + '(\.\d+)+', stdo).group(0)
         # Query library path, header path, and binary path
         mlog.log("Found qmake:", mlog.bold(self.qmake.get_path()), '(%s)' % self.version)
         stdo = Popen_safe(self.qmake.get_command() + ['-query'])[1]
@@ -446,8 +448,7 @@ class QtBaseDependency(ExternalDependency):
 
         for m in modules:
             fname = 'Qt' + m
-            mlog.debug('Looking for qt framework ' + fname)
-            fwdep = QtExtraFrameworkDependency(fname, False, [libdir], self.env,
+            fwdep = QtExtraFrameworkDependency(fname, False, libdir, self.env,
                                                self.language, fw_kwargs)
             self.compile_args.append('-F' + libdir)
             if fwdep.found():

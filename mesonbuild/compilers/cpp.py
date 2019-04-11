@@ -23,12 +23,10 @@ from .c import CCompiler, VisualStudioCCompiler, ClangClCCompiler
 from .compilers import (
     gnu_winlibs,
     msvc_winlibs,
-    CompilerType,
     ClangCompiler,
     GnuCompiler,
     ElbrusCompiler,
     IntelCompiler,
-    PGICompiler,
     ArmCompiler,
     ArmclangCompiler,
     CcrxCompiler,
@@ -135,8 +133,7 @@ class ClangCPPCompiler(ClangCompiler, CPPCompiler):
         CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
         ClangCompiler.__init__(self, compiler_type)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -167,8 +164,7 @@ class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
         CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
         ArmclangCompiler.__init__(self, compiler_type)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -196,8 +192,7 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
         CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, **kwargs)
         GnuCompiler.__init__(self, compiler_type, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
 
@@ -237,12 +232,6 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
         return ['-lstdc++']
 
 
-class PGICPPCompiler(PGICompiler, CPPCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrapper=None, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
-        PGICompiler.__init__(self, CompilerType.PGI_STANDARD)
-
-
 class ElbrusCPPCompiler(GnuCPPCompiler, ElbrusCompiler):
     def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, defines=None, **kwargs):
         GnuCPPCompiler.__init__(self, exelist, version, compiler_type, is_cross, exe_wrapper, defines, **kwargs)
@@ -275,8 +264,7 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
         self.lang_header = 'c++-header'
         default_warn_args = ['-Wall', '-w3', '-diag-disable:remark',
                              '-Wpch-messages', '-Wnon-virtual-dtor']
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
+        self.warn_args = {'1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra']}
 
@@ -320,9 +308,9 @@ class IntelCPPCompiler(IntelCompiler, CPPCompiler):
 
 
 class VisualStudioCPPCompiler(VisualStudioCCompiler, CPPCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
         CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
-        VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, target)
+        VisualStudioCCompiler.__init__(self, exelist, version, is_cross, exe_wrap, is_64)
         self.base_options = ['b_pch', 'b_vscrt'] # FIXME add lto, pgo and the like
 
     def get_options(self):
@@ -399,8 +387,8 @@ class VisualStudioCPPCompiler(VisualStudioCCompiler, CPPCompiler):
         return VisualStudioCCompiler.get_compiler_check_args(self)
 
 class ClangClCPPCompiler(VisualStudioCPPCompiler, ClangClCCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
-        VisualStudioCPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, target)
+    def __init__(self, exelist, version, is_cross, exe_wrap, is_64):
+        VisualStudioCPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, is_64)
         self.id = 'clang-cl'
 
 class ArmCPPCompiler(ArmCompiler, CPPCompiler):
