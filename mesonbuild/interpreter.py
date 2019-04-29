@@ -1857,6 +1857,8 @@ class MesonMain(InterpreterObject):
                     ar_binary = static_linker.exelist[0]
                     if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
                         return os.path.join(os.path.dirname(ar_binary), 'libtool')
+                    elif os.path.basename(ar_binary).startswith('frida'):
+                        return subprocess.check_output(['xcrun', '-f', 'libtool'], encoding='utf-8').rstrip()
             elif binname == 'strip':
                 return self.build.environment.native_strip_bin[0]
             if len(args) == 2:
