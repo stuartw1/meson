@@ -1851,14 +1851,14 @@ class MesonMain(InterpreterObject):
                 static_linker = self.build.static_linker
                 if static_linker is not None:
                     return static_linker.exelist[0]
-            elif binname == 'libtool':
+            elif binname in ('libtool', 'nm', 'objdump', 'otool'):
                 static_linker = self.build.static_linker
                 if static_linker is not None:
                     ar_binary = static_linker.exelist[0]
                     if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
-                        return os.path.join(os.path.dirname(ar_binary), 'libtool')
+                        return os.path.join(os.path.dirname(ar_binary), binname)
                     elif os.path.basename(ar_binary).startswith('frida'):
-                        return subprocess.check_output(['xcrun', '-f', 'libtool'], encoding='utf-8').rstrip()
+                        return subprocess.check_output(['xcrun', '-f', binname], encoding='utf-8').rstrip()
             elif binname == 'strip':
                 return self.build.environment.native_strip_bin[0]
             if len(args) == 2:
