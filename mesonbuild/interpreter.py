@@ -1851,7 +1851,7 @@ class MesonMain(InterpreterObject):
                 static_linker = self.build.static_linker
                 if static_linker is not None:
                     return static_linker.exelist[0]
-            elif binname in ('libtool', 'nm', 'objdump', 'otool'):
+            elif binname in ('libtool', 'nm', 'objdump', 'otool', 'install_name_tool'):
                 static_linker = self.build.static_linker
                 if static_linker is not None:
                     ar_binary = static_linker.exelist[0]
