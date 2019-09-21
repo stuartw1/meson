@@ -156,6 +156,8 @@ class ClangCPPCompiler(ClangCompiler, CPPCompiler):
         return []
 
     def language_stdlib_only_link_flags(self):
+        if self.compiler_type.is_osx_compiler:
+            return ['-lc++']
         return ['-lstdc++']
 
 
