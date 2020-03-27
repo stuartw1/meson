@@ -1,4 +1,6 @@
-project('external CMake dependency', 'c')
+# this test can ONLY be run successfully from run_project_test.py
+# due to use of setup_env.json
+project('external CMake dependency', ['c', 'cpp'])
 
 if not find_program('cmake', required: false).found()
   error('MESON_SKIP_TEST cmake binary not available.')
@@ -36,13 +38,32 @@ depf2 = dependency('ZLIB', required : false, method : 'cmake', modules : 'dfggh:
 
 assert(depf2.found() == false, 'Invalid CMake targets should fail')
 
+# Try to find cmMesonTestDep in a custom prefix
+# setup_env.json is used by run_project_tests.py:_run_test to point to ./cmake_pref_env/
+depPrefEnv = dependency('cmMesonTestDep', required : true, method : 'cmake')
+
+# Try to find a dependency with a custom CMake module
+
+depm1 = dependency('SomethingLikeZLIB', required : true, components : 'required_comp',   method : 'cmake', cmake_module_path : 'cmake')
+depm2 = dependency('SomethingLikeZLIB', required : true, components : 'required_comp',   method : 'cmake', cmake_module_path : ['cmake'])
+depm3 = dependency('SomethingLikeZLIB', required : true, components : ['required_comp'], cmake_module_path : 'cmake')
+
+# Test some edge cases with spaces, etc.
+
+testDep1 = dependency('ImportedTarget', required : true, method : 'cmake', cmake_module_path : 'cmake', modules: 'mesonTestLibDefs')
+testDep2 = dependency('ImportedTarget', required : true, method : 'cmake', cmake_module_path : 'cmake', modules : ['MesonTest::TestLibDefs'])
+testFlagSet1 = executable('testFlagSet1', ['testFlagSet.c'], dependencies: [testDep1])
+testFlagSet2 = executable('testFlagSet2', ['testFlagSet.c'], dependencies: [testDep2])
+test('testFlagSetTest1', testFlagSet1)
+test('testFlagSetTest2', testFlagSet2)
+
 # Try to compile a test that takes a dep and an include_directories
 
 cc = meson.get_compiler('c')
 zlibdep = cc.find_library('z')
 code = '''#include<myinc.h>
 
-int main(int argc, char **argv) {
+int main(void) {
     void * something = deflate;
     if(something != 0)
         return 0;

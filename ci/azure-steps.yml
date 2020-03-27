@@ -5,8 +5,8 @@ steps:
         exit 0
      }
 
-     # remove MinGW from path, so we don't find gfortran and try to use it
-     $env:Path = ($env:Path.Split(';') | Where-Object { $_ -notlike '*mingw*' }) -join ';'
+     # remove Chocolately, MinGW, Strawberry Perl from path, so we don't find gcc/gfortran and try to use it
+     $env:Path = ($env:Path.Split(';') | Where-Object { $_ -notmatch 'mingw|Strawberry|Chocolatey' }) -join ';'
 
      # download and install prerequisites
      function DownloadFile([String] $Source, [String] $Destination) {
@@ -27,15 +27,19 @@ steps:
           }
      }
 
-     DownloadFile -Source 'https://github.com/mesonbuild/cidata/raw/master/ninja.exe' -Destination $(System.WorkFolder)\ninja.exe
-     DownloadFile -Source 'http://nirbheek.in/files/binaries/pkg-config/win32/pkg-config.exe' -Destination $(System.WorkFolder)\pkg-config.exe
+     DownloadFile -Source 'https://github.com/ninja-build/ninja/releases/download/v1.9.0/ninja-win.zip' -Destination $(System.WorkFolder)\ninja-win.zip
+     # ExpandArchive is only available in Powershell 5+
+     Add-Type -AssemblyName System.IO.Compression.FileSystem
+     function unzip {
+         param( [string]$ziparchive, [string]$extractpath )
+         [System.IO.Compression.ZipFile]::ExtractToDirectory( $ziparchive, $extractpath )
+     }
+     unzip $(System.WorkFolder)\ninja-win.zip $(System.WorkFolder)
+     DownloadFile -Source 'https://github.com/mesonbuild/cidata/raw/master/win32/pkg-config.exe' -Destination $(System.WorkFolder)\pkg-config.exe
      DownloadFile -Source 'https://download.microsoft.com/download/D/B/B/DBB64BA1-7B51-43DB-8BF1-D1FB45EACF7A/msmpisdk.msi' -Destination msmpisdk.msi
      DownloadFile -Source 'https://download.microsoft.com/download/D/B/B/DBB64BA1-7B51-43DB-8BF1-D1FB45EACF7A/MSMpiSetup.exe' -Destination MSMpiSetup.exe
-     if ($env:compiler -ne 'msvc2015') {
-       Start-Process msiexec.exe -ArgumentList '/i msmpisdk.msi /quiet' -Wait
-       # installer fails "requires an interactive window station" with vs2015 image
-       Start-Process .\MSMpiSetup.exe -ArgumentList '-unattend -full' -Wait
-     }
+     Start-Process msiexec.exe -ArgumentList '/i msmpisdk.msi /quiet' -Wait
+     Start-Process .\MSMpiSetup.exe -ArgumentList '-unattend -full' -Wait
 
      # import ms-mpi env vars (set by installer)
      foreach ($p in "MSMPI_INC", "MSMPI_LIB32", "MSMPI_LIB64") {
@@ -43,27 +47,10 @@ steps:
        Set-Content "env:$p" "$v"
      }
 
-     if ($env:compiler -eq 'msvc2015') {
-       if ($env:arch -eq 'x86') {
-         $forcex86 = "--forcex86"
-       }
-
-       # download and install python3 and add to path (since it's not installed in vs2015 image!)
-       Set-ExecutionPolicy Bypass -Scope Process -Force
-       iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-       choco install python3 -y --no-progress $forcex86 --params "/InstallDir:C:\Python3"
-       $env:Path = "C:\Python3;$env:Path"
-
-       # add JDK installed in vs2015 image to PATH
-       $env:Path = "C:\java\jdk\jdk1.8.0_102\bin\;$env:Path"
-     }
-
      # install boost (except for clang-cl)
      if ($env:arch -eq 'x86') { $boost_bitness = '32' } else { $boost_bitness = '64' }
-     if ($env:compiler -eq 'msvc2015') {
-       $boost_version = '1.60.0' ; $boost_abi_tag = '14.0'
-     } elseif ($env:compiler -eq 'msvc2017') {
-       $boost_version = '1.64.0' ; $boost_abi_tag = '14.1'
+     if ($env:compiler -eq 'msvc2017' -Or $env:compiler -eq 'msvc2019' -Or $env:compiler -eq 'clang-cl') {
+       $boost_version = '1.72.0' ; $boost_abi_tag = '14.1'
      }
      if ($boost_version) {
        $boost_filename = $boost_version.Replace('.', '_')
@@ -71,6 +58,8 @@ steps:
        Start-Process "boost_$boost_filename-msvc-$boost_abi_tag-$boost_bitness.exe" -ArgumentList "/dir=$(System.WorkFolder)\boost_$boost_filename /silent" -Wait
        $env:BOOST_ROOT = "$(System.WorkFolder)\boost_$boost_filename"
        $env:Path = "$env:Path;$env:BOOST_ROOT\lib$boost_bitness-msvc-$boost_abi_tag"
+     } else {
+       $env:BOOST_ROOT = ""
      }
 
      # install D compiler and dub packages
@@ -95,11 +84,16 @@ steps:
 
      $origPath = $env:Path
      # import visual studio variables
-     if ($env:compiler -eq 'msvc2015') {
-       $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat"
+     if ($env:compiler -eq 'msvc2019') {
+       $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
      } else {
+       # Note: this is also for clangcl
        $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
      }
+
+     ## A multiline commit message containing "=" can interact badly with this
+     ## hack to extract the environment from vcvarsall.bat
+     Remove-Item env:BUILD_SOURCEVERSIONMESSAGE
 
      ## ask cmd.exe to output the environment table after the batch file completes
      $tempFile = [IO.Path]::GetTempFileName()
@@ -120,8 +114,8 @@ steps:
        $env:Path = $origPath
 
        # install llvm for clang-cl builds
-       DownloadFile -Source 'http://releases.llvm.org/7.0.0/LLVM-7.0.0-win64.exe' -Destination LLVM-7.0.0-win64.exe
-       Start-Process .\LLVM-7.0.0-win64.exe -ArgumentList '/S' -Wait
+       DownloadFile -Source 'http://releases.llvm.org/9.0.0/LLVM-9.0.0-win64.exe' -Destination LLVM-9.0.0-win64.exe
+       Start-Process .\LLVM-9.0.0-win64.exe -ArgumentList '/S' -Wait
        $env:Path = "C:\Program Files\LLVM\bin;$env:Path"
        $env:CC = "clang-cl"
        $env:CXX = "clang-cl"
@@ -142,10 +136,30 @@ steps:
        MSBuild /version
      }
 
+     echo "=== PATH BEGIN ==="
+     echo ($env:Path).Replace(';',"`n")
+     echo "=== PATH END ==="
+     echo ""
+     echo "Locating Python:"
      where.exe python
      python --version
 
-     python run_tests.py --backend $(backend)
+     # Needed for running unit tests in parallel.
+     python -m pip --disable-pip-version-check install --upgrade pefile pytest-xdist
+
+
+     echo ""
+     echo "Locating cl, rc, link:"
+     where.exe cl
+     where.exe rc
+     where.exe link
+
+     echo ""
+     echo "=== Start running tests ==="
+     # Starting from VS2019 Powershell(?) will fail the test run
+     # if it prints anything to stderr. Python's test runner
+     # does that by default so we need to forward it.
+     cmd /c 'python 2>&1' run_tests.py --backend $(backend)
 
 - task: PublishTestResults@2
   inputs:
@@ -163,5 +177,4 @@ steps:
 - task: PublishBuildArtifacts@1
   inputs:
     artifactName: $(System.JobName)
-  # publishing artifacts from PRs from a fork is currently blocked
-  condition: eq(variables['system.pullrequest.isfork'], false)
+  condition: not(canceled())

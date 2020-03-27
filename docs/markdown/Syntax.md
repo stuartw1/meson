@@ -78,6 +78,13 @@ string_var = '42'
 num = string_var.to_int()
 ```
 
+Numbers can be converted to a string:
+
+```meson
+int_var = 42
+string_var = int_var.to_string()
+```
+
 Booleans
 --
 
@@ -115,6 +122,9 @@ The full list of escape sequences is:
 * `\N{name}` Character named name in Unicode database
 
 As in python and C, up to three octal digits are accepted in `\ooo`.
+
+Unrecognized escape sequences are left in the string unchanged, i.e., the
+backslash is left in the string.
 
 #### String concatenation
 
@@ -211,10 +221,18 @@ pathsep = ':'
 path = pathsep.join(['/usr/bin', '/bin', '/usr/local/bin'])
 # path now has the value '/usr/bin:/bin:/usr/local/bin'
 
-# For joining paths, you should use join_paths()
+# For joining path elements, you should use path1 / path2
 # This has the advantage of being cross-platform
-path = join_paths(['/usr', 'local', 'bin'])
+path = '/usr' / 'local' / 'bin'
 # path now has the value '/usr/local/bin'
+
+# For sources files, use files():
+my_sources = files('foo.c')
+...
+my_sources += files('bar.c')
+# This has the advantage of always calculating the correct relative path, even
+# if you add files in another directory or use them in a different directory
+# than they're defined in
 
 # Example to set an API version for use in library(), install_header(), etc
 project('project', 'c', version: '0.2.3')
@@ -306,8 +324,8 @@ Dictionaries
 --
 
 Dictionaries are delimited by curly braces. A dictionary can contain an
-arbitrary number of key value pairs. Keys are required to be literal
-strings, values can be objects of any type.
+arbitrary number of key value pairs. Keys are required to be strings, values can
+be objects of any type. Prior to *0.53.0* keys were required to be literal strings.
 
 ```meson
 my_dict = {'foo': 42, 'bar': 'baz'}
@@ -320,7 +338,7 @@ Keys must be unique:
 my_dict = {'foo': 42, 'foo': 43}
 ```
 
-Dictionaries are immutable.
+Dictionaries are immutable and do not have a guaranteed order.
 
 Dictionaries are available since 0.47.0.
 
@@ -329,7 +347,7 @@ about the methods exposed by dictionaries.
 
 Since 0.49.0, you can check if a dictionary contains a key like this:
 ```meson
-my_dict = {'foo': 42, 'foo': 43}
+my_dict = {'foo': 42, 'bar': 43}
 if 'foo' in my_dict
 # This condition is true
 endif
@@ -339,6 +357,14 @@ endif
 if 'foo' not in my_dict
 # This condition is false
 endif
+```
+
+*Since 0.53.0* Keys can be any expression evaluating to a string value, not limited
+to string literals any more.
+```meson
+d = {'a' + 'b' : 42}
+k = 'cd'
+d += {k : 43}
 ```
 
 Function calls

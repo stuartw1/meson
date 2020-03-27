@@ -21,21 +21,28 @@ foreach qt : ['qt4', 'qt5']
     error('Invalid qt dep incorrectly found!')
   endif
 
-  # This test should be skipped if qt5 isn't found
-  if qt == 'qt5'
+  # This test should be skipped if the required version of Qt isn't found
+  #
+  # (In the CI environment, the specified version of Qt is definitely present.
+  # An unexpected skip here is treated as a failure, so we are testing that the
+  # detection mechanism is able to find Qt.)
+  needed_qt = get_option('required').to_lower()
+  required = (qt == needed_qt)
+  if required
     dep = dependency(qt, modules : ['Core'], required : false, method : get_option('method'))
     if not dep.found()
-      error('MESON_SKIP_TEST qt5 not found.')
+      error('MESON_SKIP_TEST @0@ not found.'.format(needed_qt))
     endif
   endif
 
   # Ensure that the "no-Core-module-specified" code branch is hit
-  nocoredep = dependency(qt, modules : ['Gui'], required : qt == 'qt5', method : get_option('method'))
+  nocoredep = dependency(qt, modules : ['Gui'], required : required, method : get_option('method'))
 
-  # If qt4 modules are found, test that. qt5 is required.
-  qtdep = dependency(qt, modules : qt_modules, main : true, private_headers: true, required : qt == 'qt5', method : get_option('method'))
+  # If 'qt' modules are found, test that.
+  qtdep = dependency(qt, modules : qt_modules, main : true, private_headers: true, required : required, method : get_option('method'))
   if qtdep.found()
     qtmodule = import(qt)
+    assert(qtmodule.has_tools())
 
     # The following has two resource files because having two in one target
     # requires you to do it properly or you get linker symbol clashes.
@@ -77,6 +84,7 @@ foreach qt : ['qt4', 'qt5']
     qtcore = dependency(qt, modules : 'Core', method : get_option('method'))
 
     qtcoreapp = executable(qt + 'core', 'q5core.cpp',
+      cpp_args: '-DQT="@0@"'.format(qt),
       dependencies : qtcore)
 
     test(qt + 'test', qtcoreapp)

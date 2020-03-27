@@ -29,7 +29,7 @@ manually changed with the new base option `b_vscrt`.
 
 ## Meson warns if two calls to `configure_file()` write to the same file
 
-If two calls to [`configure_file()`](#Reference-manual.md#configure_file)
+If two calls to [`configure_file()`](Reference-manual.md#configure_file)
 write to the same file Meson will print a `WARNING:` message during
 configuration. For example:
 ```meson
@@ -217,7 +217,7 @@ i18n.merge_file() now behaves as custom_target() in this regard.
 ## Projects args can be set separately for cross and native builds (potentially breaking change)
 
 It has been a longstanding bug (or let's call it a "delayed bug fix")
-that if yo do this:
+that if you do this:
 
 ```meson
 add_project_arguments('-DFOO', language : 'c')
@@ -311,3 +311,24 @@ clone-recursive=true
 This allows you to declare an optional subproject. You can now call `found()`
 on the return value of the `subproject()` call to see if the subproject is
 available before calling `get_variable()` to fetch information from it.
+
+## `dependency()` objects now support the `.name()` method
+
+You can now fetch the name of the dependency that was searched like so:
+
+```meson
+glib_dep = dependency('glib-2.0')
+...
+message("dependency name is " + glib_dep.name())
+# This outputs `dependency name is glib-2.0`
+
+qt_dep = dependency('qt5')
+...
+message("dependency name is " + qt_dep.name())
+# This outputs `dependency name is qt5`
+
+decl_dep = declare_dependency()
+...
+message("dependency name is " + decl_dep.name())
+# This outputs `dependency name is internal`
+```

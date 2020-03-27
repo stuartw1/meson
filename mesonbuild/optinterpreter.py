@@ -12,23 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os, re
+import re
 import functools
+import typing as T
 
 from . import mparser
 from . import coredata
 from . import mesonlib
 from . import compilers
 
-forbidden_option_names = coredata.get_builtin_options()
+forbidden_option_names = set(coredata.builtin_options.keys())
 forbidden_prefixes = [lang + '_' for lang in compilers.all_languages] + ['b_', 'backend_']
+reserved_prefixes = ['cross_']
 
-def is_invalid_name(name):
+def is_invalid_name(name: str, *, log: bool = True) -> bool:
     if name in forbidden_option_names:
         return True
     pref = name.split('_')[0] + '_'
     if pref in forbidden_prefixes:
         return True
+    if pref in reserved_prefixes:
+        if log:
+            from . import mlog
+            mlog.deprecation('Option uses prefix "%s", which is reserved for Meson. This will become an error in the future.' % pref)
     return False
 
 class OptionException(mesonlib.MesonException):
@@ -44,7 +50,7 @@ def permitted_kwargs(permitted):
             if bad:
                 raise OptionException('Invalid kwargs for option "{}": "{}"'.format(
                     name, ' '.join(bad)))
-            return func(name, description, kwargs)
+            return func(description, kwargs)
         return _inner
     return _wraps
 
@@ -52,21 +58,20 @@ def permitted_kwargs(permitted):
 optname_regex = re.compile('[^a-zA-Z0-9_-]')
 
 @permitted_kwargs({'value', 'yield'})
-def StringParser(name, description, kwargs):
-    return coredata.UserStringOption(name,
-                                     description,
+def StringParser(description, kwargs):
+    return coredata.UserStringOption(description,
                                      kwargs.get('value', ''),
                                      kwargs.get('choices', []),
                                      kwargs.get('yield', coredata.default_yielding))
 
 @permitted_kwargs({'value', 'yield'})
-def BooleanParser(name, description, kwargs):
-    return coredata.UserBooleanOption(name, description,
+def BooleanParser(description, kwargs):
+    return coredata.UserBooleanOption(description,
                                       kwargs.get('value', True),
                                       kwargs.get('yield', coredata.default_yielding))
 
 @permitted_kwargs({'value', 'yield', 'choices'})
-def ComboParser(name, description, kwargs):
+def ComboParser(description, kwargs):
     if 'choices' not in kwargs:
         raise OptionException('Combo option missing "choices" keyword.')
     choices = kwargs['choices']
@@ -75,29 +80,26 @@ def ComboParser(name, description, kwargs):
     for i in choices:
         if not isinstance(i, str):
             raise OptionException('Combo choice elements must be strings.')
-    return coredata.UserComboOption(name,
-                                    description,
+    return coredata.UserComboOption(description,
                                     choices,
                                     kwargs.get('value', choices[0]),
                                     kwargs.get('yield', coredata.default_yielding),)
 
 
 @permitted_kwargs({'value', 'min', 'max', 'yield'})
-def IntegerParser(name, description, kwargs):
+def IntegerParser(description, kwargs):
     if 'value' not in kwargs:
         raise OptionException('Integer option must contain value argument.')
-    return coredata.UserIntegerOption(name,
-                                      description,
-                                      kwargs.get('min', None),
-                                      kwargs.get('max', None),
-                                      kwargs['value'],
+    inttuple = (kwargs.get('min', None), kwargs.get('max', None), kwargs['value'])
+    return coredata.UserIntegerOption(description,
+                                      inttuple,
                                       kwargs.get('yield', coredata.default_yielding))
 
 # FIXME: Cannot use FeatureNew while parsing options because we parse it before
 # reading options in project(). See func_project() in interpreter.py
 #@FeatureNew('array type option()', '0.44.0')
 @permitted_kwargs({'value', 'yield', 'choices'})
-def string_array_parser(name, description, kwargs):
+def string_array_parser(description, kwargs):
     if 'choices' in kwargs:
         choices = kwargs['choices']
         if not isinstance(choices, list):
@@ -111,16 +113,14 @@ def string_array_parser(name, description, kwargs):
         value = kwargs.get('value', [])
     if not isinstance(value, list):
         raise OptionException('Array choices must be passed as an array.')
-    return coredata.UserArrayOption(name,
-                                    description,
+    return coredata.UserArrayOption(description,
                                     value,
                                     choices=choices,
                                     yielding=kwargs.get('yield', coredata.default_yielding))
 
 @permitted_kwargs({'value', 'yield'})
-def FeatureParser(name, description, kwargs):
-    return coredata.UserFeatureOption(name,
-                                      description,
+def FeatureParser(description, kwargs):
+    return coredata.UserFeatureOption(description,
                                       kwargs.get('value', 'auto'),
                                       yielding=kwargs.get('yield', coredata.default_yielding))
 
@@ -130,7 +130,7 @@ option_types = {'string': StringParser,
                 'integer': IntegerParser,
                 'array': string_array_parser,
                 'feature': FeatureParser,
-                }
+                } # type: T.Dict[str, T.Callable[[str, T.Dict], coredata.UserOption]]
 
 class OptionInterpreter:
     def __init__(self, subproject):
@@ -140,13 +140,14 @@ class OptionInterpreter:
     def process(self, option_file):
         try:
             with open(option_file, 'r', encoding='utf8') as f:
-                ast = mparser.Parser(f.read(), '').parse()
+                ast = mparser.Parser(f.read(), option_file).parse()
         except mesonlib.MesonException as me:
             me.file = option_file
             raise me
         if not isinstance(ast, mparser.CodeBlockNode):
             e = OptionException('Option file is malformed.')
             e.lineno = ast.lineno()
+            e.file = option_file
             raise e
         for cur in ast.lines:
             try:
@@ -154,7 +155,7 @@ class OptionInterpreter:
             except Exception as e:
                 e.lineno = cur.lineno
                 e.colno = cur.colno
-                e.file = os.path.join('meson_options.txt')
+                e.file = option_file
                 raise e
 
     def reduce_single(self, arg):
@@ -175,10 +176,10 @@ class OptionInterpreter:
         reduced_pos = [self.reduce_single(arg) for arg in args.arguments]
         reduced_kw = {}
         for key in args.kwargs.keys():
-            if not isinstance(key, str):
+            if not isinstance(key, mparser.IdNode):
                 raise OptionException('Keyword argument name is not a string.')
             a = args.kwargs[key]
-            reduced_kw[key] = self.reduce_single(a)
+            reduced_kw[key.value] = self.reduce_single(a)
         return reduced_pos, reduced_kw
 
     def evaluate_statement(self, node):

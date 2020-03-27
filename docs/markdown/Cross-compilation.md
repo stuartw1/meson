@@ -35,14 +35,24 @@ three machines are the same. Simple so far.
 Let's next look at the most common cross-compilation setup. Let's
 suppose you are on a 64 bit OSX machine and you are cross compiling a
 binary that will run on a 32 bit ARM Linux board. In this case your
-*build machine* is 64 bit OSX and both your *host* and *target
-machines* are 32 bit ARM Linux. This should be quite understandable as
-well.
+*build machine* is 64 bit OSX, your *host machine* is 32 bit ARM Linux
+and your *target machine* is irrelevant (but defaults to the same value
+as the *host machine*). This should be quite understandable as well.
 
-It gets a bit trickier when we think about how the cross compiler was
-generated. It was built and it runs on a specific platform but the
-output it generates is for a different platform. In this case *build*
-and *host machines* are the same, but *target machine* is different.
+The usual mistake in this case is to call the OSX system the *host* and
+the ARM Linux board the *target*. That's because these were their actual
+names when the cross-compiler itself was compiled!  Let's assume the
+cross-compiler was created on OSX too. When that happened the *build*
+and *host machines* were the same OSX and different from the ARM Linux
+*target machine*.
+
+In a nutshell, the typical mistake assumes that the terms *build*,
+*host* and *target* refer to some fixed positions whereas they're
+actually relative to where the current compiler is running. Think of
+*host* as a *child* of the current compiler and *target* as an optional
+*grand-child*. Compilers don't change their terminology when they're
+creating another compiler, that would at the very least make their user
+interface much more complex.
 
 The most complicated case is when you cross-compile a cross
 compiler. As an example you can, on a Linux machine, generate a cross
@@ -56,8 +66,8 @@ Wikipedia or the net in general. It is very common for them to get
 build, host and target mixed up, even in consecutive sentences, which
 can leave you puzzled until you figure it out.
 
-A lot of confusion stems from the fact that when you cross-compile
-something, the 3 systems (*build*, *host*, and *target*) used when
+Again note that when you cross-compile something,
+the 3 systems (*build*, *host*, and *target*) used when
 building the cross compiler don't align with the ones used when
 building something with that newly-built cross compiler. To take our
 Canadian Cross scenario from above (for full generality), since its
@@ -67,8 +77,8 @@ Linux, the *host machine* of anything we build with it is *MIPS
 Linux*. Only the *target machine* of whatever we build with it can be
 freely chosen by us, say if we want to build another cross compiler
 that runs on MIPS Linux and targets Aarch64 iOS. As this example
-hopefully makes clear to you, the platforms are shifted over to the
-left by one position.
+hopefully makes clear to you, the machine names are relative and
+shifted over to the left by one position.
 
 If you did not understand all of the details, don't worry. For most
 people it takes a while to wrap their head around these
@@ -87,6 +97,8 @@ this:
 [binaries]
 c = '/usr/bin/i586-mingw32msvc-gcc'
 cpp = '/usr/bin/i586-mingw32msvc-g++'
+c_ld = 'gold'
+cpp_ld = 'gold'
 ar = '/usr/i586-mingw32msvc/bin/ar'
 strip = '/usr/i586-mingw32msvc/bin/strip'
 pkgconfig = '/usr/bin/i586-mingw32msvc-pkg-config'
@@ -101,6 +113,12 @@ application with qemu or a hardware simulator. If you have this kind
 of a wrapper, these lines are all you need to write. Meson will
 automatically use the given wrapper when it needs to run host
 binaries. This happens e.g. when running the project's test suite.
+
+ld is special because it is compiler specific. For compilers like gcc and
+clang which are used to invoke the linker this is a value to pass to their
+"choose the linker" argument (-fuse-ld= in this case). For compilers like
+MSVC and Clang-Cl, this is the path to a linker for meson to invoke, such as
+`link.exe` or `lld-link.exe`. Support for ls is *new in 0.53.0*
 
 The next section lists properties of the cross compiler and its target
 system, and thus properties of host system of what we're building. It
@@ -120,6 +138,8 @@ has_function_printf = true
 
 c_args = ['-DCROSS=1', '-DSOMETHING=3']
 c_link_args = ['-some_link_arg']
+sys_root = '/some/path'
+pkg_config_libdir = '/some/path/lib/pkgconfig'
 ```
 
 In most cases you don't need the size and alignment settings, Meson
@@ -130,6 +150,16 @@ the issue. If you need extra compiler arguments to be used during
 cross compilation you can set them with `[langname]_args =
 [args]`. Just remember to specify the args as an array and not as a
 single string (i.e. not as `'-DCROSS=1 -DSOMETHING=3'`).
+
+*Since 0.52.0* The `sys_root` property may point to the root of the host
+system path (the system that will run the compiled binaries). This is used
+internally by Meson to set the PKG_CONFIG_SYSROOT_DIR environment variable
+for pkg-config. If this is unset the host system is assumed to share a root
+with the build system.
+
+*Since 0.54.0* The pkg_config_libdir property may point to a list of path used
+internally by Meson to set the PKG_CONFIG_LIBDIR environment variable for pkg-config.
+This prevents pkg-config from searching cross dependencies in system directories.
 
 One important thing to note, if you did not define an `exe_wrapper` in
 the previous section, is that Meson will make a best-effort guess at
@@ -150,7 +180,7 @@ binaries are not actually compatible. In such cases you may use the
 needs_exe_wrapper = true
 ```
 
-The last bit is the definition of host and target machines. Every
+The next bit is the definition of host and target machines. Every
 cross build definition must have one or both of them. If it had
 neither, the build would not be a cross build but a native build. You
 do not need to define the build machine, as all necessary information
@@ -185,6 +215,25 @@ but with different operating systems.
 If you do not define your host machine, it is assumed to be the build
 machine. Similarly if you do not specify target machine, it is assumed
 to be the host machine.
+
+Additionally, you can define the paths that you want to install to in your
+cross file. This may be especially useful when cross compiling an entire
+operating system, or for operating systems to use internally for consistency.
+
+```ini
+[paths]
+prefix = '/my/prefix'
+libdir = 'lib/i386-linux-gnu'
+bindir = 'bin'
+```
+
+This will be overwritten by any options passed on the command line.
+
+Since meson 0.52.0 it is possible to layer cross files together. This
+works like native file layering: the purpose is to compose cross files
+together, and values from the second cross file will replace those
+from the first.
+
 
 ## Starting a cross build
 

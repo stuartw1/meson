@@ -83,9 +83,9 @@ Currently supported in
 - `disabled` do not look for the dependency and always return 'not-found'.
 
 When getting the value of this type of option using `get_option()`, a special
-object is returned instead of the string representation of the option's value.
-That object has three methods returning boolean and taking no argument:
-`enabled()`, `disabled()`, and `auto()`.
+[feature option object](Reference-manual.md#feature-option-object)
+is returned instead of the string representation of the option's value.
+This object can be passed to `required`:
 
 ```meson
 d = dependency('foo', required : get_option('myfeature'))
@@ -94,7 +94,22 @@ if d.found()
 endif
 ```
 
-If the value of a `feature` option is set to `auto`, that value is overriden by
+To check the value of the feature, the object has three methods
+returning a boolean and taking no argument:
+
+- `.enabled()`
+- `.disabled()`
+- `.auto()`
+
+This is useful for custom code depending on the feature:
+
+```meson
+if get_option('myfeature').enabled()
+  # ...
+endif
+```
+
+If the value of a `feature` option is set to `auto`, that value is overridden by
 the global `auto_features` option (which defaults to `auto`). This is intended
 to be used by packagers who want to have full control on which dependencies are
 required and which are disabled, and not rely on build-deps being installed

@@ -76,16 +76,33 @@ class HotdocTargetBuilder:
             return
 
         if isinstance(value, bool):
-            self.cmd.append(option)
+            if value:
+                self.cmd.append(option)
         elif isinstance(value, list):
             # Do not do anything on empty lists
             if value:
+                # https://bugs.python.org/issue9334 (from 2010 :( )
+                # The syntax with nargs=+ is inherently ambiguous
+                # A workaround for this case is to simply prefix with a space
+                # every value starting with a dash
+                escaped_value = []
+                for e in value:
+                    if isinstance(e, str) and e.startswith('-'):
+                        escaped_value += [' %s' % e]
+                    else:
+                        escaped_value += [e]
                 if option:
-                    self.cmd.extend([option] + value)
+                    self.cmd.extend([option] + escaped_value)
                 else:
-                    self.cmd.extend(value)
+                    self.cmd.extend(escaped_value)
         else:
-            self.cmd.extend([option, value])
+            # argparse gets confused if value(s) start with a dash.
+            # When an option expects a single value, the unambiguous way
+            # to specify it is with =
+            if isinstance(value, str):
+                self.cmd.extend(['%s=%s' % (option, value)])
+            else:
+                self.cmd.extend([option, value])
 
     def check_extra_arg_type(self, arg, value):
         value = getattr(value, 'held_object', value)
@@ -154,6 +171,19 @@ class HotdocTargetBuilder:
 
     def replace_dirs_in_string(self, string):
         return string.replace("@SOURCE_ROOT@", self.sourcedir).replace("@BUILD_ROOT@", self.builddir)
+
+    def process_gi_c_source_roots(self):
+        if self.hotdoc.run_hotdoc(['--has-extension=gi-extension']) != 0:
+            return
+
+        value, _ = self.get_value([list, str], 'gi_c_source_roots', default=[], force_list=True)
+        value.extend([
+            os.path.join(self.state.environment.get_source_dir(),
+                         self.interpreter.subproject_dir, self.state.subproject),
+            os.path.join(self.state.environment.get_build_dir(), self.interpreter.subproject_dir, self.state.subproject)
+        ])
+
+        self.cmd += ['--gi-c-source-roots'] + value
 
     def process_dependencies(self, deps):
         cflags = set()
@@ -271,6 +301,7 @@ class HotdocTargetBuilder:
         self.process_known_arg('--c-include-directories',
                                [Dependency, build.StaticLibrary, build.SharedLibrary, list], argname="dependencies",
                                force_list=True, value_processor=self.process_dependencies)
+        self.process_gi_c_source_roots()
         self.process_extra_assets()
         self.process_extra_extension_paths()
         self.process_subprojects()
@@ -294,6 +325,9 @@ class HotdocTargetBuilder:
 
         for path in self.include_paths.keys():
             self.cmd.extend(['--include-path', path])
+
+        if self.state.environment.coredata.get_builtin_option('werror', self.state.subproject):
+            self.cmd.append('--fatal-warning')
         self.generate_hotdoc_config()
 
         target_cmd = self.build_command + ["--internal", "hotdoc"] + \

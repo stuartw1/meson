@@ -3,6 +3,8 @@ title: Release 0.49
 short-description: Release notes for 0.49
 ...
 
+# New features
+
 ## Libgcrypt dependency now supports libgcrypt-config
 
 Earlier, `dependency('libgcrypt')` could only detect the library with pkg-config
@@ -44,7 +46,9 @@ target specific arguments to the compiler and linker will need to be
 added explicitly from the
 cross-file(`c_args`/`c_link_args`/`cpp_args`/`cpp_link_args`) or some
 other way.  Refer to the CC-RX User's manual for additional compiler
-and linker options.## CMake `find_package` dependency backend
+and linker options.
+
+## CMake `find_package` dependency backend
 
 Meson can now use the CMake `find_package` ecosystem to
 detect dependencies. Both the old-style `<NAME>_LIBRARIES`
@@ -170,8 +174,9 @@ compression preferences.
 
 ## Native config files
 
-Native files are the counterpart to cross files, and allow specifying
-information about the build machine, both when cross compiling and when not.
+Native files (`--native-file`) are the counterpart to cross files (`--cross-file`),
+and allow specifying information about the build machine, both when cross compiling
+and when not.
 
 Currently the native files only allow specifying the names of binaries, similar
 to the cross file, for example:
@@ -229,16 +234,18 @@ endif
 
 ## Joining paths with /
 
-Joining two paths has traditionally been done with the `join_paths` function.
-
-```meson
-joined = join_paths('foo', 'bar')
-```
-
-Now you can use the simpler notation using the `/` operator.
+For clarity and conciseness, we recommend using the `/` operator to separate
+path elements:
 
 ```meson
 joined = 'foo' / 'bar'
+```
+
+Before Meson 0.49, joining path elements was done with the legacy `join_paths`
+function, but the `/` syntax above is now recommended.
+
+```meson
+joined = join_paths('foo', 'bar')
 ```
 
 This only works for strings.

@@ -51,6 +51,8 @@ Keyword arguments are the following:
 - `disabler`: if `true` and no python installation can be found, return a
   [disabler object](Reference-manual.md#disabler-object) instead of a not-found object.
   *Since 0.49.0*
+- `modules`: a list of module names that this python installation must have.
+  *Since 0.51.0*
 
 **Returns**: a [python installation][`python_installation` object]
 
@@ -60,6 +62,17 @@ The `python_installation` object is an [external program], with several
 added methods.
 
 ### Methods
+
+#### `path()`
+
+```meson
+str py_installation.path()
+```
+
+*Added 0.50.0*
+
+Works like the path method of other `ExternalProgram` objects. Was not
+provided prior to 0.50.0 due to a bug.
 
 #### `extension_module()`
 
@@ -90,7 +103,12 @@ need to add `dependencies : py_installation.dependency()`, see [][`dependency()`
 python_dependency py_installation.dependency(...)
 ```
 
-This method accepts the same arguments as the standard [dependency] function.
+This method accepts no positional arguments, and the same keyword arguments as
+the standard [dependency] function. It also supports the following keyword
+argument:
+
+- `embed`: *(since 0.53.0)* If true, meson will try to find a python dependency
+  that can be used for embedding python into an application.
 
 **Returns**: a [python dependency][`python_dependency` object]
 
@@ -220,7 +238,7 @@ It exposes the same methods as its parent class.
 [shared_module]: Reference-manual.md#shared_module
 [external program]: Reference-manual.md#external-program-object
 [dependency]: Reference-manual.md#dependency
-[install_data]: Reference-manual.md#install-data
-[configure_file]: Reference-manual.md#configure-file
+[install_data]: Reference-manual.md#install_data
+[configure_file]: Reference-manual.md#configure_file
 [dependency object]: Reference-manual.md#dependency-object
 [buildtarget object]: Reference-manual.md#build-target-object

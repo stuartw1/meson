@@ -29,11 +29,11 @@ keyword arguments.
   shared_library) that the user needs to link against. Arbitrary strings can
   also be provided and they will be added into the `Libs` field. Since 0.45.0
   dependencies of built libraries will be automatically added, see the
-  [Implicit dependencies](#Implicit_dependencies) section below for the exact
+  [Implicit dependencies](#implicit-dependencies) section below for the exact
   rules.
 - `libraries_private` list of built libraries or strings to put in the
   `Libs.private` field. Since 0.45.0 dependencies of built libraries will be
-  automatically added, see the [Implicit dependencies](#Implicit_dependencies)
+  automatically added, see the [Implicit dependencies](#implicit-dependencies)
   section below for the exact rules.
 - `name` the name of this library, used to set the `Name:` field
 - `subdirs` which subdirs of `include` should be added to the header
@@ -51,9 +51,14 @@ keyword arguments.
   e.g. `datadir=${prefix}/share`. The names `prefix`, `libdir` and
   `installdir` are reserved and may not be used.
 - `version` a string describing the version of this library, used to set the
-  `Version:` field. Defaults to the project version if unspecified.
+  `Version:` field. (*since 0.46.0*) Defaults to the project version if unspecified.
 - `d_module_versions` a list of module version flags used when compiling
    D sources referred to by this pkg-config file
+- `uninstalled_variables` used instead of the `variables` keyword argument, when
+  generating the uninstalled pkg-config file. Since *0.54.0*
+- `dataonly` field. (*since 0.54.0*) this is used for architecture-independent
+   pkg-config files in projects which also have architecture-dependent outputs.
+- `conflicts` (*since 0.36.0, incorrectly issued a warning prior to 0.54.0*) list of strings to be put in the `Conflicts` field.
 
 Since 0.46 a `StaticLibrary` or `SharedLibrary` object can optionally be passed
 as first positional argument. If one is provided a default value will be
@@ -61,6 +66,15 @@ provided for all required fields of the pc file:
 - `install_dir` is set to `pkgconfig` folder in the same location than the provided library.
 - `description` is set to the project's name followed by the library's name.
 - `name` is set to the library's name.
+
+Since 0.54.0 uninstalled pkg-config files are generated as well. They are
+located in `<build dir>/meson-uninstalled/`. It is sometimes
+useful to build projects against libraries built by meson without having to
+install them into a prefix. In order to do so, just set
+`PKG_CONFIG_PATH=<builddir>/meson-uninstalled` before building your
+application. That will cause pkg-config to prefer those `-uninstalled.pc` files
+and find libraries and headers from the meson builddir. This is an experimental
+feature provided on a best-effort basis, it might not work in all use-cases.
 
 ### Implicit dependencies
 
@@ -85,7 +99,7 @@ previous versions might have slightly different behaviour.
 - Dependencies provided by pkg-config are added into `Requires:` or
   `Requires.private:`. If a version was specified when declaring that dependency
   it will be written into the generated file too.
-- The thread dependency (i.e. `dependency('thread')`) adds `-pthread` into
+- The threads dependency (i.e. `dependency('threads')`) adds `-pthread` into
   `Libs:` or `Libs.private:`.
 - Internal dependencies (i.e.
   `declare_dependency(compiler_args : '-DFOO', link_args : '-Wl,something', link_with : foo)`)

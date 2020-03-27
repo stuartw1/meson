@@ -17,19 +17,21 @@ functionality such as gobject-introspection, gresources and gtk-doc'''
 
 import os
 import copy
-import shlex
 import subprocess
+import functools
 
 from .. import build
 from .. import mlog
 from .. import mesonlib
-from .. import compilers
 from .. import interpreter
 from . import GResourceTarget, GResourceHeaderTarget, GirTarget, TypelibTarget, VapiTarget
 from . import get_include_args
 from . import ExtensionModule
 from . import ModuleReturnValue
-from ..mesonlib import MesonException, OrderedSet, Popen_safe, extract_as_list
+from ..mesonlib import (
+    MachineChoice, MesonException, OrderedSet, Popen_safe, extract_as_list,
+    join_args, unholder,
+)
 from ..dependencies import Dependency, PkgConfigDependency, InternalDependency
 from ..interpreterbase import noKwargs, permittedKwargs, FeatureNew, FeatureNewKwargs
 
@@ -41,24 +43,20 @@ from ..interpreterbase import noKwargs, permittedKwargs, FeatureNew, FeatureNewK
 gresource_dep_needed_version = '>= 2.51.1'
 
 native_glib_version = None
-girwarning_printed = False
-gdbuswarning_printed = False
-gresource_warning_printed = False
-_gir_has_extra_lib_arg = None
 
-def gir_has_extra_lib_arg(intr_obj):
-    global _gir_has_extra_lib_arg
-    if _gir_has_extra_lib_arg is not None:
-        return _gir_has_extra_lib_arg
-
-    _gir_has_extra_lib_arg = False
+@functools.lru_cache(maxsize=None)
+def gir_has_option(intr_obj, option):
     try:
-        g_ir_scanner = intr_obj.find_program_impl('g-ir-scanner').get_command()
-        opts = Popen_safe(g_ir_scanner + ['--help'], stderr=subprocess.STDOUT)[1]
-        _gir_has_extra_lib_arg = '--extra-library' in opts
+        g_ir_scanner = intr_obj.find_program_impl('g-ir-scanner')
+        # Handle overridden g-ir-scanner
+        if isinstance(getattr(g_ir_scanner, "held_object", g_ir_scanner), interpreter.OverrideProgram):
+            assert option in ['--extra-library', '--sources-top-dirs']
+            return True
+
+        opts = Popen_safe(g_ir_scanner.get_command() + ['--help'], stderr=subprocess.STDOUT)[1]
+        return option in opts
     except (MesonException, FileNotFoundError, subprocess.CalledProcessError):
-        pass
-    return _gir_has_extra_lib_arg
+        return False
 
 class GnomeModule(ExtensionModule):
     gir_dep = None
@@ -77,24 +75,20 @@ class GnomeModule(ExtensionModule):
                 native_glib_version = '2.54'
         return native_glib_version
 
+    @mesonlib.run_once
     def __print_gresources_warning(self, state):
-        global gresource_warning_printed
-        if not gresource_warning_printed:
-            if not mesonlib.version_compare(self._get_native_glib_version(state), gresource_dep_needed_version):
-                mlog.warning('GLib compiled dependencies do not work reliably with \n'
-                             'the current version of GLib. See the following upstream issue:',
-                             mlog.bold('https://bugzilla.gnome.org/show_bug.cgi?id=774368'))
-            gresource_warning_printed = True
-        return []
+        if not mesonlib.version_compare(self._get_native_glib_version(state),
+                                        gresource_dep_needed_version):
+            mlog.warning('GLib compiled dependencies do not work reliably with \n'
+                         'the current version of GLib. See the following upstream issue:',
+                         mlog.bold('https://bugzilla.gnome.org/show_bug.cgi?id=774368'))
 
     @staticmethod
     def _print_gdbus_warning():
-        global gdbuswarning_printed
-        if not gdbuswarning_printed:
-            mlog.warning('Code generated with gdbus_codegen() requires the root directory be added to\n'
-                         '  include_directories of targets with GLib < 2.51.3:',
-                         mlog.bold('https://github.com/mesonbuild/meson/issues/1387'))
-            gdbuswarning_printed = True
+        mlog.warning('Code generated with gdbus_codegen() requires the root directory be added to\n'
+                     '  include_directories of targets with GLib < 2.51.3:',
+                     mlog.bold('https://github.com/mesonbuild/meson/issues/1387'),
+                     once=True)
 
     @FeatureNewKwargs('gnome.compile_resources', '0.37.0', ['gresource_bundle', 'export', 'install_header'])
     @permittedKwargs({'source_dir', 'c_name', 'dependencies', 'export', 'gresource_bundle', 'install_header',
@@ -105,7 +99,7 @@ class GnomeModule(ExtensionModule):
 
         cmd = ['glib-compile-resources', '@INPUT@']
 
-        source_dirs, dependencies = mesonlib.extract_as_list(kwargs, 'source_dir', 'dependencies', pop=True)
+        source_dirs, dependencies = [mesonlib.extract_as_list(kwargs, c, pop=True) for c in  ['source_dir', 'dependencies']]
 
         if len(args) < 2:
             raise MesonException('Not enough arguments; the name of the resource '
@@ -245,9 +239,7 @@ class GnomeModule(ExtensionModule):
         subdirs = []
         for resfile in dep_files[:]:
             resbasename = os.path.basename(resfile)
-            for dep in dependencies:
-                if hasattr(dep, 'held_object'):
-                    dep = dep.held_object
+            for dep in unholder(dependencies):
                 if isinstance(dep, mesonlib.File):
                     if dep.fname != resbasename:
                         continue
@@ -296,6 +288,9 @@ class GnomeModule(ExtensionModule):
         if isinstance(lib, build.SharedLibrary):
             libdir = os.path.join(state.environment.get_build_dir(), state.backend.get_target_dir(lib))
             link_command.append('-L' + libdir)
+            if include_rpath:
+                link_command.append('-Wl,-rpath,' + libdir)
+            depends.append(lib)
             # Needed for the following binutils bug:
             # https://github.com/mesonbuild/meson/issues/1911
             # However, g-ir-scanner does not understand -Wl,-rpath
@@ -305,10 +300,7 @@ class GnomeModule(ExtensionModule):
                 link_command.append('-L' + d)
                 if include_rpath:
                     link_command.append('-Wl,-rpath,' + d)
-            if include_rpath:
-                link_command.append('-Wl,-rpath,' + libdir)
-            depends.append(lib)
-        if gir_has_extra_lib_arg(self.interpreter) and use_gir_args:
+        if gir_has_option(self.interpreter, '--extra-library') and use_gir_args:
             link_command.append('--extra-library=' + lib.name)
         else:
             link_command.append('-l' + lib.name)
@@ -323,15 +315,13 @@ class GnomeModule(ExtensionModule):
         # require two args in order, such as -framework AVFoundation
         external_ldflags_nodedup = []
         gi_includes = OrderedSet()
-        deps = mesonlib.listify(deps, unholder=True)
+        deps = mesonlib.unholder(mesonlib.listify(deps))
 
         for dep in deps:
             if isinstance(dep, InternalDependency):
                 cflags.update(dep.get_compile_args())
                 cflags.update(get_include_args(dep.include_directories))
-                for lib in dep.libraries:
-                    if hasattr(lib, 'held_object'):
-                        lib = lib.held_object
+                for lib in unholder(dep.libraries):
                     if isinstance(lib, build.SharedLibrary):
                         internal_ldflags.update(self._get_link_args(state, lib, depends, include_rpath))
                         libdepflags = self._get_dependencies_flags(lib.get_external_deps(), state, depends, include_rpath,
@@ -348,9 +338,7 @@ class GnomeModule(ExtensionModule):
                 external_ldflags.update(extdepflags[2])
                 external_ldflags_nodedup += extdepflags[3]
                 gi_includes.update(extdepflags[4])
-                for source in dep.sources:
-                    if hasattr(source, 'held_object'):
-                        source = source.held_object
+                for source in unholder(dep.sources):
                     if isinstance(source, GirTarget):
                         gi_includes.update([os.path.join(state.environment.get_build_dir(),
                                             source.get_subdir())])
@@ -392,7 +380,7 @@ class GnomeModule(ExtensionModule):
                 mlog.log('dependency {!r} not handled to build gir files'.format(dep))
                 continue
 
-        if gir_has_extra_lib_arg(self.interpreter) and use_gir_args:
+        if gir_has_option(self.interpreter, '--extra-library') and use_gir_args:
             def fix_ldflags(ldflags):
                 fixed_ldflags = OrderedSet()
                 for ldflag in ldflags:
@@ -464,9 +452,7 @@ class GnomeModule(ExtensionModule):
 
         if 'includes' in kwargs:
             includes = mesonlib.extract_as_list(kwargs, 'includes', pop = True)
-            for inc in includes:
-                if hasattr(inc, 'held_object'):
-                    inc = inc.held_object
+            for inc in unholder(includes):
                 if isinstance(inc, str):
                     ret += ['--include=%s' % (inc, )]
                 elif isinstance(inc, GirTarget):
@@ -530,11 +516,7 @@ class GnomeModule(ExtensionModule):
         ret = []
 
         for lang in langs:
-            if state.environment.is_cross_build():
-                link_args = state.environment.cross_info.config["properties"].get(lang + '_link_args', "")
-            else:
-                link_args = state.environment.coredata.get_external_link_args(lang)
-
+            link_args = state.environment.coredata.get_external_link_args(MachineChoice.HOST, lang)
             for link_arg in link_args:
                 if link_arg.startswith('-L'):
                     ret.append(link_arg)
@@ -554,6 +536,11 @@ class GnomeModule(ExtensionModule):
                     libname = girtarget.get_basename()
                 else:
                     libname = os.path.join("@PRIVATE_OUTDIR_ABS_%s@" % girtarget.get_id(), girtarget.get_filename())
+                ret += ['--library', libname]
+                # need to put our output directory first as we need to use the
+                # generated libraries instead of any possibly installed system/prefix
+                # ones.
+                ret += ["-L@PRIVATE_OUTDIR_ABS_%s@" % girtarget.get_id()]
                 # Needed for the following binutils bug:
                 # https://github.com/mesonbuild/meson/issues/1911
                 # However, g-ir-scanner does not understand -Wl,-rpath
@@ -561,11 +548,6 @@ class GnomeModule(ExtensionModule):
                 for d in state.backend.determine_rpath_dirs(girtarget):
                     d = os.path.join(state.environment.get_build_dir(), d)
                     ret.append('-L' + d)
-                ret += ['--library', libname]
-                # need to put our output directory first as we need to use the
-                # generated libraries instead of any possibly installed system/prefix
-                # ones.
-                ret += ["-L@PRIVATE_OUTDIR_ABS_%s@" % girtarget.get_id()]
 
         return ret
 
@@ -605,12 +587,18 @@ class GnomeModule(ExtensionModule):
                 cflags += state.project_args[lang]
             if 'b_sanitize' in compiler.base_options:
                 sanitize = state.environment.coredata.base_options['b_sanitize'].value
-                cflags += compilers.sanitizer_compile_args(sanitize)
-                if 'address' in sanitize.split(','):
-                    internal_ldflags += ['-lasan']  # This must be first in ldflags
-                # FIXME: Linking directly to libasan is not recommended but g-ir-scanner
+                cflags += compiler.sanitizer_compile_args(sanitize)
+                sanitize = sanitize.split(',')
+                # These must be first in ldflags
+                if 'address' in sanitize:
+                    internal_ldflags += ['-lasan']
+                if 'thread' in sanitize:
+                    internal_ldflags += ['-ltsan']
+                if 'undefined' in sanitize:
+                    internal_ldflags += ['-lubsan']
+                # FIXME: Linking directly to lib*san is not recommended but g-ir-scanner
                 # does not understand -f LDFLAGS. https://bugzilla.gnome.org/show_bug.cgi?id=783892
-                # ldflags += compilers.sanitizer_link_args(sanitize)
+                # ldflags += compiler.sanitizer_link_args(sanitize)
 
         return cflags, internal_ldflags, external_ldflags
 
@@ -621,9 +609,7 @@ class GnomeModule(ExtensionModule):
         gir_filelist_filename = os.path.join(gir_filelist_dir, '%s_%s_gir_filelist' % (ns, nsversion))
 
         with open(gir_filelist_filename, 'w', encoding='utf-8') as gir_filelist:
-            for s in libsources:
-                if hasattr(s, 'held_object'):
-                    s = s.held_object
+            for s in unholder(libsources):
                 if isinstance(s, (build.CustomTarget, build.CustomTargetIndex)):
                     for custom_output in s.get_outputs():
                         gir_filelist.write(os.path.join(state.environment.get_build_dir(),
@@ -676,15 +662,11 @@ class GnomeModule(ExtensionModule):
         # dependencies and also find the include directories needed for the
         # typelib generation custom target below.
         typelib_includes = []
-        for dep in deps:
-            if hasattr(dep, 'held_object'):
-                dep = dep.held_object
+        for dep in unholder(deps):
             # Add a dependency on each GirTarget listed in dependencies and add
             # the directory where it will be generated to the typelib includes
             if isinstance(dep, InternalDependency):
-                for source in dep.sources:
-                    if hasattr(source, 'held_object'):
-                        source = source.held_object
+                for source in unholder(dep.sources):
                     if isinstance(source, GirTarget) and source not in depends:
                         depends.append(source)
                         subdir = os.path.join(state.environment.get_build_dir(),
@@ -713,10 +695,7 @@ class GnomeModule(ExtensionModule):
     def _get_external_args_for_langs(self, state, langs):
         ret = []
         for lang in langs:
-            if state.environment.is_cross_build():
-                ret += state.environment.cross_info.config["properties"].get(lang + '_args', "")
-            else:
-                ret += state.environment.coredata.get_external_args(lang)
+            ret += state.environment.coredata.get_external_args(MachineChoice.HOST, lang)
         return ret
 
     @staticmethod
@@ -744,15 +723,34 @@ class GnomeModule(ExtensionModule):
         if kwargs.get('install_dir'):
             raise MesonException('install_dir is not supported with generate_gir(), see "install_dir_gir" and "install_dir_typelib"')
 
-        giscanner = self.interpreter.find_program_impl('g-ir-scanner')
-        gicompiler = self.interpreter.find_program_impl('g-ir-compiler')
-
         girtargets = [self._unwrap_gir_target(arg, state) for arg in args]
 
         if len(girtargets) > 1 and any([isinstance(el, build.Executable) for el in girtargets]):
             raise MesonException('generate_gir only accepts a single argument when one of the arguments is an executable')
 
         self.gir_dep, pkgargs = self._get_gir_dep(state)
+        # find_program is needed in the case g-i is built as subproject.
+        # In that case it uses override_find_program so the gobject utilities
+        # can be used from the build dir instead of from the system.
+        # However, GObject-introspection provides the appropriate paths to
+        # these utilities via pkg-config, so it would be best to use the
+        # results from pkg-config when possible.
+        gi_util_dirs_check = [state.environment.get_build_dir(), state.environment.get_source_dir()]
+        giscanner = self.interpreter.find_program_impl('g-ir-scanner')
+        if giscanner.found():
+            giscanner_path = giscanner.get_command()[0]
+            if not any(x in giscanner_path for x in gi_util_dirs_check):
+                giscanner = self.gir_dep.get_pkgconfig_variable('g_ir_scanner', {})
+        else:
+            giscanner = self.gir_dep.get_pkgconfig_variable('g_ir_scanner', {})
+
+        gicompiler = self.interpreter.find_program_impl('g-ir-compiler')
+        if gicompiler.found():
+            gicompiler_path = gicompiler.get_command()[0]
+            if not any(x in gicompiler_path for x in gi_util_dirs_check):
+                gicompiler = self.gir_dep.get_pkgconfig_variable('g_ir_compiler', {})
+        else:
+            gicompiler = self.gir_dep.get_pkgconfig_variable('g_ir_compiler', {})
 
         ns = kwargs.pop('namespace')
         nsversion = kwargs.pop('nsversion')
@@ -765,7 +763,7 @@ class GnomeModule(ExtensionModule):
         langs_compilers = self._get_girtargets_langs_compilers(girtargets)
         cflags, internal_ldflags, external_ldflags = self._get_langs_compilers_flags(state, langs_compilers)
         deps = self._get_gir_targets_deps(girtargets)
-        deps += extract_as_list(kwargs, 'dependencies', pop=True, unholder=True)
+        deps += mesonlib.unholder(extract_as_list(kwargs, 'dependencies', pop=True))
         typelib_includes = self._gather_typelib_includes_and_update_depends(state, deps, depends)
         # ldflags will be misinterpreted by gir scanner (showing
         # spurious dependencies) but building GStreamer fails if they
@@ -804,6 +802,10 @@ class GnomeModule(ExtensionModule):
         scan_command += self._scan_gir_targets(state, girtargets)
         scan_command += self._scan_langs(state, [lc[0] for lc in langs_compilers])
         scan_command += list(external_ldflags)
+
+        if gir_has_option(self.interpreter, '--sources-top-dirs'):
+            scan_command += ['--sources-top-dirs', os.path.join(state.environment.get_source_dir(), self.interpreter.subproject_dir, state.subproject)]
+            scan_command += ['--sources-top-dirs', os.path.join(state.environment.get_build_dir(), self.interpreter.subproject_dir, state.subproject)]
 
         scan_target = self._make_gir_target(state, girfile, scan_command, depends, kwargs)
 
@@ -907,6 +909,7 @@ This will become a hard error in the future.''')
         rv = [inscript, pottarget, potarget]
         return ModuleReturnValue(None, rv)
 
+    @FeatureNewKwargs('gnome.gtkdoc', '0.52.0', ['check'])
     @FeatureNewKwargs('gnome.gtkdoc', '0.48.0', ['c_args'])
     @FeatureNewKwargs('gnome.gtkdoc', '0.48.0', ['module_version'])
     @FeatureNewKwargs('gnome.gtkdoc', '0.37.0', ['namespace', 'mode'])
@@ -915,7 +918,7 @@ This will become a hard error in the future.''')
                       'fixxref_args', 'html_args', 'html_assets', 'content_files',
                       'mkdb_args', 'ignore_headers', 'include_directories',
                       'namespace', 'mode', 'expand_content_files', 'module_version',
-                      'c_args'})
+                      'c_args', 'check'})
     def gtkdoc(self, state, args, kwargs):
         if len(args) != 1:
             raise MesonException('Gtkdoc must have one positional argument.')
@@ -970,6 +973,11 @@ This will become a hard error in the future.''')
                 '--modulename=' + modulename,
                 '--moduleversion=' + moduleversion,
                 '--mode=' + mode]
+        for tool in ['scan', 'scangobj', 'mkdb', 'mkhtml', 'fixxref']:
+            program_name = 'gtkdoc-' + tool
+            program = self.interpreter.find_program_impl(program_name)
+            path = program.held_object.get_path()
+            args.append('--{}={}'.format(program_name, path))
         if namespace:
             args.append('--namespace=' + namespace)
         args += self._unpack_args('--htmlargs=', 'html_args', kwargs)
@@ -982,9 +990,7 @@ This will become a hard error in the future.''')
 
         depends = []
         content_files = []
-        for s in mesonlib.extract_as_list(kwargs, 'content_files'):
-            if hasattr(s, 'held_object'):
-                s = s.held_object
+        for s in unholder(mesonlib.extract_as_list(kwargs, 'content_files')):
             if isinstance(s, (build.CustomTarget, build.CustomTargetIndex)):
                 depends.append(s)
                 for o in s.get_outputs():
@@ -1013,16 +1019,32 @@ This will become a hard error in the future.''')
         args += self._unpack_args('--ignore-headers=', 'ignore_headers', kwargs)
         args += self._unpack_args('--installdir=', 'install_dir', kwargs)
         args += self._get_build_args(kwargs, state, depends)
-        res = [build.RunTarget(targetname, command[0], command[1:] + args, depends, state.subdir, state.subproject)]
+        custom_kwargs = {'output': modulename + '-decl.txt',
+                         'command': command + args,
+                         'depends': depends,
+                         'build_always_stale': True,
+                         }
+        custom_target = build.CustomTarget(targetname, state.subdir, state.subproject, custom_kwargs)
+        alias_target = build.AliasTarget(targetname, [custom_target], state.subdir, state.subproject)
+        if kwargs.get('check', False):
+            check_cmd = self.interpreter.find_program_impl('gtkdoc-check')
+            check_env = ['DOC_MODULE=' + modulename,
+                         'DOC_MAIN_SGML_FILE=' + main_file]
+            check_args = [targetname + '-check', check_cmd]
+            check_kwargs = {'env': check_env,
+                            'workdir': os.path.join(state.environment.get_build_dir(), state.subdir),
+                            'depends': custom_target}
+            self.interpreter.add_test(state.current_node, check_args, check_kwargs, True)
+        res = [custom_target, alias_target]
         if kwargs.get('install', True):
             res.append(build.RunScript(command, args))
-        return ModuleReturnValue(None, res)
+        return ModuleReturnValue(custom_target, res)
 
     def _get_build_args(self, kwargs, state, depends):
         args = []
-        deps = extract_as_list(kwargs, 'dependencies', unholder=True)
-        cflags = OrderedSet()
-        cflags.update(mesonlib.stringlistify(kwargs.pop('c_args', [])))
+        deps = mesonlib.unholder(extract_as_list(kwargs, 'dependencies'))
+        cflags = []
+        cflags.extend(mesonlib.stringlistify(kwargs.pop('c_args', [])))
         deps_cflags, internal_ldflags, external_ldflags, gi_includes = \
             self._get_dependencies_flags(deps, state, depends, include_rpath=True)
         inc_dirs = mesonlib.extract_as_list(kwargs, 'include_directories')
@@ -1031,32 +1053,27 @@ This will become a hard error in the future.''')
                 raise MesonException(
                     'Gir include dirs should be include_directories().')
 
-        cflags.update(deps_cflags)
-        cflags.update(get_include_args(inc_dirs))
-        ldflags = OrderedSet()
-        ldflags.update(internal_ldflags)
-        ldflags.update(external_ldflags)
+        cflags.extend(deps_cflags)
+        cflags.extend(get_include_args(inc_dirs))
+        ldflags = []
+        ldflags.extend(internal_ldflags)
+        ldflags.extend(external_ldflags)
 
-        if state.environment.is_cross_build():
-            cflags.update(state.environment.cross_info.config["properties"].get('c_args', ""))
-            ldflags.update(state.environment.cross_info.config["properties"].get('c_link_args', ""))
-            compiler = state.environment.coredata.cross_compilers.get('c')
-        else:
-            cflags.update(state.environment.coredata.get_external_args('c'))
-            ldflags.update(state.environment.coredata.get_external_link_args('c'))
-            compiler = state.environment.coredata.compilers.get('c')
+        cflags.extend(state.environment.coredata.get_external_args(MachineChoice.HOST, 'c'))
+        ldflags.extend(state.environment.coredata.get_external_link_args(MachineChoice.HOST, 'c'))
+        compiler = state.environment.coredata.compilers[MachineChoice.HOST]['c']
 
         compiler_flags = self._get_langs_compilers_flags(state, [('c', compiler)])
-        cflags.update(compiler_flags[0])
-        ldflags.update(compiler_flags[1])
-        ldflags.update(compiler_flags[2])
+        cflags.extend(compiler_flags[0])
+        ldflags.extend(compiler_flags[1])
+        ldflags.extend(compiler_flags[2])
         if compiler:
-            args += ['--cc=%s' % ' '.join([shlex.quote(x) for x in compiler.get_exelist()])]
-            args += ['--ld=%s' % ' '.join([shlex.quote(x) for x in compiler.get_linker_exelist()])]
+            args += ['--cc=%s' % join_args(compiler.get_exelist())]
+            args += ['--ld=%s' % join_args(compiler.get_linker_exelist())]
         if cflags:
-            args += ['--cflags=%s' % ' '.join([shlex.quote(x) for x in cflags])]
+            args += ['--cflags=%s' % join_args(cflags)]
         if ldflags:
-            args += ['--ldflags=%s' % ' '.join([shlex.quote(x) for x in ldflags])]
+            args += ['--ldflags=%s' % join_args(ldflags)]
 
         return args
 
@@ -1411,7 +1428,7 @@ GType
         c_file_kwargs['vtail'] = '''    { 0, NULL, NULL }
   };
   if (g_once_init_enter (&gtype_id)) {
-    GType new_type = g_@type@_register_static ("@EnumName@", values);
+    GType new_type = g_@type@_register_static (g_intern_static_string ("@EnumName@"), values);
     g_once_init_leave (&gtype_id, new_type);
   }
   return (GType) gtype_id;
@@ -1569,9 +1586,7 @@ G_END_DECLS'''
         vapi_includes = []
         ret = []
         remaining_args = []
-        for arg in arg_list:
-            if hasattr(arg, 'held_object'):
-                arg = arg.held_object
+        for arg in unholder(arg_list):
             if isinstance(arg, InternalDependency):
                 targets = [t for t in arg.sources if isinstance(t, VapiTarget)]
                 for target in targets:
@@ -1679,7 +1694,7 @@ G_END_DECLS'''
         # - add relevant directories to include dirs
         incs = [build.IncludeDirs(state.subdir, ['.'] + vapi_includes, False)]
         sources = [vapi_target] + vapi_depends
-        rv = InternalDependency(None, incs, [], [], link_with, [], sources, [])
+        rv = InternalDependency(None, incs, [], [], link_with, [], sources, [], {})
         created_values.append(rv)
         return ModuleReturnValue(rv, created_values)
 

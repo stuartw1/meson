@@ -1,7 +1,8 @@
 import os, subprocess
+import argparse
 
 from . import mlog
-from .mesonlib import Popen_safe
+from .mesonlib import git, Popen_safe
 from .wrap.wrap import API_ROOT, PackageDefinition, Resolver, WrapException
 from .wrap import wraptool
 
@@ -38,12 +39,12 @@ def update_file(wrap, repo_dir, options):
         mlog.log('  -> Subproject has not changed, or the new source/patch needs to be extracted on the same location.\n' +
                  '     In that case, delete', mlog.bold(repo_dir), 'and run', mlog.bold('meson --reconfigure'))
 
-def git(cmd, workingdir):
-    return subprocess.check_output(['git', '-C', workingdir] + cmd,
-                                   stderr=subprocess.STDOUT).decode()
+def git_output(cmd, workingdir):
+    return git(cmd, workingdir, check=True, universal_newlines=True,
+               stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
 
 def git_show(repo_dir):
-    commit_message = git(['show', '--quiet', '--pretty=format:%h%n%d%n%s%n[%an]'], repo_dir)
+    commit_message = git_output(['show', '--quiet', '--pretty=format:%h%n%d%n%s%n[%an]'], repo_dir)
     parts = [s.strip() for s in commit_message.split('\n')]
     mlog.log('  ->', mlog.yellow(parts[0]), mlog.red(parts[1]), parts[2], mlog.blue(parts[3]))
 
@@ -52,14 +53,14 @@ def update_git(wrap, repo_dir, options):
         mlog.log('  -> Not used.')
         return
     revision = wrap.get('revision')
-    ret = git(['rev-parse', '--abbrev-ref', 'HEAD'], repo_dir).strip()
+    ret = git_output(['rev-parse', '--abbrev-ref', 'HEAD'], repo_dir).strip()
     if ret == 'HEAD':
         try:
             # We are currently in detached mode, just checkout the new revision
-            git(['fetch'], repo_dir)
-            git(['checkout', revision], repo_dir)
+            git_output(['fetch'], repo_dir)
+            git_output(['checkout', revision], repo_dir)
         except subprocess.CalledProcessError as e:
-            out = e.output.decode().strip()
+            out = e.output.strip()
             mlog.log('  -> Could not checkout revision', mlog.cyan(revision))
             mlog.log(mlog.red(out))
             mlog.log(mlog.red(str(e)))
@@ -67,9 +68,9 @@ def update_git(wrap, repo_dir, options):
     elif ret == revision:
         try:
             # We are in the same branch, pull latest commits
-            git(['-c', 'rebase.autoStash=true', 'pull', '--rebase'], repo_dir)
+            git_output(['-c', 'rebase.autoStash=true', 'pull', '--rebase'], repo_dir)
         except subprocess.CalledProcessError as e:
-            out = e.output.decode().strip()
+            out = e.output.strip()
             mlog.log('  -> Could not rebase', mlog.bold(repo_dir), 'please fix and try again.')
             mlog.log(mlog.red(out))
             mlog.log(mlog.red(str(e)))
@@ -79,10 +80,10 @@ def update_git(wrap, repo_dir, options):
         # we should rebase it on top of wrap's branch.
         if options.rebase:
             try:
-                git(['fetch'], repo_dir)
-                git(['-c', 'rebase.autoStash=true', 'rebase', revision], repo_dir)
+                git_output(['fetch'], repo_dir)
+                git_output(['-c', 'rebase.autoStash=true', 'rebase', revision], repo_dir)
             except subprocess.CalledProcessError as e:
-                out = e.output.decode().strip()
+                out = e.output.strip()
                 mlog.log('  -> Could not rebase', mlog.bold(repo_dir), 'please fix and try again.')
                 mlog.log(mlog.red(out))
                 mlog.log(mlog.red(str(e)))
@@ -92,7 +93,7 @@ def update_git(wrap, repo_dir, options):
                      '     To rebase your branch on top of', mlog.bold(revision), 'use', mlog.bold('--rebase'), 'option.')
             return
 
-    git(['submodule', 'update'], repo_dir)
+    git_output(['submodule', 'update', '--checkout', '--recursive'], repo_dir)
     git_show(repo_dir)
 
 def update_hg(wrap, repo_dir, options):
@@ -115,7 +116,7 @@ def update_svn(wrap, repo_dir, options):
         mlog.log('  -> Not used.')
         return
     revno = wrap.get('revision')
-    p, out = Popen_safe(['svn', 'info', '--show-item', 'revision', repo_dir])
+    p, out, _ = Popen_safe(['svn', 'info', '--show-item', 'revision', repo_dir])
     current_revno = out
     if current_revno == revno:
         return
@@ -128,7 +129,7 @@ def update_svn(wrap, repo_dir, options):
         subprocess.check_call(['svn', 'update', '-r', revno], cwd=repo_dir)
 
 def update(wrap, repo_dir, options):
-    mlog.log('Updating %s...' % wrap.name)
+    mlog.log('Updating {}...'.format(wrap.name))
     if wrap.type == 'file':
         update_file(wrap, repo_dir, options)
     elif wrap.type == 'git':
@@ -147,25 +148,43 @@ def checkout(wrap, repo_dir, options):
     cmd = ['checkout', branch_name, '--']
     if options.b:
         cmd.insert(1, '-b')
-    mlog.log('Checkout %s in %s...' % (branch_name, wrap.name))
+    mlog.log('Checkout {} in {}...'.format(branch_name, wrap.name))
     try:
-        git(cmd, repo_dir)
+        git_output(cmd, repo_dir)
         git_show(repo_dir)
     except subprocess.CalledProcessError as e:
-        out = e.output.decode().strip()
+        out = e.output.strip()
         mlog.log('  -> ', mlog.red(out))
 
 def download(wrap, repo_dir, options):
-    mlog.log('Download %s...' % wrap.name)
+    mlog.log('Download {}...'.format(wrap.name))
     if os.path.isdir(repo_dir):
         mlog.log('  -> Already downloaded')
         return
     try:
         r = Resolver(os.path.dirname(repo_dir))
-        r.resolve(wrap.name)
+        r.resolve(wrap.name, 'meson')
         mlog.log('  -> done')
     except WrapException as e:
         mlog.log('  ->', mlog.red(str(e)))
+
+def foreach(wrap, repo_dir, options):
+    mlog.log('Executing command in {}'.format(repo_dir))
+    if not os.path.isdir(repo_dir):
+        mlog.log('  -> Not downloaded yet')
+        return
+    try:
+        out = subprocess.check_output([options.command] + options.args,
+                                      stderr=subprocess.STDOUT,
+                                      cwd=repo_dir).decode()
+        mlog.log(out, end='')
+    except subprocess.CalledProcessError as e:
+        err_message = "Command '{}' returned non-zero exit status {}.".format(" ".join(e.cmd), e.returncode)
+        out = e.output.decode()
+        mlog.log('  -> ', mlog.red(err_message))
+        mlog.log(out, end='')
+    except Exception as e:
+        mlog.log('  -> ', mlog.red(str(e)))
 
 def add_common_arguments(p):
     p.add_argument('--sourcedir', default='.',
@@ -197,6 +216,15 @@ def add_arguments(parser):
     add_common_arguments(p)
     p.set_defaults(subprojects_func=download)
 
+    p = subparsers.add_parser('foreach', help='Execute a command in each subproject directory.')
+    p.add_argument('command', metavar='command ...',
+                   help='Command to execute in each subproject directory')
+    p.add_argument('args', nargs=argparse.REMAINDER,
+                   help=argparse.SUPPRESS)
+    p.add_argument('--sourcedir', default='.',
+                   help='Path to source directory')
+    p.set_defaults(subprojects_func=foreach)
+
 def run(options):
     src_dir = os.path.relpath(os.path.realpath(options.sourcedir))
     if not os.path.isfile(os.path.join(src_dir, 'meson.build')):
@@ -207,13 +235,14 @@ def run(options):
         mlog.log('Directory', mlog.bold(src_dir), 'does not seem to have subprojects.')
         return 0
     files = []
-    for name in options.subprojects:
-        f = os.path.join(subprojects_dir, name + '.wrap')
-        if not os.path.isfile(f):
-            mlog.error('Subproject', mlog.bold(name), 'not found.')
-            return 1
-        else:
-            files.append(f)
+    if hasattr(options, 'subprojects'):
+        for name in options.subprojects:
+            f = os.path.join(subprojects_dir, name + '.wrap')
+            if not os.path.isfile(f):
+                mlog.error('Subproject', mlog.bold(name), 'not found.')
+                return 1
+            else:
+                files.append(f)
     if not files:
         for f in os.listdir(subprojects_dir):
             if f.endswith('.wrap'):

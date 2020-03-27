@@ -60,13 +60,13 @@ class SimdModule(ExtensionModule):
         for iset in self.isets:
             if iset not in kwargs:
                 continue
-            iset_fname = kwargs[iset] # Migth also be an array or Files. static_library will validate.
+            iset_fname = kwargs[iset] # Might also be an array or Files. static_library will validate.
             args = compiler.get_instruction_set_args(iset)
             if args is None:
                 mlog.log('Compiler supports %s:' % iset, mlog.red('NO'))
                 continue
-            if len(args) > 0:
-                if not compiler.has_multi_arguments(args, state.environment):
+            if args:
+                if not compiler.has_multi_arguments(args, state.environment)[0]:
                     mlog.log('Compiler supports %s:' % iset, mlog.red('NO'))
                     continue
             mlog.log('Compiler supports %s:' % iset, mlog.green('YES'))

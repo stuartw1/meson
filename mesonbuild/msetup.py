@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import typing as T
 import time
 import sys, stat
 import datetime
@@ -19,20 +20,27 @@ import os.path
 import platform
 import cProfile as profile
 import argparse
+import tempfile
+import shutil
+import glob
 
 from . import environment, interpreter, mesonlib
 from . import build
 from . import mlog, coredata
+from . import mintro
+from .mconf import make_lower_case
 from .mesonlib import MesonException
 
 def add_arguments(parser):
     coredata.register_builtin_arguments(parser)
-    parser.add_argument('--cross-file', default=None,
-                        help='File describing cross compilation environment.')
     parser.add_argument('--native-file',
                         default=[],
                         action='append',
                         help='File containing overrides for native compilation environment.')
+    parser.add_argument('--cross-file',
+                        default=[],
+                        action='append',
+                        help='File describing cross compilation environment.')
     parser.add_argument('-v', '--version', action='version',
                         version=coredata.version)
     parser.add_argument('--profile-self', action='store_true', dest='profile',
@@ -56,46 +64,44 @@ class MesonApp:
                                                                options.sourcedir,
                                                                options.reconfigure,
                                                                options.wipe)
-
         if options.wipe:
             # Make a copy of the cmd line file to make sure we can always
             # restore that file if anything bad happens. For example if
             # configuration fails we need to be able to wipe again.
-            filename = coredata.get_cmd_line_file(self.build_dir)
-            try:
-                with open(filename, 'r') as f:
-                    content = f.read()
-            except FileNotFoundError:
-                raise MesonException(
-                    'Cannot find cmd_line.txt. This is probably because this '
-                    'build directory was configured with a meson version < 0.49.0.')
+            restore = []
+            with tempfile.TemporaryDirectory() as d:
+                for filename in [coredata.get_cmd_line_file(self.build_dir)] + glob.glob(os.path.join(self.build_dir, environment.Environment.private_dir, '*.ini')):
+                    try:
+                        restore.append((shutil.copy(filename, d), filename))
+                    except FileNotFoundError:
+                        raise MesonException(
+                            'Cannot find cmd_line.txt. This is probably because this '
+                            'build directory was configured with a meson version < 0.49.0.')
 
-            coredata.read_cmd_line_file(self.build_dir, options)
+                coredata.read_cmd_line_file(self.build_dir, options)
 
-            try:
-                # Don't delete the whole tree, just all of the files and
-                # folders in the tree. Otherwise calling wipe form the builddir
-                # will cause a crash
-                for l in os.listdir(self.build_dir):
-                    l = os.path.join(self.build_dir, l)
-                    if os.path.isdir(l):
-                        mesonlib.windows_proof_rmtree(l)
-                    else:
-                        mesonlib.windows_proof_rm(l)
-            finally:
-                # Restore the file
-                path = os.path.dirname(filename)
-                os.makedirs(path, exist_ok=True)
-                with open(filename, 'w') as f:
-                    f.write(content)
+                try:
+                    # Don't delete the whole tree, just all of the files and
+                    # folders in the tree. Otherwise calling wipe form the builddir
+                    # will cause a crash
+                    for l in os.listdir(self.build_dir):
+                        l = os.path.join(self.build_dir, l)
+                        if os.path.isdir(l):
+                            mesonlib.windows_proof_rmtree(l)
+                        else:
+                            mesonlib.windows_proof_rm(l)
+                finally:
+                    for b, f in restore:
+                        os.makedirs(os.path.dirname(f), exist_ok=True)
+                        shutil.move(b, f)
 
         self.options = options
 
-    def has_build_file(self, dirname):
+    def has_build_file(self, dirname: str) -> bool:
         fname = os.path.join(dirname, environment.build_filename)
         return os.path.exists(fname)
 
-    def validate_core_dirs(self, dir1, dir2):
+    def validate_core_dirs(self, dir1: str, dir2: str) -> T.Tuple[str, str]:
         if dir1 is None:
             if dir2 is None:
                 if not os.path.exists('meson.build') and os.path.exists('../meson.build'):
@@ -112,20 +118,20 @@ class MesonApp:
         if not os.path.exists(ndir2):
             os.makedirs(ndir2)
         if not stat.S_ISDIR(os.stat(ndir1).st_mode):
-            raise MesonException('%s is not a directory' % dir1)
+            raise MesonException('{} is not a directory'.format(dir1))
         if not stat.S_ISDIR(os.stat(ndir2).st_mode):
-            raise MesonException('%s is not a directory' % dir2)
+            raise MesonException('{} is not a directory'.format(dir2))
         if os.path.samefile(dir1, dir2):
             raise MesonException('Source and build directories must not be the same. Create a pristine build directory.')
         if self.has_build_file(ndir1):
             if self.has_build_file(ndir2):
-                raise MesonException('Both directories contain a build file %s.' % environment.build_filename)
+                raise MesonException('Both directories contain a build file {}.'.format(environment.build_filename))
             return ndir1, ndir2
         if self.has_build_file(ndir2):
             return ndir2, ndir1
-        raise MesonException('Neither directory contains a build file %s.' % environment.build_filename)
+        raise MesonException('Neither directory contains a build file {}.'.format(environment.build_filename))
 
-    def validate_dirs(self, dir1, dir2, reconfigure, wipe):
+    def validate_dirs(self, dir1: str, dir2: str, reconfigure: bool, wipe: bool) -> T.Tuple[str, str]:
         (src_dir, build_dir) = self.validate_core_dirs(dir1, dir2)
         priv_dir = os.path.join(build_dir, 'meson-private/coredata.dat')
         if os.path.exists(priv_dir):
@@ -137,20 +143,12 @@ class MesonApp:
                       '\nIf build failures persist, run "meson setup --wipe" to rebuild from scratch\n'
                       'using the same options as passed when configuring the build.'
                       '\nTo change option values, run "meson configure" instead.')
-                sys.exit(0)
+                raise SystemExit
         else:
             has_cmd_line_file = os.path.exists(coredata.get_cmd_line_file(build_dir))
             if (wipe and not has_cmd_line_file) or (not wipe and reconfigure):
-                print('Directory does not contain a valid build tree:\n{}'.format(build_dir))
-                sys.exit(1)
+                raise SystemExit('Directory does not contain a valid build tree:\n{}'.format(build_dir))
         return src_dir, build_dir
-
-    def check_pkgconfig_envvar(self, env):
-        curvar = os.environ.get('PKG_CONFIG_PATH', '')
-        if curvar != env.coredata.pkgconf_envvar:
-            mlog.warning('PKG_CONFIG_PATH has changed between invocations from "%s" to "%s".' %
-                         (env.coredata.pkgconf_envvar, curvar))
-            env.coredata.pkgconf_envvar = curvar
 
     def generate(self):
         env = environment.Environment(self.source_dir, self.build_dir, self.options)
@@ -163,9 +161,9 @@ class MesonApp:
     def _generate(self, env):
         mlog.debug('Build started at', datetime.datetime.now().isoformat())
         mlog.debug('Main binary:', sys.executable)
+        mlog.debug('Build Options:', coredata.get_cmd_line_options(self.build_dir, self.options))
         mlog.debug('Python system:', platform.system())
         mlog.log(mlog.bold('The Meson build system'))
-        self.check_pkgconfig_envvar(env)
         mlog.log('Version:', coredata.version)
         mlog.log('Source dir:', mlog.bold(self.source_dir))
         mlog.log('Build dir:', mlog.bold(self.build_dir))
@@ -177,22 +175,29 @@ class MesonApp:
 
         intr = interpreter.Interpreter(b)
         if env.is_cross_build():
-            mlog.log('Host machine cpu family:', mlog.bold(intr.builtin['host_machine'].cpu_family_method([], {})))
-            mlog.log('Host machine cpu:', mlog.bold(intr.builtin['host_machine'].cpu_method([], {})))
-            mlog.log('Target machine cpu family:', mlog.bold(intr.builtin['target_machine'].cpu_family_method([], {})))
-            mlog.log('Target machine cpu:', mlog.bold(intr.builtin['target_machine'].cpu_method([], {})))
-        mlog.log('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
-        mlog.log('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
-        if self.options.profile:
-            fname = os.path.join(self.build_dir, 'meson-private', 'profile-interpreter.log')
-            profile.runctx('intr.run()', globals(), locals(), filename=fname)
+            logger_fun = mlog.log
         else:
-            intr.run()
+            logger_fun = mlog.debug
+        logger_fun('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
+        logger_fun('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
+        mlog.log('Host machine cpu family:', mlog.bold(intr.builtin['host_machine'].cpu_family_method([], {})))
+        mlog.log('Host machine cpu:', mlog.bold(intr.builtin['host_machine'].cpu_method([], {})))
+        logger_fun('Target machine cpu family:', mlog.bold(intr.builtin['target_machine'].cpu_family_method([], {})))
+        logger_fun('Target machine cpu:', mlog.bold(intr.builtin['target_machine'].cpu_method([], {})))
+        try:
+            if self.options.profile:
+                fname = os.path.join(self.build_dir, 'meson-private', 'profile-interpreter.log')
+                profile.runctx('intr.run()', globals(), locals(), filename=fname)
+            else:
+                intr.run()
+        except Exception as e:
+            mintro.write_meson_info_file(b, [e])
+            raise
         # Print all default option values that don't match the current value
         for def_opt_name, def_opt_value, cur_opt_value in intr.get_non_matching_default_options():
             mlog.log('Option', mlog.bold(def_opt_name), 'is:',
-                     mlog.bold(str(cur_opt_value)),
-                     '[default: {}]'.format(str(def_opt_value)))
+                     mlog.bold('{}'.format(make_lower_case(cur_opt_value.printable_value()))),
+                     '[default: {}]'.format(make_lower_case(def_opt_value)))
         try:
             dumpfile = os.path.join(env.get_scratch_dir(), 'build.dat')
             # We would like to write coredata as late as possible since we use the existence of
@@ -205,17 +210,27 @@ class MesonApp:
             if self.options.profile:
                 fname = 'profile-{}-backend.log'.format(intr.backend.name)
                 fname = os.path.join(self.build_dir, 'meson-private', fname)
-                profile.runctx('intr.backend.generate(intr)', globals(), locals(), filename=fname)
+                profile.runctx('intr.backend.generate()', globals(), locals(), filename=fname)
             else:
-                intr.backend.generate(intr)
+                intr.backend.generate()
             build.save(b, dumpfile)
-            # Post-conf scripts must be run after writing coredata or else introspection fails.
-            intr.backend.run_postconf_scripts()
             if env.first_invocation:
                 coredata.write_cmd_line_file(self.build_dir, self.options)
             else:
                 coredata.update_cmd_line_file(self.build_dir, self.options)
-        except:
+
+            # Generate an IDE introspection file with the same syntax as the already existing API
+            if self.options.profile:
+                fname = os.path.join(self.build_dir, 'meson-private', 'profile-introspector.log')
+                profile.runctx('mintro.generate_introspection_file(b, intr.backend)', globals(), locals(), filename=fname)
+            else:
+                mintro.generate_introspection_file(b, intr.backend)
+            mintro.write_meson_info_file(b, [], True)
+
+            # Post-conf scripts must be run after writing coredata or else introspection fails.
+            intr.backend.run_postconf_scripts()
+        except Exception as e:
+            mintro.write_meson_info_file(b, [e])
             if 'cdf' in locals():
                 old_cdf = cdf + '.prev'
                 if os.path.exists(old_cdf):
@@ -224,7 +239,7 @@ class MesonApp:
                     os.unlink(cdf)
             raise
 
-def run(options):
+def run(options) -> int:
     coredata.parse_cmd_line_options(options)
     app = MesonApp(options)
     app.generate()

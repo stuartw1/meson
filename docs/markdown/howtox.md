@@ -12,19 +12,56 @@ When first running Meson, set it in an environment variable.
 $ CC=mycc meson <options>
 ```
 
-Note that environment variables like `CC` _always_ refer to the native
-compiler. That is, the compiler used to compile programs that run on
-the current machine. The compiler used in cross compilation is set
-with the cross file.
+Note that environment variables like `CC` only works in native builds. The `CC`
+refers to the compiler for the host platform, that is the compiler used to
+compile programs that run on the machine we will eventually install the project
+on. The compiler used to build things that run on the machine we do the
+building can be specified with `CC_FOR_BUILD`. You can use it in cross builds.
 
-This behaviour is different from e.g. Autotools, where cross
-compilation is done by setting `CC` to point to the cross compiler
-(such as `/usr/bin/arm-linux-gnueabihf-gcc`). The reason for this is
-that Meson supports natively the case where you compile helper tools
-(such as code generators) and use the results during the
-build. Because of this Meson needs to know both the native and the
-cross compiler. The former is set via the environment variables and
-the latter via the cross file only.
+Note that environment variables are never the idiomatic way to do anything with
+Meson, however. It is better to use the native and cross files. And the tools
+for the host platform in cross builds can only be specified with a cross file.
+
+There is a table of all environment variables supported [Here](Reference-tables.md#compiler-and-linker-selection-variables)
+
+
+## Set dynamic linker
+
+*New in 0.53.0*
+
+Like the compiler, the linker is selected via the `<compiler variable>_LD`
+environment variable, or through the `<compiler entry>_ld` entry in a native
+or cross file. You must be aware of whether you're using a compiler that
+invokes the linker itself (most compilers including GCC and Clang) or a
+linker that is invoked directly (when using MSVC or compilers that act like
+it, including Clang-Cl). With the former `c_ld` or `CC_LD` should be the value
+to pass to the compiler's special argument (such as `-fuse-ld` with clang and
+gcc), with the latter it should be an executable, such as `lld-link.exe`.
+
+*NOTE* In meson 0.53.0 the `ld` entry in the cross/native file and the `LD`
+environment variable were used, this resulted in a large number of regressions
+and was changed in 0.53.1 to `<lang>_ld` and `<comp variable>_LD`.
+
+```console
+$ CC=clang CC_LD=lld meson <options>
+```
+
+or
+
+```console
+$ CC=clang-cl CC_LD=link meson <options>
+```
+
+or in a cross or native file:
+
+```ini
+[binaries]
+c = 'clang'
+c_ld = 'lld'
+```
+
+There is a table of all environment variables supported [Here](Reference-tables.md#compiler-and-linker-selection-variables)
+
 
 ## Set default C/C++ language version
 
@@ -52,7 +89,9 @@ executable(..., dependencies : thread_dep)
 
 ## Set extra compiler and linker flags from the outside (when e.g. building distro packages)
 
-The behavior is the same as with other build systems, with environment variables during first invocation.
+The behavior is the same as with other build systems, with environment
+variables during first invocation. Do not use these when you need to rebuild
+the source
 
 ```console
 $ CFLAGS=-fsomething LDFLAGS=-Wl,--linker-flag meson <options>
@@ -115,6 +154,9 @@ $ ninja coverage-html (or coverage-xml)
 ```
 
 The coverage report can be found in the meson-logs subdirectory.
+
+Note: Currently, Meson does not support generating coverage reports
+with Clang.
 
 ## Add some optimization to debug builds
 
@@ -201,3 +243,20 @@ executable(..., dependencies : m_dep)
 ```meson
 executable(..., install : true, install_dir : get_option('libexecdir'))
 ```
+
+## Use existing `Find<name>.cmake` files
+
+Meson can use the CMake `find_package()` ecosystem if CMake is installed.
+To find a dependency with custom `Find<name>.cmake`, set the `cmake_module_path`
+property to the path in your project where the CMake scripts are stored.
+
+Example for a `FindCmakeOnlyDep.cmake` in a `cmake` subdirectory:
+
+```meson
+cm_dep = dependency('CmakeOnlyDep', cmake_module_path : 'cmake')
+```
+
+The `cmake_module_path` property is only needed for custom CMake scripts. System
+wide CMake scripts are found automatically.
+
+More information can be found [here](Dependencies.md#cmake)
