@@ -568,6 +568,9 @@ class CompilerArgs(collections.abc.MutableSequence):
             return True
         return False
 
+    def need_to_split_linker_args(self):
+        return isinstance(self.compiler, Compiler) and self.compiler.get_language() == 'd'
+
     def to_native(self, copy: bool = False) -> T.List[str]:
         # Check if we need to add --start/end-group for circular dependencies
         # between static libraries, and for recursively searching for symbols
@@ -577,6 +580,10 @@ class CompilerArgs(collections.abc.MutableSequence):
             new = self.copy()
         else:
             new = self
+        # To proxy these arguments with D you need to split the
+        # arguments, thus you get `-L=-soname -L=lib.so` we don't
+        # want to put the lib in a link -roup
+        split_linker_args = self.need_to_split_linker_args()
         # This covers all ld.bfd, ld.gold, ld.gold, and xild on Linux, which
         # all act like (or are) gnu ld
         # TODO: this could probably be added to the DynamicLinker instead
@@ -590,10 +597,7 @@ class CompilerArgs(collections.abc.MutableSequence):
                 if is_soname:
                     is_soname = False
                     continue
-                elif '-soname' in each:
-                    # To proxy these arguments with D you need to split the
-                    # arguments, thus you get `-L=-soname -L=lib.so` we don't
-                    # want to put the lib in a link -roup
+                elif split_linker_args and '-soname' in each:
                     is_soname = True
                     continue
                 if not each.startswith(('-Wl,-l', '-l')) and not each.endswith('.a') and \
@@ -955,11 +959,14 @@ class Compiler:
             extra_args = []
         try:
             with tempfile.TemporaryDirectory(dir=temp_dir) as tmpdirname:
+                no_ccache = False
                 if isinstance(code, str):
                     srcname = os.path.join(tmpdirname,
                                            'testfile.' + self.default_suffix)
                     with open(srcname, 'w') as ofile:
                         ofile.write(code)
+                    # ccache would result in a cache miss
+                    no_ccache = True
                 elif isinstance(code, mesonlib.File):
                     srcname = code.fname
 
@@ -983,6 +990,8 @@ class Compiler:
                 mlog.debug('Code:\n', code)
                 os_env = os.environ.copy()
                 os_env['LC_ALL'] = 'C'
+                if no_ccache:
+                    os_env['CCACHE_DISABLE'] = '1'
                 p, p.stdo, p.stde = Popen_safe(commands, cwd=tmpdirname, env=os_env)
                 mlog.debug('Compiler stdout:\n', p.stdo)
                 mlog.debug('Compiler stderr:\n', p.stde)
