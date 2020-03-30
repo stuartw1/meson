@@ -1952,6 +1952,7 @@ class MesonMain(InterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
+                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'get_external_property': self.get_external_property_method,
                              'backend': self.backend_method,
@@ -2231,6 +2232,43 @@ class MesonMain(InterpreterObject):
     @permittedKwargs({})
     def project_name_method(self, args, kwargs):
         return self.interpreter.active_projectname
+
+    @noArgsFlattening
+    @permittedKwargs({})
+    def get_cross_binary_method(self, args, kwargs) -> str:
+        if len(args) < 1 or len(args) > 2:
+            raise InterpreterException('Must have one or two arguments.')
+        binname = args[0]
+        if not isinstance(binname, str):
+            raise InterpreterException('Binary name must be string.')
+        if self.build.environment.is_cross_build():
+            result = self.interpreter.environment.binaries.host.binaries.get(binname, None)
+            if result is None:
+                if len(args) == 2:
+                    return args[1]
+                raise InterpreterException('Unknown cross binary: %s.' % binname)
+            return result
+        else:
+            if binname == 'ar':
+                static_linker = self.build.static_linker
+                if static_linker is not None:
+                    return static_linker.build.get_exelist()[0]
+            elif binname in ('libtool', 'nm', 'objdump', 'otool', 'install_name_tool'):
+                static_linker = self.build.static_linker
+                if static_linker is not None:
+                    ar_binary = static_linker.build.get_exelist()[0]
+                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
+                        return os.path.join(os.path.dirname(ar_binary), binname)
+                    elif os.path.basename(ar_binary).startswith('frida'):
+                        return subprocess.check_output(['xcrun', '-f', binname], encoding='utf-8').rstrip()
+            elif binname == 'strip':
+                strip_bin = self.build.environment.lookup_binary_entry(MachineChoice.BUILD, 'strip')
+                if strip_bin is None:
+                    strip_bin = [self.build.environment.default_strip[0]]
+                return strip_bin
+            if len(args) == 2:
+                return args[1]
+            raise InterpreterException('Unknown cross binary: %s.' % binname)
 
     @noArgsFlattening
     @permittedKwargs({})
