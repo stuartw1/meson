@@ -744,19 +744,16 @@ class Vs2010Backend(backends.Backend):
 
     def gen_vcxproj(self, target, ofname, guid):
         mlog.debug('Generating vcxproj %s.' % target.name)
-        entrypoint = 'WinMainCRTStartup'
         subsystem = 'Windows'
         self.handled_target_deps[target.get_id()] = []
         if isinstance(target, build.Executable):
             conftype = 'Application'
             if not target.gui_app:
                 subsystem = 'Console'
-                entrypoint = 'mainCRTStartup'
         elif isinstance(target, build.StaticLibrary):
             conftype = 'StaticLibrary'
         elif isinstance(target, build.SharedLibrary):
             conftype = 'DynamicLibrary'
-            entrypoint = '_DllMainCrtStartup'
         elif isinstance(target, build.CustomTarget):
             return self.gen_custom_target_vcxproj(target, ofname, guid)
         elif isinstance(target, build.RunTarget):
@@ -844,18 +841,18 @@ class Vs2010Backend(backends.Backend):
             ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDLL'
         # Debug format
         if '/ZI' in buildtype_args:
-            ET.SubElement(type_config, 'DebugInformationFormat').text = 'EditAndContinue'
+            ET.SubElement(clconf, 'DebugInformationFormat').text = 'EditAndContinue'
         elif '/Zi' in buildtype_args:
-            ET.SubElement(type_config, 'DebugInformationFormat').text = 'ProgramDatabase'
+            ET.SubElement(clconf, 'DebugInformationFormat').text = 'ProgramDatabase'
         elif '/Z7' in buildtype_args:
-            ET.SubElement(type_config, 'DebugInformationFormat').text = 'OldStyle'
+            ET.SubElement(clconf, 'DebugInformationFormat').text = 'OldStyle'
         # Runtime checks
         if '/RTC1' in buildtype_args:
-            ET.SubElement(type_config, 'BasicRuntimeChecks').text = 'EnableFastChecks'
+            ET.SubElement(clconf, 'BasicRuntimeChecks').text = 'EnableFastChecks'
         elif '/RTCu' in buildtype_args:
-            ET.SubElement(type_config, 'BasicRuntimeChecks').text = 'UninitializedLocalUsageCheck'
+            ET.SubElement(clconf, 'BasicRuntimeChecks').text = 'UninitializedLocalUsageCheck'
         elif '/RTCs' in buildtype_args:
-            ET.SubElement(type_config, 'BasicRuntimeChecks').text = 'StackFrameRuntimeCheck'
+            ET.SubElement(clconf, 'BasicRuntimeChecks').text = 'StackFrameRuntimeCheck'
         # End configuration
         ET.SubElement(root, 'Import', Project=r'$(VCTargetsPath)\Microsoft.Cpp.props')
         generated_files, custom_target_output_files, generated_files_include_dirs = self.generate_custom_generator_commands(target, root)
@@ -1180,8 +1177,6 @@ class Vs2010Backend(backends.Backend):
         if '/ZI' in buildtype_args or '/Zi' in buildtype_args:
             pdb = ET.SubElement(link, 'ProgramDataBaseFileName')
             pdb.text = '$(OutDir}%s.pdb' % target_name
-        if isinstance(target, build.Executable):
-            ET.SubElement(link, 'EntryPointSymbol').text = entrypoint
         targetmachine = ET.SubElement(link, 'TargetMachine')
         targetplatform = self.platform.lower()
         if targetplatform == 'win32':
