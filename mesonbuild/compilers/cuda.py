@@ -68,11 +68,8 @@ class CudaCompiler(Compiler):
         return self._to_host_flags(self.host_compiler.thread_link_flags(environment))
 
     def sanity_check(self, work_dir, environment):
-        need_exe_wrapper = self.is_cross and environment.need_exe_wrapper(self.for_machine)
-
         mlog.debug('Sanity testing ' + self.get_display_language() + ' compiler:', ' '.join(self.exelist))
         mlog.debug('Is cross compiler: %s.' % str(self.is_cross))
-        mlog.debug('Need exe wrapper: %s.' % str(need_exe_wrapper))
 
         sname = 'sanitycheckcuda.cu'
         code = r'''
@@ -115,7 +112,7 @@ class CudaCompiler(Compiler):
         # builds; For cross builds we must still use the exe_wrapper (if any).
         self.detected_cc = ''
         flags = ['-w', '-cudart', 'static', source_name]
-        if need_exe_wrapper and self.exe_wrapper is None:
+        if self.is_cross and self.exe_wrapper is None:
             # Linking cross built apps is painful. You can't really
             # tell if you should use -nostdlib or not and for example
             # on OSX the compiler binary is the same but you need
@@ -137,7 +134,7 @@ class CudaCompiler(Compiler):
             raise EnvironmentException('Compiler {0} can not compile programs.'.format(self.name_string()))
 
         # Run sanity check (if possible)
-        if need_exe_wrapper:
+        if self.is_cross:
             if self.exe_wrapper is None:
                 return
             else:

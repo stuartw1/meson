@@ -202,18 +202,15 @@ class CLikeCompiler:
         return self.linker.import_library_args(implibname)
 
     def sanity_check_impl(self, work_dir, environment, sname, code):
-        need_exe_wrapper = self.is_cross and environment.need_exe_wrapper(self.for_machine)
-
         mlog.debug('Sanity testing ' + self.get_display_language() + ' compiler:', ' '.join(self.exelist))
         mlog.debug('Is cross compiler: %s.' % str(self.is_cross))
-        mlog.debug('Need exe wrapper: %s.' % str(need_exe_wrapper))
 
         source_name = os.path.join(work_dir, sname)
         binname = sname.rsplit('.', 1)[0]
         mode = 'link'
         if self.is_cross:
             binname += '_cross'
-            if need_exe_wrapper and self.exe_wrapper is None:
+            if self.exe_wrapper is None:
                 # Linking cross built apps is painful. You can't really
                 # tell if you should use -nostdlib or not and for example
                 # on OSX the compiler binary is the same but you need
@@ -243,7 +240,7 @@ class CLikeCompiler:
         if pc.returncode != 0:
             raise mesonlib.EnvironmentException('Compiler {0} can not compile programs.'.format(self.name_string()))
         # Run sanity check
-        if need_exe_wrapper:
+        if self.is_cross:
             if self.exe_wrapper is None:
                 # Can't check if the binaries run so we have to assume they do
                 return
@@ -322,7 +319,7 @@ class CLikeCompiler:
         cargs += self.get_compiler_args_for_mode(mode)
         return cargs, largs
 
-    def _get_compiler_check_args(self, env, extra_args, dependencies, mode='compile'):
+    def _get_compiler_check_args(self, env, extra_args: list, dependencies, mode: str = 'compile') -> T.List[str]:
         if extra_args is None:
             extra_args = []
         else:
@@ -357,11 +354,13 @@ class CLikeCompiler:
         args = cargs + extra_args + largs
         return args
 
-    def compiles(self, code, env, *, extra_args=None, dependencies=None, mode='compile', disable_cache=False):
+    def compiles(self, code: str, env, *,
+                 extra_args: T.Sequence[T.Union[T.Sequence[str], str]] = None,
+                 dependencies=None, mode: str = 'compile', disable_cache=False) -> T.Tuple[bool, bool]:
         with self._build_wrapper(code, env, extra_args, dependencies, mode, disable_cache=disable_cache) as p:
             return p.returncode == 0, p.cached
 
-    def _build_wrapper(self, code, env, extra_args, dependencies=None, mode='compile', want_output=False, disable_cache=False, temp_dir=None):
+    def _build_wrapper(self, code: str, env, extra_args, dependencies=None, mode: str = 'compile', want_output: bool = False, disable_cache: bool = False, temp_dir=None) -> T.Tuple[bool, bool]:
         args = self._get_compiler_check_args(env, extra_args, dependencies, mode)
         if disable_cache or want_output:
             return self.compile(code, extra_args=args, mode=mode, want_output=want_output, temp_dir=env.scratch_dir)
@@ -372,17 +371,15 @@ class CLikeCompiler:
                              dependencies=dependencies, mode='link', disable_cache=disable_cache)
 
     def run(self, code: str, env, *, extra_args=None, dependencies=None):
-        need_exe_wrapper = self.is_cross and env.need_exe_wrapper(self.for_machine)
-        if need_exe_wrapper and self.exe_wrapper is None:
+        if self.is_cross and self.exe_wrapper is None:
             raise compilers.CrossNoRunException('Can not run test applications in this cross environment.')
-
         with self._build_wrapper(code, env, extra_args, dependencies, mode='link', want_output=True) as p:
             if p.returncode != 0:
                 mlog.debug('Could not compile test file %s: %d\n' % (
                     p.input_name,
                     p.returncode))
                 return compilers.RunResult(False)
-            if need_exe_wrapper:
+            if self.is_cross:
                 cmdlist = self.exe_wrapper + [p.output_name]
             else:
                 cmdlist = p.output_name
@@ -1079,7 +1076,7 @@ class CLikeCompiler:
     def linker_to_compiler_args(self, args):
         return args
 
-    def has_arguments(self, args, env, code, mode):
+    def has_arguments(self, args: T.Sequence[str], env, code: str, mode: str) -> T.Tuple[bool, bool]:
         return self.compiles(code, env, extra_args=args, mode=mode)
 
     def has_multi_arguments(self, args, env):

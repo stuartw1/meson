@@ -1,4 +1,4 @@
-# Copyright 2012-2018 The Meson development team
+# Copyright 2012-2019 The Meson development team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -1621,14 +1621,14 @@ class CompilerHolder(InterpreterObject):
         return ExternalLibraryHolder(lib, self.subproject)
 
     @permittedKwargs({})
-    def has_argument_method(self, args, kwargs):
+    def has_argument_method(self, args: T.Sequence[str], kwargs) -> bool:
         args = mesonlib.stringlistify(args)
         if len(args) != 1:
             raise InterpreterException('has_argument takes exactly one argument.')
         return self.has_multi_arguments_method(args, kwargs)
 
     @permittedKwargs({})
-    def has_multi_arguments_method(self, args, kwargs):
+    def has_multi_arguments_method(self, args: T.Sequence[str], kwargs: dict):
         args = mesonlib.stringlistify(args)
         result, cached = self.compiler.has_multi_arguments(args, self.environment)
         if result:
@@ -1653,11 +1653,11 @@ class CompilerHolder(InterpreterObject):
         return supported_args
 
     @permittedKwargs({})
-    def first_supported_argument_method(self, args, kwargs):
-        for i in mesonlib.stringlistify(args):
-            if self.has_argument_method(i, kwargs):
-                mlog.log('First supported argument:', mlog.bold(i))
-                return [i]
+    def first_supported_argument_method(self, args: T.Sequence[str], kwargs: dict) -> T.List[str]:
+        for arg in mesonlib.stringlistify(args):
+            if self.has_argument_method(arg, kwargs):
+                mlog.log('First supported argument:', mlog.bold(arg))
+                return [arg]
         mlog.log('First supported argument:', mlog.red('None'))
         return []
 
@@ -1863,7 +1863,6 @@ class MesonMain(InterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
-                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'get_external_property': self.get_external_property_method,
                              'backend': self.backend_method,
@@ -2015,7 +2014,7 @@ class MesonMain(InterpreterObject):
             raise InterpreterException('Second argument must be an external program or executable.')
         self.interpreter.add_find_program_override(name, exe)
 
-    @FeatureNew('meson.override_dependency', '0.53.0')
+    @FeatureNew('meson.override_dependency', '0.54.0')
     @permittedKwargs({'native'})
     def override_dependency_method(self, args, kwargs):
         if len(args) != 2:
@@ -2058,43 +2057,6 @@ class MesonMain(InterpreterObject):
     @permittedKwargs({})
     def project_name_method(self, args, kwargs):
         return self.interpreter.active_projectname
-
-    @noArgsFlattening
-    @permittedKwargs({})
-    def get_cross_binary_method(self, args, kwargs) -> str:
-        if len(args) < 1 or len(args) > 2:
-            raise InterpreterException('Must have one or two arguments.')
-        binname = args[0]
-        if not isinstance(binname, str):
-            raise InterpreterException('Binary name must be string.')
-        if self.build.environment.is_cross_build():
-            result = self.interpreter.environment.binaries.host.binaries.get(binname, None)
-            if result is None:
-                if len(args) == 2:
-                    return args[1]
-                raise InterpreterException('Unknown cross binary: %s.' % binname)
-            return result
-        else:
-            if binname == 'ar':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    return static_linker.build.get_exelist()[0]
-            elif binname in ('libtool', 'nm', 'objdump', 'otool', 'install_name_tool'):
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    ar_binary = static_linker.build.get_exelist()[0]
-                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
-                        return os.path.join(os.path.dirname(ar_binary), binname)
-                    elif os.path.basename(ar_binary).startswith('frida'):
-                        return subprocess.check_output(['xcrun', '-f', binname], encoding='utf-8').rstrip()
-            elif binname == 'strip':
-                strip_bin = self.build.environment.lookup_binary_entry(MachineChoice.BUILD, 'strip')
-                if strip_bin is None:
-                    strip_bin = [self.build.environment.default_strip[0]]
-                return strip_bin
-            if len(args) == 2:
-                return args[1]
-            raise InterpreterException('Unknown cross binary: %s.' % binname)
 
     @noArgsFlattening
     @permittedKwargs({})
@@ -3639,7 +3601,7 @@ external dependencies (including libraries) must go to "dependencies".''')
         if 'input' not in kwargs or 'output' not in kwargs:
             raise InterpreterException('Keyword arguments input and output must exist')
         if 'fallback' not in kwargs:
-            FeatureNew('T.Optional fallback in vcs_tag', '0.41.0').use(self.subproject)
+            FeatureNew('Optional fallback in vcs_tag', '0.41.0').use(self.subproject)
         fallback = kwargs.pop('fallback', self.project_version)
         if not isinstance(fallback, str):
             raise InterpreterException('Keyword argument fallback must be a string.')
