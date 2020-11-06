@@ -11,6 +11,15 @@ Meson build files.
 
 Always spaces.
 
+## Naming Variable
+
+Snake case (stylized as `snake_case`) refers to the style of writing in which
+each space is replaced by an underscore (`_`) character, and the first letter of
+each word written in lowercase. It is the most common naming convention used
+in Meson build scripts as identifiers for variable.
+
+Let say you would like to refer to your executable so something like `my_exe`.
+
 ## Naming options
 
 There are two ways of naming project options. As an example for

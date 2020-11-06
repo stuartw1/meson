@@ -195,14 +195,18 @@ surprisingly, `build_machine`, `host_machine` and
 `target_machine`. Determining the operating system of your host
 machine is simply a matter of calling `host_machine.system()`.
 
-There are two different values for the CPU. The first one is
-`cpu_family`. It is a general type of the CPU. Common values might
-include `x86`, `arm` or `x86_64`. The second value is `cpu` which is a
-more specific subtype for the CPU. Typical values for a `x86` CPU
-family might include `i386` or `i586` and for `arm` family `armv5` or
-`armv7hl`. Note that CPU type strings are very system dependent. You
-might get a different value if you check its value on the same machine
-but with different operating systems.
+There are two different values for the CPU. The first one is `cpu_family`. It
+is a general type of the CPU. This should have a value from [the CPU Family
+table](Reference-tables.md#cpu-families). *Note* that meson does not add
+`el` to end cpu_family value for little endian systems. Big endian and little
+endian mips are both just `mips`, with the `endian` field set approriately.
+
+The second value is `cpu` which is
+a more specific subtype for the CPU. Typical values for a `x86` CPU family
+might include `i386` or `i586` and for `arm` family `armv5` or `armv7hl`.
+Note that CPU type strings are very system dependent. You might get a
+different value if you check its value on the same machine but with different
+operating systems.
 
 If you do not define your host machine, it is assumed to be the build
 machine. Similarly if you do not specify target machine, it is assumed
@@ -218,7 +222,7 @@ Once you have the cross file, starting a build is simple
 $ meson srcdir builddir --cross-file cross_file.txt
 ```
 
-Once configuration is done, compilation is started by invoking Ninja
+Once configuration is done, compilation is started by invoking `meson compile`
 in the usual way.
 
 ## Introspection and system checks
@@ -227,12 +231,9 @@ The main *meson* object provides two functions to determine cross
 compilation status.
 
 ```meson
-meson.is_cross_build()  # returns true when cross compiling
-meson.has_exe_wrapper() # returns true if an exe wrapper has been defined
+meson.is_cross_build()        # returns true when cross compiling
+meson.can_run_host_binaries() # returns true if the host binaries can be run, either with a wrapper or natively
 ```
-
-Note that the latter gives undefined return value when doing a native
-build.
 
 You can run system checks on both the system compiler or the cross
 compiler. You just have to specify which one to use.
@@ -267,7 +268,7 @@ invocation to use in your cross file is the following:
 
 ```ini
 [properties]
-c_stdlib = ['mylibc', 'mylibc_dep'] # Subproject name, dependency name
+c_stdlib = ['mylibc', 'mylibc_dep'] # Subproject name, variable name
 ```
 
 This specifies that C standard library is provided in the Meson
@@ -275,6 +276,18 @@ subproject `mylibc` in internal dependency variable `mylibc_dep`. It
 is used on every cross built C target in the entire source tree
 (including subprojects) and the standard library is disabled. The
 build definitions of these targets do not need any modification.
+
+Note that it is supported for any language, not only `c`, using `<lang>_stdlib`
+property.
+
+Since *0.56.0* the variable name parameter is no longer required as long as the
+subproject calls `meson.override_dependency('c_stdlib', mylibc_dep)`.
+The above example becomes:
+
+```ini
+[properties]
+c_stdlib = 'mylibc'
+```
 
 ## Changing cross file settings
 

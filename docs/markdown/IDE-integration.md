@@ -25,20 +25,21 @@ With this command meson will configure the project and also generate
 introspection information that is stored in `intro-*.json` files in the
 `meson-info` directory. The introspection dump will be automatically updated
 when meson is (re)configured, or the build options change. Thus, an IDE can
-watch for changes in this directory to know when something changed.
+watch for changes in this directory to know when something changed. Note that
+`meson-info.json` guaranteed to be the last file written.
 
 The `meson-info` directory should contain the following files:
 
-| File                            | Description                                                         |
-| ----                            | -----------                                                         |
-| `intro-benchmarks.json`         | Lists all benchmarks                                                |
-| `intro-buildoptions.json`       | Contains a full list of meson configuration options for the project |
-| `intro-buildsystem_files.json`  | Full list of all meson build files                                  |
-| `intro-dependencies.json`       | Lists all dependencies used in the project                          |
-| `intro-installed.json`          | Contains mapping of files to their installed location               |
-| `intro-projectinfo.json`        | Stores basic information about the project (name, version, etc.)    |
-| `intro-targets.json`            | Full list of all build targets                                      |
-| `intro-tests.json`              | Lists all tests with instructions how to run them                   |
+| File                           | Description                                                         |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `intro-benchmarks.json`        | Lists all benchmarks                                                |
+| `intro-buildoptions.json`      | Contains a full list of meson configuration options for the project |
+| `intro-buildsystem_files.json` | Full list of all meson build files                                  |
+| `intro-dependencies.json`      | Lists all dependencies used in the project                          |
+| `intro-installed.json`         | Contains mapping of files to their installed location               |
+| `intro-projectinfo.json`       | Stores basic information about the project (name, version, etc.)    |
+| `intro-targets.json`           | Full list of all build targets                                      |
+| `intro-tests.json`             | Lists all tests with instructions how to run them                   |
 
 The content of the JSON files is further specified in the remainder of this document.
 
@@ -58,6 +59,7 @@ for one target is defined as follows:
     "filename": ["list", "of", "generated", "files"],
     "build_by_default": true / false,
     "target_sources": [],
+    "extra_files": ["/path/to/file1.hpp", "/path/to/file2.hpp"],
     "installed": true / false,
 }
 ```
@@ -69,6 +71,9 @@ is set to `null`.
 
 The `subproject` key specifies the name of the subproject this target was
 defined in, or `null` if the target was defined in the top level project.
+
+*(New in 0.56.0)* The `extra_files` key lists all files specified via the
+`extra_files` kwarg of a build target. See [`executable()`](Reference-manual.md#executable).
 
 A target usually generates only one file. However, it is possible for custom
 targets to have multiple outputs.
@@ -99,15 +104,15 @@ for actual compilation.
 
 The following table shows all valid types for a target.
 
-| value of `type`  | Description                                  |
-| ---------------  | -----------                                  |
-| `executable`     | This target will generate an executable file |
-| `static library` | Target for a static library                  |
-| `shared library` | Target for a shared library                  |
+| value of `type`  | Description                                                                                   |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| `executable`     | This target will generate an executable file                                                  |
+| `static library` | Target for a static library                                                                   |
+| `shared library` | Target for a shared library                                                                   |
 | `shared module`  | A shared library that is meant to be used with dlopen rather than linking into something else |
-| `custom`         | A custom target                              |
-| `run`            | A Meson run target                           |
-| `jar`            | A Java JAR target                            |
+| `custom`         | A custom target                                                                               |
+| `run`            | A Meson run target                                                                            |
+| `jar`            | A Java JAR target                                                                             |
 
 ### Using `--targets` without a build directory
 
@@ -227,8 +232,8 @@ in the `meson.build`.
 
 ## Tests
 
-Compilation and unit tests are done as usual by running the `ninja` and
-`ninja test` commands. A JSON formatted result log can be found in
+Compilation and unit tests are done as usual by running the `meson compile` and
+`meson test` commands. A JSON formatted result log can be found in
 `workspace/project/builddir/meson-logs/testlog.json`.
 
 When these tests fail, the user probably wants to run the failing test in a
@@ -246,11 +251,32 @@ line arguments, environment variable settings and how to process the output.
     "is_parallel": true / false,
     "protocol": "exitcode" / "tap",
     "cmd": ["command", "to", "run"],
+    "depends": ["target1-id", "target2-id"],
     "env": {
         "VARIABLE1": "value 1",
         "VARIABLE2": "value 2"
     }
 }
+```
+
+The `depends` entry *(since 0.56.0)* contains target ids; they can be
+looked up in the targets introspection data.  The executable
+pointed to by `cmd` is also included in the entry, as are any
+arguments to the test that are build products.
+
+## Build system files
+
+It is also possible to get Meson build files used in your current project. This
+can be done by running `meson introspect --buildsystem-files /path/to/builddir`.
+
+The output format is as follows:
+
+```json
+[
+    "/Path/to/the/targets/meson.build",
+    "/Path/to/the/targets/meson_options.txt",
+    "/Path/to/the/targets/subdir/meson.build"
+]
 ```
 
 # Programmatic interface
@@ -260,11 +286,63 @@ command line. Use `meson introspect -h` to see all available options.
 
 This API can also work without a build directory for the `--projectinfo` command.
 
+# AST of a `meson.build`
+
+Since meson *0.55.0* it is possible to dump the AST of a `meson.build` as a JSON
+object. The interface for this is `meson introspect --ast /path/to/meson.build`.
+
+Each node of the AST has at least the following entries:
+
+| Key          | Description                                             |
+| ------------ | ------------------------------------------------------- |
+| `node`       | Type of the node (see following table)                  |
+| `lineno`     | Line number of the node in the file                     |
+| `colno`      | Column number of the node in the file                   |
+| `end_lineno` | Marks the end of the node (may be the same as `lineno`) |
+| `end_colno`  | Marks the end of the node (may be the same as `colno`)  |
+
+Possible values for `node` with additional keys:
+
+| Node type            | Additional keys                                  |
+| -------------------- | ------------------------------------------------ |
+| `BooleanNode`        | `value`: bool                                    |
+| `IdNode`             | `value`: str                                     |
+| `NumberNode`         | `value`: int                                     |
+| `StringNode`         | `value`: str                                     |
+| `ContinueNode`       |                                                  |
+| `BreakNode`          |                                                  |
+| `ArgumentNode`       | `positional`: node list; `kwargs`: accept_kwargs |
+| `ArrayNode`          | `args`: node                                     |
+| `DictNode`           | `args`: node                                     |
+| `EmptyNode`          |                                                  |
+| `OrNode`             | `left`: node; `right`: node                      |
+| `AndNode`            | `left`: node; `right`: node                      |
+| `ComparisonNode`     | `left`: node; `right`: node; `ctype`: str        |
+| `ArithmeticNode`     | `left`: node; `right`: node; `op`: str           |
+| `NotNode`            | `right`: node                                    |
+| `CodeBlockNode`      | `lines`: node list                               |
+| `IndexNode`          | `object`: node; `index`: node                    |
+| `MethodNode`         | `object`: node; `args`: node; `name`: str        |
+| `FunctionNode`       | `args`: node; `name`: str                        |
+| `AssignmentNode`     | `value`: node; `var_name`: str                   |
+| `PlusAssignmentNode` | `value`: node; `var_name`: str                   |
+| `ForeachClauseNode`  | `items`: node; `block`: node; `varnames`: list   |
+| `IfClauseNode`       | `ifs`: node list; `else`: node                   |
+| `IfNode`             | `condition`: node; `block`: node                 |
+| `UMinusNode`         | `right`: node                                    |
+| `TernaryNode`        | `condition`: node; `true`: node; `false`: node   |
+
+We do not guarantee the stability of this format since it is heavily linked to
+the internal Meson AST. However, breaking changes (removal of a node type or the
+removal of a key) are unlikely and will be announced in the release notes.
+
+
 # Existing integrations
 
 - [Gnome Builder](https://wiki.gnome.org/Apps/Builder)
 - [KDevelop](https://www.kdevelop.org)
 - [Eclipse CDT](https://www.eclipse.org/cdt/) (experimental)
-- [Meson Cmake Wrapper](https://github.com/prozum/meson-cmake-wrapper) (for cmake IDEs)
+- [Meson Cmake Wrapper](https://github.com/prozum/meson-cmake-wrapper) (for cmake IDEs) (currently unmaintained !!)
 - [Meson-UI](https://github.com/michaelbadcrumble/meson-ui) (Meson build GUI)
 - [Meson Syntax Highlighter](https://plugins.jetbrains.com/plugin/13269-meson-syntax-highlighter) plugin for JetBrains IDEs.
+- [asabil.meson](https://open-vsx.org/extension/asabil/meson) extension for VS Code/Codium

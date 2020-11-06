@@ -14,7 +14,7 @@
 
 # This file contains the detection logic for miscellaneous external dependencies.
 
-from pathlib import Path
+from .._pathlib import Path
 import functools
 import re
 import sysconfig
@@ -32,7 +32,7 @@ from .base import (
 
 if T.TYPE_CHECKING:
     from ..environment import Environment, MachineChoice
-    from .base import DependencyType  # noqa: F401
+    from .base import DependencyType, Dependency  # noqa: F401
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CMAKE})
@@ -97,7 +97,8 @@ class OpenMPDependency(ExternalDependency):
             for name in header_names:
                 if self.clib_compiler.has_header(name, '', self.env, dependencies=[self], disable_cache=True)[0]:
                     self.is_found = True
-                    self.compile_args = self.link_args = self.clib_compiler.openmp_flags()
+                    self.compile_args = self.clib_compiler.openmp_flags()
+                    self.link_args = self.clib_compiler.openmp_link_flags()
                     break
             if not self.is_found:
                 mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but omp.h missing.')
@@ -271,8 +272,10 @@ class PcapDependencyConfigTool(ConfigToolDependency):
     tools = ['pcap-config']
     tool_name = 'pcap-config'
 
-    @staticmethod
-    def finish_init(self) -> None:
+    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, environment, kwargs)
+        if not self.is_found:
+            return
         self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
         self.link_args = self.get_config_value(['--libs'], 'link_args')
         self.version = self.get_pcap_lib_version()
@@ -284,6 +287,7 @@ class PcapDependencyConfigTool(ConfigToolDependency):
     def get_pcap_lib_version(self):
         # Since we seem to need to run a program to discover the pcap version,
         # we can't do that when cross-compiling
+        # FIXME: this should be handled if we have an exe_wrapper
         if not self.env.machines.matches_build_machine(self.for_machine):
             return None
 
@@ -299,10 +303,12 @@ class CupsDependencyConfigTool(ConfigToolDependency):
     tools = ['cups-config']
     tool_name = 'cups-config'
 
-    @staticmethod
-    def finish_init(ctdep):
-        ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
-        ctdep.link_args = ctdep.get_config_value(['--ldflags', '--libs'], 'link_args')
+    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, environment, kwargs)
+        if not self.is_found:
+            return
+        self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
+        self.link_args = self.get_config_value(['--ldflags', '--libs'], 'link_args')
 
     @staticmethod
     def get_methods():
@@ -317,10 +323,12 @@ class LibWmfDependencyConfigTool(ConfigToolDependency):
     tools = ['libwmf-config']
     tool_name = 'libwmf-config'
 
-    @staticmethod
-    def finish_init(ctdep):
-        ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
-        ctdep.link_args = ctdep.get_config_value(['--libs'], 'link_args')
+    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, environment, kwargs)
+        if not self.is_found:
+            return
+        self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
+        self.link_args = self.get_config_value(['--libs'], 'link_args')
 
     @staticmethod
     def get_methods():
@@ -332,11 +340,13 @@ class LibGCryptDependencyConfigTool(ConfigToolDependency):
     tools = ['libgcrypt-config']
     tool_name = 'libgcrypt-config'
 
-    @staticmethod
-    def finish_init(ctdep):
-        ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
-        ctdep.link_args = ctdep.get_config_value(['--libs'], 'link_args')
-        ctdep.version = ctdep.get_config_value(['--version'], 'version')[0]
+    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, environment, kwargs)
+        if not self.is_found:
+            return
+        self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
+        self.link_args = self.get_config_value(['--libs'], 'link_args')
+        self.version = self.get_config_value(['--version'], 'version')[0]
 
     @staticmethod
     def get_methods():
@@ -348,11 +358,13 @@ class GpgmeDependencyConfigTool(ConfigToolDependency):
     tools = ['gpgme-config']
     tool_name = 'gpg-config'
 
-    @staticmethod
-    def finish_init(ctdep):
-        ctdep.compile_args = ctdep.get_config_value(['--cflags'], 'compile_args')
-        ctdep.link_args = ctdep.get_config_value(['--libs'], 'link_args')
-        ctdep.version = ctdep.get_config_value(['--version'], 'version')[0]
+    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, environment, kwargs)
+        if not self.is_found:
+            return
+        self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
+        self.link_args = self.get_config_value(['--libs'], 'link_args')
+        self.version = self.get_config_value(['--version'], 'version')[0]
 
     @staticmethod
     def get_methods():
@@ -392,15 +404,100 @@ class ShadercDependency(ExternalDependency):
         return [DependencyMethods.SYSTEM, DependencyMethods.PKGCONFIG]
 
 
-@factory_methods({DependencyMethods.PKGCONFIG})
+class CursesConfigToolDependency(ConfigToolDependency):
+
+    """Use the curses config tools."""
+
+    tool = 'curses-config'
+    # ncurses5.4-config is for macOS Catalina
+    tools = ['ncursesw6-config', 'ncursesw5-config', 'ncurses6-config', 'ncurses5-config', 'ncurses5.4-config']
+
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None):
+        super().__init__(name, env, kwargs, language)
+        if not self.is_found:
+            return
+        self.compile_args = self.get_config_value(['--cflags'], 'compile_args')
+        self.link_args = self.get_config_value(['--libs'], 'link_args')
+
+
+class CursesSystemDependency(ExternalDependency):
+
+    """Curses dependency the hard way.
+
+    This replaces hand rolled find_library() and has_header() calls. We
+    provide this for portability reasons, there are a large number of curses
+    implementations, and the differences between them can be very annoying.
+    """
+
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, env, kwargs)
+
+        candidates = [
+            ('pdcurses', ['pdcurses/curses.h']),
+            ('ncursesw',  ['ncursesw/ncurses.h', 'ncurses.h']),
+            ('ncurses',  ['ncurses/ncurses.h', 'ncurses/curses.h', 'ncurses.h']),
+            ('curses',  ['curses.h']),
+        ]
+
+        # Not sure how else to elegently break out of both loops
+        for lib, headers in candidates:
+            l = self.clib_compiler.find_library(lib, env, [])
+            if l:
+                for header in headers:
+                    h = self.clib_compiler.has_header(header, '', env)
+                    if h[0]:
+                        self.is_found = True
+                        self.link_args = l
+                        # Not sure how to find version for non-ncurses curses
+                        # implementations. The one in illumos/OpenIndiana
+                        # doesn't seem to have a version defined in the header.
+                        if lib.startswith('ncurses'):
+                            v, _ = self.clib_compiler.get_define('NCURSES_VERSION', '#include <{}>'.format(header), env, [], [self])
+                            self.version = v.strip('"')
+                        if lib.startswith('pdcurses'):
+                            v_major, _ = self.clib_compiler.get_define('PDC_VER_MAJOR', '#include <{}>'.format(header), env, [], [self])
+                            v_minor, _ = self.clib_compiler.get_define('PDC_VER_MINOR', '#include <{}>'.format(header), env, [], [self])
+                            self.version = '{}.{}'.format(v_major, v_minor)
+
+                        # Check the version if possible, emit a wraning if we can't
+                        req = kwargs.get('version')
+                        if req:
+                            if self.version:
+                                self.is_found = mesonlib.version_compare(self.version, req)
+                            else:
+                                mlog.warning('Cannot determine version of curses to compare against.')
+
+                        if self.is_found:
+                            mlog.debug('Curses library:', l)
+                            mlog.debug('Curses header:', header)
+                            break
+            if self.is_found:
+                break
+
+    @staticmethod
+    def get_methods() -> T.List[DependencyMethods]:
+        return [DependencyMethods.SYSTEM]
+
+
+@factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.SYSTEM})
 def curses_factory(env: 'Environment', for_machine: 'MachineChoice',
-                   kwargs: T.Dict[str, T.Any], methods: T.List[DependencyMethods]) -> T.List['DependencyType']:
-    candidates = []  # type: T.List['DependencyType']
+                   kwargs: T.Dict[str, T.Any], methods: T.List[DependencyMethods]) -> T.List[T.Callable[[], 'Dependency']]:
+    candidates = []  # type: T.List[T.Callable[[], Dependency]]
 
     if DependencyMethods.PKGCONFIG in methods:
-        pkgconfig_files = ['ncurses', 'ncursesw']
+        pkgconfig_files = ['pdcurses', 'ncursesw', 'ncurses', 'curses']
         for pkg in pkgconfig_files:
             candidates.append(functools.partial(PkgConfigDependency, pkg, env, kwargs))
+
+    # There are path handling problems with these methods on msys, and they
+    # don't apply to windows otherwise (cygwin is handled seperately from
+    # windows)
+    if not env.machines[for_machine].is_windows():
+        if DependencyMethods.CONFIG_TOOL in methods:
+            candidates.append(functools.partial(CursesConfigToolDependency, 'curses', env, kwargs))
+
+        if DependencyMethods.SYSTEM in methods:
+            candidates.append(functools.partial(CursesSystemDependency, 'curses', env, kwargs))
 
     return candidates
 

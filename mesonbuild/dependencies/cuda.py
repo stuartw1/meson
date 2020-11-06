@@ -15,6 +15,8 @@
 import glob
 import re
 import os
+import typing as T
+from .._pathlib import Path
 
 from .. import mlog
 from .. import mesonlib
@@ -149,22 +151,47 @@ class CudaDependency(ExternalDependency):
     toolkit_version_regex = re.compile(r'^CUDA Version\s+(.*)$')
     path_version_win_regex = re.compile(r'^v(.*)$')
     path_version_nix_regex = re.compile(r'^cuda-(.*)$')
+    cudart_version_regex = re.compile(r'#define\s+CUDART_VERSION\s+([0-9]+)')
 
-    def _cuda_toolkit_version(self, path):
+    def _cuda_toolkit_version(self, path: str) -> str:
         version = self._read_toolkit_version_txt(path)
+        if version:
+            return version
+        version = self._read_cuda_runtime_api_version(path)
         if version:
             return version
 
         mlog.debug('Falling back to extracting version from path')
         path_version_regex = self.path_version_win_regex if self._is_windows() else self.path_version_nix_regex
-        m = path_version_regex.match(os.path.basename(path))
-        if m:
-            return m[1]
+        try:
+            m = path_version_regex.match(os.path.basename(path))
+            if m:
+                return m.group(1)
+            else:
+                mlog.warning('Could not detect CUDA Toolkit version for {}'.format(path))
+        except Exception as e:
+            mlog.warning('Could not detect CUDA Toolkit version for {}: {}'.format(path, str(e)))
 
-        mlog.warning('Could not detect CUDA Toolkit version for {}'.format(path))
         return '0.0'
 
-    def _read_toolkit_version_txt(self, path):
+    def _read_cuda_runtime_api_version(self, path_str: str) -> T.Optional[str]:
+        path = Path(path_str)
+        for i in path.rglob('cuda_runtime_api.h'):
+            raw = i.read_text()
+            m = self.cudart_version_regex.search(raw)
+            if not m:
+                continue
+            try:
+                vers_int = int(m.group(1))
+            except ValueError:
+                continue
+            # use // for floor instead of / which produces a float
+            major = vers_int // 1000                  # type: int
+            minor = (vers_int - major * 1000) // 10   # type: int
+            return '{}.{}'.format(major, minor)
+        return None
+
+    def _read_toolkit_version_txt(self, path: str) -> T.Optional[str]:
         # Read 'version.txt' at the root of the CUDA Toolkit directory to determine the tookit version
         version_file_path = os.path.join(path, 'version.txt')
         try:
@@ -172,7 +199,7 @@ class CudaDependency(ExternalDependency):
                 version_str = version_file.readline() # e.g. 'CUDA Version 10.1.168'
                 m = self.toolkit_version_regex.match(version_str)
                 if m:
-                    return self._strip_patch_version(m[1])
+                    return self._strip_patch_version(m.group(1))
         except Exception as e:
             mlog.debug('Could not read CUDA Toolkit\'s version file {}: {}'.format(version_file_path, str(e)))
 
@@ -192,7 +219,7 @@ class CudaDependency(ExternalDependency):
                 raise DependencyException(msg.format(arch, 'Windows'))
             return os.path.join('lib', libdirs[arch])
         elif machine.is_linux():
-            libdirs = {'x86_64': 'lib64', 'ppc64': 'lib'}
+            libdirs = {'x86_64': 'lib64', 'ppc64': 'lib', 'aarch64': 'lib64'}
             if arch not in libdirs:
                 raise DependencyException(msg.format(arch, 'Linux'))
             return libdirs[arch]

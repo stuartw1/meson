@@ -53,7 +53,7 @@ def get_entries() -> T.List[T.Tuple[int, str]]:
     entries.sort()
     return entries
 
-def replace_source(sourcefile: str, replacements: T.List[T.Tuple[str, str]]):
+def replace_source(sourcefile: str, replacements: T.List[T.Tuple[str, str]]) -> None:
     with open(sourcefile, 'r') as f:
         contents = f.read()
     for old_name, new_name in replacements:
@@ -61,7 +61,7 @@ def replace_source(sourcefile: str, replacements: T.List[T.Tuple[str, str]]):
     with open(sourcefile, 'w') as f:
         f.write(contents)
 
-def condense(dirname: str):
+def condense(dirname: str) -> None:
     curdir = os.getcwd()
     os.chdir(dirname)
     entries = get_entries()
@@ -74,6 +74,10 @@ def condense(dirname: str):
             #print('git mv "%s" "%s"' % (old_name, new_name))
             subprocess.check_call(['git', 'mv', old_name, new_name])
             replacements.append((old_name, new_name))
+            # update any appearances of old_name in expected stdout in test.json
+            json = os.path.join(new_name, 'test.json')
+            if os.path.isfile(json):
+                replace_source(json, [(old_name, new_name)])
     os.chdir(curdir)
     replace_source('run_unittests.py', replacements)
     replace_source('run_project_tests.py', replacements)

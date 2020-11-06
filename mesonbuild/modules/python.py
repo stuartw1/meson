@@ -17,7 +17,7 @@ import json
 import shutil
 import typing as T
 
-from pathlib import Path
+from .._pathlib import Path
 from .. import mesonlib
 from ..mesonlib import MachineChoice, MesonException
 from . import ExtensionModule
@@ -34,7 +34,7 @@ from ..environment import detect_cpu_family
 from ..dependencies.base import (
     DependencyMethods, ExternalDependency,
     ExternalProgram, PkgConfigDependency,
-    NonExistingExternalProgram
+    NonExistingExternalProgram, NotFoundDependency
 )
 
 mod_kwargs = set(['subdir'])
@@ -285,7 +285,7 @@ print (json.dumps ({
 
 class PythonInstallation(ExternalProgramHolder):
     def __init__(self, interpreter, python, info):
-        ExternalProgramHolder.__init__(self, python)
+        ExternalProgramHolder.__init__(self, python, interpreter.subproject)
         self.interpreter = interpreter
         self.subproject = self.interpreter.subproject
         prefix = self.interpreter.environment.coredata.get_builtin_option('prefix')
@@ -356,12 +356,19 @@ class PythonInstallation(ExternalProgramHolder):
                          'positional arguments. It always returns a Python '
                          'dependency. This will become an error in the future.',
                          location=self.interpreter.current_node)
-        dep = PythonDependency(self, self.interpreter.environment, kwargs)
+        disabled, required, feature = extract_required_kwarg(kwargs, self.subproject)
+        if disabled:
+            mlog.log('Dependency', mlog.bold('python'), 'skipped: feature', mlog.bold(feature), 'disabled')
+            dep = NotFoundDependency(self.interpreter.environment)
+        else:
+            dep = PythonDependency(self, self.interpreter.environment, kwargs)
+            if required and not dep.found():
+                raise mesonlib.MesonException('Python dependency not found')
         return self.interpreter.holderify(dep)
 
     @permittedKwargs(['pure', 'subdir'])
     def install_sources_method(self, args, kwargs):
-        pure = kwargs.pop('pure', False)
+        pure = kwargs.pop('pure', True)
         if not isinstance(pure, bool):
             raise InvalidArguments('"pure" argument must be a boolean.')
 
@@ -514,7 +521,7 @@ class PythonModule(ExtensionModule):
 
         if disabled:
             mlog.log('Program', name_or_path or 'python', 'found:', mlog.red('NO'), '(disabled by:', mlog.bold(feature), ')')
-            return ExternalProgramHolder(NonExistingExternalProgram())
+            return ExternalProgramHolder(NonExistingExternalProgram(), state.subproject)
 
         if not name_or_path:
             python = ExternalProgram('python3', mesonlib.python_command, silent=True)
@@ -561,11 +568,11 @@ class PythonModule(ExtensionModule):
         if not python.found():
             if required:
                 raise mesonlib.MesonException('{} not found'.format(name_or_path or 'python'))
-            res = ExternalProgramHolder(NonExistingExternalProgram())
+            res = ExternalProgramHolder(NonExistingExternalProgram(), state.subproject)
         elif missing_modules:
             if required:
                 raise mesonlib.MesonException('{} is missing modules: {}'.format(name_or_path or 'python', ', '.join(missing_modules)))
-            res = ExternalProgramHolder(NonExistingExternalProgram())
+            res = ExternalProgramHolder(NonExistingExternalProgram(), state.subproject)
         else:
             # Sanity check, we expect to have something that at least quacks in tune
             try:
@@ -583,7 +590,7 @@ class PythonModule(ExtensionModule):
             if isinstance(info, dict) and 'version' in info and self._check_version(name_or_path, info['version']):
                 res = PythonInstallation(interpreter, python, info)
             else:
-                res = ExternalProgramHolder(NonExistingExternalProgram())
+                res = ExternalProgramHolder(NonExistingExternalProgram(), state.subproject)
                 if required:
                     raise mesonlib.MesonException('{} is not a valid python or it is missing setuptools'.format(python))
 

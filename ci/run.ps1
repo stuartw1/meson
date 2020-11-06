@@ -4,7 +4,14 @@ if ($LastExitCode -ne 0) {
 }
 
 # remove Chocolately, MinGW, Strawberry Perl from path, so we don't find gcc/gfortran and try to use it
-$env:Path = ($env:Path.Split(';') | Where-Object { $_ -notmatch 'mingw|Strawberry|Chocolatey' }) -join ';'
+# remove PostgreSQL from path so we don't pickup a broken zlib from it
+$env:Path = ($env:Path.Split(';') | Where-Object { $_ -notmatch 'mingw|Strawberry|Chocolatey|PostgreSQL' }) -join ';'
+
+# Rust puts its shared stdlib in a secret place, but it is needed to run tests.
+$env:Path += ";$HOME/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin"
+
+# Set the CI env var for the meson test framework
+$env:CI = '1'
 
 # download and install prerequisites
 function DownloadFile([String] $Source, [String] $Destination) {
@@ -27,10 +34,10 @@ function DownloadFile([String] $Source, [String] $Destination) {
 }
 
 
-if ($env:backend -eq 'ninja') { $dmd = $true } else { $dmd = $false }
+if (($env:backend -eq 'ninja') -and ($env:arch -ne 'arm64')) { $dmd = $true } else { $dmd = $false }
 
-DownloadFile -Source https://github.com/mesonbuild/cidata/releases/download/ci1/ci_data.zip -Destination $env:AGENT_WORKFOLDER\ci_data.zip
-echo "Extracting  ci_data.zip"
+DownloadFile -Source https://github.com/mesonbuild/cidata/releases/download/ci3/ci_data.zip -Destination $env:AGENT_WORKFOLDER\ci_data.zip
+echo "Extracting ci_data.zip"
 Expand-Archive $env:AGENT_WORKFOLDER\ci_data.zip -DestinationPath $env:AGENT_WORKFOLDER\ci_data
 & "$env:AGENT_WORKFOLDER\ci_data\install.ps1" -Arch $env:arch -Compiler $env:compiler -Boost $true -DMD $dmd
 
@@ -61,11 +68,11 @@ python --version
 
 # Needed for running unit tests in parallel.
 echo ""
-python -m pip --disable-pip-version-check install --upgrade pefile pytest-xdist
+python -m pip --disable-pip-version-check install --upgrade pefile pytest-xdist jsonschema
 
 echo ""
 echo "=== Start running tests ==="
 # Starting from VS2019 Powershell(?) will fail the test run
 # if it prints anything to stderr. Python's test runner
 # does that by default so we need to forward it.
-cmd /c 'python 2>&1' run_tests.py --backend $env:backend
+cmd /c "python 2>&1 run_tests.py --backend $env:backend $env:extraargs"

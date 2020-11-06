@@ -20,9 +20,9 @@ set_target_properties(cmModLib PROPERTIES VERSION 1.0.1)
 add_executable(testEXE main.cpp)
 
 target_link_libraries(cmModLib       ZLIB::ZLIB)
-target_link_libraries(cmModLibStatic ZLIB::ZLIB)
+target_link_libraries(cmModLibStatic ;ZLIB::ZLIB;)
 target_link_libraries(testEXE cmModLib)
 
 target_compile_definitions(cmModLibStatic PUBLIC CMMODLIB_STATIC_DEFINE)
 
-install(TARGETS cmModLib testEXE LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+install(TARGETS testEXE LIBRARY DESTINATION lib RUNTIME DESTINATION bin)

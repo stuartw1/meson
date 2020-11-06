@@ -19,14 +19,13 @@ import xml.dom.minidom
 import xml.etree.ElementTree as ET
 import uuid
 import typing as T
-from pathlib import Path, PurePath
+from .._pathlib import Path, PurePath
 
 from . import backends
 from .. import build
 from .. import dependencies
 from .. import mlog
 from .. import compilers
-from ..compilers import CompilerArgs
 from ..interpreter import Interpreter
 from ..mesonlib import (
     MesonException, File, python_command, replace_if_different
@@ -98,6 +97,9 @@ class Vs2010Backend(backends.Backend):
         self.subdirs = {}
         self.handled_target_deps = {}
 
+    def get_target_private_dir(self, target):
+        return os.path.join(self.get_target_dir(target), target.get_id())
+
     def generate_custom_generator_commands(self, target, parent_node):
         generator_output_files = []
         custom_target_include_dirs = []
@@ -119,7 +121,7 @@ class Vs2010Backend(backends.Backend):
                 infilelist = genlist.get_inputs()
                 outfilelist = genlist.get_outputs()
                 source_dir = os.path.join(down, self.build_to_src, genlist.subdir)
-                exe_arr = self.exe_object_to_cmd_array(exe)
+                exe_arr = self.build_target_to_cmd_array(exe, True)
                 idgroup = ET.SubElement(parent_node, 'ItemGroup')
                 for i in range(len(infilelist)):
                     if len(infilelist) == len(outfilelist):
@@ -148,7 +150,7 @@ class Vs2010Backend(backends.Backend):
                     # Always use a wrapper because MSBuild eats random characters when
                     # there are many arguments.
                     tdir_abs = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
-                    cmd = self.as_meson_exe_cmdline(
+                    cmd, _ = self.as_meson_exe_cmdline(
                         'generator ' + cmd[0],
                         cmd[0],
                         cmd[1:],
@@ -167,17 +169,21 @@ class Vs2010Backend(backends.Backend):
 
     def generate(self):
         target_machine = self.interpreter.builtin['target_machine'].cpu_family_method(None, None)
-        if target_machine.endswith('64'):
+        if target_machine == '64' or target_machine == 'x86_64':
             # amd64 or x86_64
             self.platform = 'x64'
         elif target_machine == 'x86':
             # x86
             self.platform = 'Win32'
+        elif target_machine == 'aarch64' or target_machine == 'arm64':
+            self.platform = 'arm64'
         elif 'arm' in target_machine.lower():
             self.platform = 'ARM'
         else:
             raise MesonException('Unsupported Visual Studio platform: ' + target_machine)
         self.buildtype = self.environment.coredata.get_builtin_option('buildtype')
+        self.optimization = self.environment.coredata.get_builtin_option('optimization')
+        self.debug = self.environment.coredata.get_builtin_option('debug')
         sln_filename = os.path.join(self.environment.get_build_dir(), self.build.project_name + '.sln')
         projlist = self.generate_projects()
         self.gen_testproj('RUN_TESTS', os.path.join(self.environment.get_build_dir(), 'RUN_TESTS.vcxproj'))
@@ -188,11 +194,11 @@ class Vs2010Backend(backends.Backend):
         Vs2010Backend.touch_regen_timestamp(self.environment.get_build_dir())
 
     @staticmethod
-    def get_regen_stampfile(build_dir):
+    def get_regen_stampfile(build_dir: str) -> None:
         return os.path.join(os.path.join(build_dir, Environment.private_dir), 'regen.stamp')
 
     @staticmethod
-    def touch_regen_timestamp(build_dir):
+    def touch_regen_timestamp(build_dir: str) -> None:
         with open(Vs2010Backend.get_regen_stampfile(build_dir), 'w'):
             pass
 
@@ -561,12 +567,12 @@ class Vs2010Backend(backends.Backend):
         # there are many arguments.
         tdir_abs = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
         extra_bdeps = target.get_transitive_build_target_deps()
-        wrapper_cmd = self.as_meson_exe_cmdline(target.name, target.command[0], cmd[1:],
-                                                # All targets run from the target dir
-                                                workdir=tdir_abs,
-                                                extra_bdeps=extra_bdeps,
-                                                capture=ofilenames[0] if target.capture else None,
-                                                force_serialize=True)
+        wrapper_cmd, _ = self.as_meson_exe_cmdline(target.name, target.command[0], cmd[1:],
+                                                   # All targets run from the target dir
+                                                   workdir=tdir_abs,
+                                                   extra_bdeps=extra_bdeps,
+                                                   capture=ofilenames[0] if target.capture else None,
+                                                   force_serialize=True)
         if target.build_always_stale:
             # Use a nonexistent file to always consider the target out-of-date.
             ofilenames += [self.nonexistent_file(os.path.join(self.environment.get_scratch_dir(),
@@ -589,10 +595,8 @@ class Vs2010Backend(backends.Backend):
         raise MesonException('Could not guess language from source file %s.' % src)
 
     def add_pch(self, pch_sources, lang, inc_cl):
-        if len(pch_sources) <= 1:
-            # We only need per file precompiled headers if we have more than 1 language.
-            return
-        self.use_pch(pch_sources, lang, inc_cl)
+        if lang in pch_sources:
+            self.use_pch(pch_sources, lang, inc_cl)
 
     def create_pch(self, pch_sources, lang, inc_cl):
         pch = ET.SubElement(inc_cl, 'PrecompiledHeader')
@@ -600,6 +604,8 @@ class Vs2010Backend(backends.Backend):
         self.add_pch_files(pch_sources, lang, inc_cl)
 
     def use_pch(self, pch_sources, lang, inc_cl):
+        pch = ET.SubElement(inc_cl, 'PrecompiledHeader')
+        pch.text = 'Use'
         header = self.add_pch_files(pch_sources, lang, inc_cl)
         pch_include = ET.SubElement(inc_cl, 'ForcedIncludeFiles')
         pch_include.text = header + ';%(ForcedIncludeFiles)'
@@ -748,8 +754,13 @@ class Vs2010Backend(backends.Backend):
         self.handled_target_deps[target.get_id()] = []
         if isinstance(target, build.Executable):
             conftype = 'Application'
-            if not target.gui_app:
-                subsystem = 'Console'
+            if target.gui_app is not None:
+                if not target.gui_app:
+                    subsystem = 'Console'
+            else:
+                # If someone knows how to set the version properly,
+                # please send a patch.
+                subsystem = target.win_subsystem.split(',')[0]
         elif isinstance(target, build.StaticLibrary):
             conftype = 'StaticLibrary'
         elif isinstance(target, build.SharedLibrary):
@@ -770,7 +781,9 @@ class Vs2010Backend(backends.Backend):
         if self.is_unity(target):
             sources = self.generate_unity_files(target, sources)
         compiler = self._get_cl_compiler(target)
-        buildtype_args = compiler.get_buildtype_args(self.buildtype)
+        build_args = compiler.get_buildtype_args(self.buildtype)
+        build_args += compiler.get_optimization_args(self.optimization)
+        build_args += compiler.get_debug_args(self.debug)
         buildtype_link_args = compiler.get_buildtype_linker_args(self.buildtype)
         vscrt_type = self.environment.coredata.base_options['b_vscrt']
         project_name = target.name
@@ -819,9 +832,16 @@ class Vs2010Backend(backends.Backend):
         clconf = ET.SubElement(compiles, 'ClCompile')
         # CRT type; debug or release
         if vscrt_type.value == 'from_buildtype':
-            if self.buildtype == 'debug' or self.buildtype == 'debugoptimized':
+            if self.buildtype == 'debug':
                 ET.SubElement(type_config, 'UseDebugLibraries').text = 'true'
                 ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDebugDLL'
+            else:
+                ET.SubElement(type_config, 'UseDebugLibraries').text = 'false'
+                ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDLL'
+        elif vscrt_type.value == 'static_from_buildtype':
+            if self.buildtype == 'debug':
+                ET.SubElement(type_config, 'UseDebugLibraries').text = 'true'
+                ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDebug'
             else:
                 ET.SubElement(type_config, 'UseDebugLibraries').text = 'false'
                 ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreaded'
@@ -840,19 +860,33 @@ class Vs2010Backend(backends.Backend):
             ET.SubElement(type_config, 'UseDebugLibraries').text = 'false'
             ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDLL'
         # Debug format
-        if '/ZI' in buildtype_args:
+        if '/ZI' in build_args:
             ET.SubElement(clconf, 'DebugInformationFormat').text = 'EditAndContinue'
-        elif '/Zi' in buildtype_args:
+        elif '/Zi' in build_args:
             ET.SubElement(clconf, 'DebugInformationFormat').text = 'ProgramDatabase'
-        elif '/Z7' in buildtype_args:
+        elif '/Z7' in build_args:
             ET.SubElement(clconf, 'DebugInformationFormat').text = 'OldStyle'
+        else:
+            ET.SubElement(clconf, 'DebugInformationFormat').text = 'None'
         # Runtime checks
-        if '/RTC1' in buildtype_args:
+        if '/RTC1' in build_args:
             ET.SubElement(clconf, 'BasicRuntimeChecks').text = 'EnableFastChecks'
-        elif '/RTCu' in buildtype_args:
+        elif '/RTCu' in build_args:
             ET.SubElement(clconf, 'BasicRuntimeChecks').text = 'UninitializedLocalUsageCheck'
-        elif '/RTCs' in buildtype_args:
+        elif '/RTCs' in build_args:
             ET.SubElement(clconf, 'BasicRuntimeChecks').text = 'StackFrameRuntimeCheck'
+        # Exception handling has to be set in the xml in addition to the "AdditionalOptions" because otherwise
+        # cl will give warning D9025: overriding '/Ehs' with cpp_eh value
+        if 'cpp' in target.compilers:
+            eh = self.environment.coredata.compiler_options[target.for_machine]['cpp']['eh']
+            if eh.value == 'a':
+                ET.SubElement(clconf, 'ExceptionHandling').text = 'Async'
+            elif eh.value == 's':
+                ET.SubElement(clconf, 'ExceptionHandling').text = 'SyncCThrow'
+            elif eh.value == 'none':
+                ET.SubElement(clconf, 'ExceptionHandling').text = 'false'
+            else: # 'sc' or 'default'
+                ET.SubElement(clconf, 'ExceptionHandling').text = 'Sync'
         # End configuration
         ET.SubElement(root, 'Import', Project=r'$(VCTargetsPath)\Microsoft.Cpp.props')
         generated_files, custom_target_output_files, generated_files_include_dirs = self.generate_custom_generator_commands(target, root)
@@ -882,15 +916,17 @@ class Vs2010Backend(backends.Backend):
         #
         # file_args is also later split out into defines and include_dirs in
         # case someone passed those in there
-        file_args = dict((lang, CompilerArgs(comp)) for lang, comp in target.compilers.items())
-        file_defines = dict((lang, []) for lang in target.compilers)
-        file_inc_dirs = dict((lang, []) for lang in target.compilers)
+        file_args = {l: c.compiler_args() for l, c in target.compilers.items()}
+        file_defines = {l: [] for l in target.compilers}
+        file_inc_dirs = {l: [] for l in target.compilers}
         # The order in which these compile args are added must match
         # generate_single_compile() and generate_basic_compiler_args()
         for l, comp in target.compilers.items():
             if l in file_args:
-                file_args[l] += compilers.get_base_compile_args(self.get_base_options_for_target(target), comp)
-                file_args[l] += comp.get_option_compile_args(self.environment.coredata.compiler_options[target.for_machine])
+                file_args[l] += compilers.get_base_compile_args(
+                        self.get_base_options_for_target(target), comp)
+                file_args[l] += comp.get_option_compile_args(
+                        self.environment.coredata.compiler_options[target.for_machine][comp.language])
 
         # Add compile args added using add_project_arguments()
         for l, args in self.build.projects_args[target.for_machine].get(target.subproject, {}).items():
@@ -903,10 +939,11 @@ class Vs2010Backend(backends.Backend):
                 file_args[l] += args
         # Compile args added from the env or cross file: CFLAGS/CXXFLAGS, etc. We want these
         # to override all the defaults, but not the per-target compile args.
-        for key, opt in self.environment.coredata.compiler_options[target.for_machine].items():
-            l, suffix = key.split('_', 1)
-            if suffix == 'args' and l in file_args:
-                file_args[l] += opt.value
+        for l in file_args.keys():
+            opts = self.environment.coredata.compiler_options[target.for_machine][l]
+            k = 'args'
+            if k in opts:
+                file_args[l] += opts[k].value
         for args in file_args.values():
             # This is where Visual Studio will insert target_args, target_defines,
             # etc, which are added later from external deps (see below).
@@ -947,9 +984,7 @@ class Vs2010Backend(backends.Backend):
             t_inc_dirs = [self.relpath(self.get_target_private_dir(target),
                                        self.get_target_dir(target))]
             if target.implicit_include_directories:
-                t_inc_dirs += ['.']
-            if target.implicit_include_directories:
-                t_inc_dirs += [proj_to_src_dir]
+                t_inc_dirs += ['.', proj_to_src_dir]
             args += ['-I' + arg for arg in t_inc_dirs]
 
         # Split preprocessor defines and include directories out of the list of
@@ -964,9 +999,8 @@ class Vs2010Backend(backends.Backend):
                     else:
                         define = arg[2:]
                     # De-dup
-                    if define in file_defines[l]:
-                        file_defines[l].remove(define)
-                    file_defines[l].append(define)
+                    if define not in file_defines[l]:
+                        file_defines[l].append(define)
                 elif arg.startswith(('-I', '/I')) or arg == '%(AdditionalIncludeDirectories)':
                     file_args[l].remove(arg)
                     # Don't escape the marker
@@ -977,6 +1011,9 @@ class Vs2010Backend(backends.Backend):
                     # De-dup
                     if inc_dir not in file_inc_dirs[l]:
                         file_inc_dirs[l].append(inc_dir)
+                    # Add include dirs to target as well so that "Go to Document" works in headers
+                    if inc_dir not in target_inc_dirs:
+                        target_inc_dirs.append(inc_dir)
 
         # Split compile args needed to find external dependencies
         # Link args are added while generating the link command
@@ -984,30 +1021,30 @@ class Vs2010Backend(backends.Backend):
             # Cflags required by external deps might have UNIX-specific flags,
             # so filter them out if needed
             if isinstance(d, dependencies.OpenMPDependency):
-                d_compile_args = compiler.openmp_flags()
+                ET.SubElement(clconf, 'OpenMPSupport').text = 'true'
             else:
                 d_compile_args = compiler.unix_args_to_native(d.get_compile_args())
-            for arg in d_compile_args:
-                if arg.startswith(('-D', '/D')):
-                    define = arg[2:]
-                    # De-dup
-                    if define in target_defines:
-                        target_defines.remove(define)
-                    target_defines.append(define)
-                elif arg.startswith(('-I', '/I')):
-                    inc_dir = arg[2:]
-                    # De-dup
-                    if inc_dir not in target_inc_dirs:
-                        target_inc_dirs.append(inc_dir)
-                else:
-                    target_args.append(arg)
+                for arg in d_compile_args:
+                    if arg.startswith(('-D', '/D')):
+                        define = arg[2:]
+                        # De-dup
+                        if define in target_defines:
+                            target_defines.remove(define)
+                        target_defines.append(define)
+                    elif arg.startswith(('-I', '/I')):
+                        inc_dir = arg[2:]
+                        # De-dup
+                        if inc_dir not in target_inc_dirs:
+                            target_inc_dirs.append(inc_dir)
+                    else:
+                        target_args.append(arg)
 
         languages += gen_langs
+        if '/Gw' in build_args:
+            target_args.append('/Gw')
         if len(target_args) > 0:
             target_args.append('%(AdditionalOptions)')
             ET.SubElement(clconf, "AdditionalOptions").text = ' '.join(target_args)
-
-        target_inc_dirs.append('%(AdditionalIncludeDirectories)')
         ET.SubElement(clconf, 'AdditionalIncludeDirectories').text = ';'.join(target_inc_dirs)
         target_defines.append('%(PreprocessorDefinitions)')
         ET.SubElement(clconf, 'PreprocessorDefinitions').text = ';'.join(target_defines)
@@ -1018,7 +1055,7 @@ class Vs2010Backend(backends.Backend):
         if self.get_option_for_target('werror', target):
             ET.SubElement(clconf, 'TreatWarningAsError').text = 'true'
         # Optimization flags
-        o_flags = split_o_flags_args(buildtype_args)
+        o_flags = split_o_flags_args(build_args)
         if '/Ox' in o_flags:
             ET.SubElement(clconf, 'Optimization').text = 'Full'
         elif '/O2' in o_flags:
@@ -1041,12 +1078,10 @@ class Vs2010Backend(backends.Backend):
         # Note: SuppressStartupBanner is /NOLOGO and is 'true' by default
         pch_sources = {}
         if self.environment.coredata.base_options.get('b_pch', False):
-            pch_node = ET.SubElement(clconf, 'PrecompiledHeader')
             for lang in ['c', 'cpp']:
                 pch = target.get_pch(lang)
                 if not pch:
                     continue
-                pch_node.text = 'Use'
                 if compiler.id == 'msvc':
                     if len(pch) == 1:
                         # Auto generate PCH.
@@ -1060,24 +1095,22 @@ class Vs2010Backend(backends.Backend):
                     # I don't know whether its relevant but let's handle other compilers
                     # used with a vs backend
                     pch_sources[lang] = [pch[0], None, lang, None]
-        if len(pch_sources) == 1:
-            # If there is only 1 language with precompiled headers, we can use it for the entire project, which
-            # is cleaner than specifying it for each source file.
-            self.use_pch(pch_sources, list(pch_sources)[0], clconf)
 
         resourcecompile = ET.SubElement(compiles, 'ResourceCompile')
         ET.SubElement(resourcecompile, 'PreprocessorDefinitions')
 
         # Linker options
         link = ET.SubElement(compiles, 'Link')
-        extra_link_args = CompilerArgs(compiler)
+        extra_link_args = compiler.compiler_args()
         # FIXME: Can these buildtype linker args be added as tags in the
         # vcxproj file (similar to buildtype compiler args) instead of in
         # AdditionalOptions?
         extra_link_args += compiler.get_buildtype_linker_args(self.buildtype)
         # Generate Debug info
-        if self.buildtype.startswith('debug'):
+        if self.debug:
             self.generate_debug_information(link)
+        else:
+            ET.SubElement(link, 'GenerateDebugInformation').text = 'false'
         if not isinstance(target, build.StaticLibrary):
             if isinstance(target, build.SharedModule):
                 options = self.environment.coredata.base_options
@@ -1098,14 +1131,14 @@ class Vs2010Backend(backends.Backend):
                 # Extend without reordering or de-dup to preserve `-L -l` sets
                 # https://github.com/mesonbuild/meson/issues/1718
                 if isinstance(dep, dependencies.OpenMPDependency):
-                    extra_link_args.extend_direct(compiler.openmp_flags())
+                    ET.SubElement(clconf, 'OpenMPSuppport').text = 'true'
                 else:
                     extra_link_args.extend_direct(dep.get_link_args())
             for d in target.get_dependencies():
                 if isinstance(d, build.StaticLibrary):
                     for dep in d.get_external_deps():
                         if isinstance(dep, dependencies.OpenMPDependency):
-                            extra_link_args.extend_direct(compiler.openmp_flags())
+                            ET.SubElement(clconf, 'OpenMPSuppport').text = 'true'
                         else:
                             extra_link_args.extend_direct(dep.get_link_args())
         # Add link args for c_* or cpp_* build options. Currently this only
@@ -1113,7 +1146,8 @@ class Vs2010Backend(backends.Backend):
         # to be after all internal and external libraries so that unresolved
         # symbols from those can be found here. This is needed when the
         # *_winlibs that we want to link to are static mingw64 libraries.
-        extra_link_args += compiler.get_option_link_args(self.environment.coredata.compiler_options[compiler.for_machine])
+        extra_link_args += compiler.get_option_link_args(
+                self.environment.coredata.compiler_options[compiler.for_machine][comp.language])
         (additional_libpaths, additional_links, extra_link_args) = self.split_link_args(extra_link_args.to_native())
 
         # Add more libraries to be linked if needed
@@ -1174,7 +1208,7 @@ class Vs2010Backend(backends.Backend):
             if target.vs_module_defs:
                 relpath = os.path.join(down, target.vs_module_defs.rel_to_builddir(self.build_to_src))
                 ET.SubElement(link, 'ModuleDefinitionFile').text = relpath
-        if '/ZI' in buildtype_args or '/Zi' in buildtype_args:
+        if self.debug:
             pdb = ET.SubElement(link, 'ProgramDataBaseFileName')
             pdb.text = '$(OutDir}%s.pdb' % target_name
         targetmachine = ET.SubElement(link, 'TargetMachine')
@@ -1185,12 +1219,15 @@ class Vs2010Backend(backends.Backend):
             targetmachine.text = 'MachineX64'
         elif targetplatform == 'arm':
             targetmachine.text = 'MachineARM'
+        elif targetplatform == 'arm64':
+            targetmachine.text = 'MachineARM64'
         else:
             raise MesonException('Unsupported Visual Studio target machine: ' + targetplatform)
         # /nologo
         ET.SubElement(link, 'SuppressStartupBanner').text = 'true'
         # /release
-        ET.SubElement(link, 'SetChecksum').text = 'true'
+        if not self.environment.coredata.get_builtin_option('debug'):
+            ET.SubElement(link, 'SetChecksum').text = 'true'
 
         meson_file_group = ET.SubElement(root, 'ItemGroup')
         ET.SubElement(meson_file_group, 'None', Include=os.path.join(proj_to_src_dir, build_filename))

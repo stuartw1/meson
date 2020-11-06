@@ -23,9 +23,18 @@ export CXX=$CXX
 export OBJC=$CC
 export OBJCXX=$CXX
 export PATH=/root/tools:$PATH
+if test "$MESON_RSP_THRESHOLD" != ""
+then
+  export MESON_RSP_THRESHOLD=$MESON_RSP_THRESHOLD
+fi
 
 source /ci/env_vars.sh
 cd /root
+
+update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+update-alternatives --set i686-w64-mingw32-gcc   /usr/bin/i686-w64-mingw32-gcc-posix
+update-alternatives --set i686-w64-mingw32-g++   /usr/bin/i686-w64-mingw32-g++-posix
 
 ./run_tests.py $RUN_TESTS_ARGS -- $MESON_ARGS
 #./upload.sh
@@ -55,5 +64,9 @@ elif [[ "$TRAVIS_OS_NAME" == "osx"   ]]; then
   export OBJC=$CC
   export OBJCXX=$CXX
   export PATH=$HOME/tools:/usr/local/opt/qt/bin:$PATH:$(brew --prefix llvm)/bin
+  if test "$MESON_RSP_THRESHOLD" != ""
+  then
+    export MESON_RSP_THRESHOLD=$MESON_RSP_THRESHOLD
+  fi
   ./run_tests.py $RUN_TESTS_ARGS --backend=ninja -- $MESON_ARGS
 fi

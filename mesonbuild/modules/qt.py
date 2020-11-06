@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import os
+import shutil
 from .. import mlog
 from .. import build
-from ..mesonlib import MesonException, Popen_safe, extract_as_list, File, unholder
-from ..dependencies import Dependency, Qt4Dependency, Qt5Dependency
+from ..mesonlib import MesonException, extract_as_list, File, unholder, version_compare
+from ..dependencies import Dependency, Qt4Dependency, Qt5Dependency, NonExistingExternalProgram
 import xml.etree.ElementTree as ET
 from . import ModuleReturnValue, get_include_args, ExtensionModule
 from ..interpreterbase import noPosargs, permittedKwargs, FeatureNew, FeatureNewKwargs
@@ -30,51 +31,36 @@ _QT_DEPS_LUT = {
 
 class QtBaseModule(ExtensionModule):
     tools_detected = False
+    rcc_supports_depfiles = False
 
     def __init__(self, interpreter, qt_version=5):
         ExtensionModule.__init__(self, interpreter)
         self.snippets.add('has_tools')
         self.qt_version = qt_version
 
-    def _detect_tools(self, env, method):
+    def _detect_tools(self, env, method, required=True):
         if self.tools_detected:
             return
-        mlog.log('Detecting Qt{version} tools'.format(version=self.qt_version))
-        # FIXME: We currently require QtX to exist while importing the module.
-        # We should make it gracefully degrade and not create any targets if
-        # the import is marked as 'optional' (not implemented yet)
-        kwargs = {'required': 'true', 'modules': 'Core', 'silent': 'true', 'method': method}
-        qt = _QT_DEPS_LUT[self.qt_version](env, kwargs)
-        # Get all tools and then make sure that they are the right version
-        self.moc, self.uic, self.rcc, self.lrelease = qt.compilers_detect(self.interpreter)
-        # Moc, uic and rcc write their version strings to stderr.
-        # Moc and rcc return a non-zero result when doing so.
-        # What kind of an idiot thought that was a good idea?
-        for compiler, compiler_name in ((self.moc, "Moc"), (self.uic, "Uic"), (self.rcc, "Rcc"), (self.lrelease, "lrelease")):
-            if compiler.found():
-                # Workaround since there is no easy way to know which tool/version support which flag
-                for flag in ['-v', '-version']:
-                    p, stdout, stderr = Popen_safe(compiler.get_command() + [flag])[0:3]
-                    if p.returncode == 0:
-                        break
-                stdout = stdout.strip()
-                stderr = stderr.strip()
-                if 'Qt {}'.format(self.qt_version) in stderr:
-                    compiler_ver = stderr
-                elif 'version {}.'.format(self.qt_version) in stderr:
-                    compiler_ver = stderr
-                elif ' {}.'.format(self.qt_version) in stdout:
-                    compiler_ver = stdout
-                else:
-                    raise MesonException('{name} preprocessor is not for Qt {version}. Output:\n{stdo}\n{stderr}'.format(
-                        name=compiler_name, version=self.qt_version, stdo=stdout, stderr=stderr))
-                mlog.log(' {}:'.format(compiler_name.lower()), mlog.green('YES'), '({path}, {version})'.format(
-                    path=compiler.get_path(), version=compiler_ver.split()[-1]))
-            else:
-                mlog.log(' {}:'.format(compiler_name.lower()), mlog.red('NO'))
         self.tools_detected = True
+        mlog.log('Detecting Qt{version} tools'.format(version=self.qt_version))
+        kwargs = {'required': required, 'modules': 'Core', 'method': method}
+        qt = _QT_DEPS_LUT[self.qt_version](env, kwargs)
+        if qt.found():
+            # Get all tools and then make sure that they are the right version
+            self.moc, self.uic, self.rcc, self.lrelease = qt.compilers_detect(self.interpreter)
+            if version_compare(qt.version, '>=5.14.0'):
+                self.rcc_supports_depfiles = True
+            else:
+                mlog.warning('rcc dependencies will not work properly until you move to Qt >= 5.14:',
+                    mlog.bold('https://bugreports.qt.io/browse/QTBUG-45460'), fatal=False)
+        else:
+            suffix = '-qt{}'.format(self.qt_version)
+            self.moc = NonExistingExternalProgram(name='moc' + suffix)
+            self.uic = NonExistingExternalProgram(name='uic' + suffix)
+            self.rcc = NonExistingExternalProgram(name='rcc' + suffix)
+            self.lrelease = NonExistingExternalProgram(name='lrelease' + suffix)
 
-    def parse_qrc(self, state, rcc_file):
+    def qrc_nodes(self, state, rcc_file):
         if type(rcc_file) is str:
             abspath = os.path.join(state.environment.source_dir, state.subdir, rcc_file)
             rcc_dirname = os.path.dirname(abspath)
@@ -91,33 +77,40 @@ class QtBaseModule(ExtensionModule):
                     mlog.warning("malformed rcc file: ", os.path.join(state.subdir, rcc_file))
                     break
                 else:
-                    resource_path = child.text
-                    # We need to guess if the pointed resource is:
-                    #   a) in build directory -> implies a generated file
-                    #   b) in source directory
-                    #   c) somewhere else external dependency file to bundle
-                    #
-                    # Also from qrc documentation: relative path are always from qrc file
-                    # So relative path must always be computed from qrc file !
-                    if os.path.isabs(resource_path):
-                        # a)
-                        if resource_path.startswith(os.path.abspath(state.environment.build_dir)):
-                            resource_relpath = os.path.relpath(resource_path, state.environment.build_dir)
-                            result.append(File(is_built=True, subdir='', fname=resource_relpath))
-                        # either b) or c)
-                        else:
-                            result.append(File(is_built=False, subdir=state.subdir, fname=resource_path))
-                    else:
-                        path_from_rcc = os.path.normpath(os.path.join(rcc_dirname, resource_path))
-                        # a)
-                        if path_from_rcc.startswith(state.environment.build_dir):
-                            result.append(File(is_built=True, subdir=state.subdir, fname=resource_path))
-                        # b)
-                        else:
-                            result.append(File(is_built=False, subdir=state.subdir, fname=path_from_rcc))
-            return result
+                    result.append(child.text)
+
+            return rcc_dirname, result
         except Exception:
             return []
+
+    def parse_qrc_deps(self, state, rcc_file):
+        rcc_dirname, nodes = self.qrc_nodes(state, rcc_file)
+        result = []
+        for resource_path in nodes:
+            # We need to guess if the pointed resource is:
+            #   a) in build directory -> implies a generated file
+            #   b) in source directory
+            #   c) somewhere else external dependency file to bundle
+            #
+            # Also from qrc documentation: relative path are always from qrc file
+            # So relative path must always be computed from qrc file !
+            if os.path.isabs(resource_path):
+                # a)
+                if resource_path.startswith(os.path.abspath(state.environment.build_dir)):
+                    resource_relpath = os.path.relpath(resource_path, state.environment.build_dir)
+                    result.append(File(is_built=True, subdir='', fname=resource_relpath))
+                # either b) or c)
+                else:
+                    result.append(File(is_built=False, subdir=state.subdir, fname=resource_path))
+            else:
+                path_from_rcc = os.path.normpath(os.path.join(rcc_dirname, resource_path))
+                # a)
+                if path_from_rcc.startswith(state.environment.build_dir):
+                    result.append(File(is_built=True, subdir=state.subdir, fname=resource_path))
+                # b)
+                else:
+                    result.append(File(is_built=False, subdir=state.subdir, fname=path_from_rcc))
+        return result
 
     @noPosargs
     @permittedKwargs({'method', 'required'})
@@ -128,7 +121,7 @@ class QtBaseModule(ExtensionModule):
         if disabled:
             mlog.log('qt.has_tools skipped: feature', mlog.bold(feature), 'disabled')
             return False
-        self._detect_tools(state.environment, method)
+        self._detect_tools(state.environment, method, required=False)
         for tool in (self.moc, self.uic, self.rcc, self.lrelease):
             if not tool.found():
                 if required:
@@ -157,7 +150,7 @@ class QtBaseModule(ExtensionModule):
             if args:
                 qrc_deps = []
                 for i in rcc_files:
-                    qrc_deps += self.parse_qrc(state, i)
+                    qrc_deps += self.parse_qrc_deps(state, i)
                 name = args[0]
                 rcc_kwargs = {'input': rcc_files,
                               'output': name + '.cpp',
@@ -167,7 +160,7 @@ class QtBaseModule(ExtensionModule):
                 sources.append(res_target)
             else:
                 for rcc_file in rcc_files:
-                    qrc_deps = self.parse_qrc(state, rcc_file)
+                    qrc_deps = self.parse_qrc_deps(state, rcc_file)
                     if type(rcc_file) is str:
                         basename = os.path.basename(rcc_file)
                     elif type(rcc_file) is File:
@@ -177,6 +170,9 @@ class QtBaseModule(ExtensionModule):
                                   'output': name + '.cpp',
                                   'command': [self.rcc, '-name', '@BASENAME@', '-o', '@OUTPUT@', rcc_extra_arguments, '@INPUT@'],
                                   'depend_files': qrc_deps}
+                    if self.rcc_supports_depfiles:
+                        rcc_kwargs['depfile'] = name + '.d'
+                        rcc_kwargs['command'] += ['--depfile', '@DEPFILE@']
                     res_target = build.CustomTarget(name, state.subdir, state.subproject, rcc_kwargs)
                     sources.append(res_target)
         if ui_files:
@@ -217,15 +213,42 @@ class QtBaseModule(ExtensionModule):
         return ModuleReturnValue(sources, sources)
 
     @FeatureNew('qt.compile_translations', '0.44.0')
-    @permittedKwargs({'ts_files', 'install', 'install_dir', 'build_by_default', 'method'})
+    @FeatureNewKwargs('qt.compile_translations', '0.56.0', ['qresource'])
+    @FeatureNewKwargs('qt.compile_translations', '0.56.0', ['rcc_extra_arguments'])
+    @permittedKwargs({'ts_files', 'qresource', 'rcc_extra_arguments', 'install', 'install_dir', 'build_by_default', 'method'})
     def compile_translations(self, state, args, kwargs):
-        ts_files, install_dir = [extract_as_list(kwargs, c, pop=True) for c in  ['ts_files', 'install_dir']]
+        ts_files, install_dir = [extract_as_list(kwargs, c, pop=True) for c in ['ts_files', 'install_dir']]
+        qresource = kwargs.get('qresource')
+        if qresource:
+            if ts_files:
+                raise MesonException('qt.compile_translations: Cannot specify both ts_files and qresource')
+            if os.path.dirname(qresource) != '':
+                raise MesonException('qt.compile_translations: qresource file name must not contain a subdirectory.')
+            qresource = File.from_built_file(state.subdir, qresource)
+            infile_abs = os.path.join(state.environment.source_dir, qresource.relative_name())
+            outfile_abs = os.path.join(state.environment.build_dir, qresource.relative_name())
+            os.makedirs(os.path.dirname(outfile_abs), exist_ok=True)
+            shutil.copy2(infile_abs, outfile_abs)
+            self.interpreter.add_build_def_file(infile_abs)
+
+            rcc_file, nodes = self.qrc_nodes(state, qresource)
+            for c in nodes:
+                if c.endswith('.qm'):
+                    ts_files.append(c.rstrip('.qm')+'.ts')
+                else:
+                    raise MesonException('qt.compile_translations: qresource can only contain qm files, found {}'.format(c))
+            results = self.preprocess(state, [], {'qresources': qresource, 'rcc_extra_arguments': kwargs.get('rcc_extra_arguments', [])})
         self._detect_tools(state.environment, kwargs.get('method', 'auto'))
         translations = []
         for ts in ts_files:
             if not self.lrelease.found():
                 raise MesonException('qt.compile_translations: ' +
                                      self.lrelease.name + ' not found')
+            if qresource:
+                outdir = os.path.dirname(os.path.normpath(os.path.join(state.subdir, ts)))
+                ts = os.path.basename(ts)
+            else:
+                outdir = state.subdir
             cmd = [self.lrelease, '@INPUT@', '-qm', '@OUTPUT@']
             lrelease_kwargs = {'output': '@BASENAME@.qm',
                                'input': ts,
@@ -234,6 +257,9 @@ class QtBaseModule(ExtensionModule):
                                'command': cmd}
             if install_dir is not None:
                 lrelease_kwargs['install_dir'] = install_dir
-            lrelease_target = build.CustomTarget('qt{}-compile-{}'.format(self.qt_version, ts), state.subdir, state.subproject, lrelease_kwargs)
+            lrelease_target = build.CustomTarget('qt{}-compile-{}'.format(self.qt_version, ts), outdir, state.subproject, lrelease_kwargs)
             translations.append(lrelease_target)
-        return ModuleReturnValue(translations, translations)
+        if qresource:
+            return ModuleReturnValue(results.return_value[0], [results.new_objects, translations])
+        else:
+            return ModuleReturnValue(translations, translations)

@@ -7,6 +7,9 @@ set (CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 add_definitions("-DDO_NOTHING_JUST_A_FLAG=1")
 
+add_executable(genMain genMain.cpp)
+add_custom_command(OUTPUT main.cpp COMMAND genMain > main.cpp)
+
 add_executable(gen main.cpp)
 add_executable(mycpy cp.cpp)
 
@@ -16,9 +19,15 @@ add_custom_command(
   COMMAND gen ARGS genTest
 )
 
+set(CMD_PART)
+list(APPEND CMD_PART COMMAND mycpy cpyBase.cpp.in     cpyBase.cpp.in.gen)
+list(APPEND CMD_PART COMMAND mycpy cpyBase.cpp.in.gen cpyBase.cpp.out)
+list(APPEND CMD_PART COMMAND mycpy cpyBase.cpp.out    cpyBase.cpp.something)
+
 add_custom_command(
   OUTPUT cpyBase.cpp
   COMMAND mycpy "${CMAKE_CURRENT_SOURCE_DIR}/cpyBase.cpp.am" cpyBase.cpp.in
+  ${CMD_PART}
   COMMAND mycpy cpyBase.cpp.in                               cpyBase.cpp.something
   COMMAND mycpy cpyBase.cpp.something                        cpyBase.cpp.IAmRunningOutOfIdeas
   COMMAND mycpy cpyBase.cpp.IAmRunningOutOfIdeas             cpyBase.cpp
@@ -111,7 +120,14 @@ add_custom_command(
 
 add_subdirectory(cpyTest ccppyyTTeesstt)
 
-add_library(cmModLib SHARED cmMod.cpp genTest.cpp cpyBase.cpp cpyBase.hpp cpyNext.cpp cpyNext.hpp cpyTest.cpp cpyTest.hpp cpyTest2.hpp cpyTest3.hpp)
+add_custom_command(
+  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cpyTest/some/directory/cpyTest5.hpp"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/cpyTest/cpyTest5.hpp" "${CMAKE_CURRENT_BINARY_DIR}/cpyTest/some/directory/cpyTest5.hpp"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cpyTest/cpyTest5.hpp"
+)
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/cpyTest/some")
+
+add_library(cmModLib SHARED cmMod.cpp genTest.cpp cpyBase.cpp cpyBase.hpp cpyNext.cpp cpyNext.hpp cpyTest.cpp cpyTest.hpp cpyTest2.hpp cpyTest3.hpp cpyTest/some/directory/cpyTest5.hpp)
 include(GenerateExportHeader)
 generate_export_header(cmModLib)
 
@@ -124,6 +140,16 @@ add_custom_target(args_test_cmd
   COMMAND args_test ${ARGS_TEST}
 )
 add_custom_target(macro_name_cmd COMMAND macro_name)
+
+if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+  message(STATUS "Running the -include test case on macro_name")
+  add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cpyInc.hpp"
+    COMMAND mycpy "${CMAKE_CURRENT_SOURCE_DIR}/cpyInc.hpp.am" "${CMAKE_CURRENT_BINARY_DIR}/cpyInc.hpp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cpyInc.hpp.am"
+  )
+  target_compile_options(macro_name PUBLIC -DTEST_CMD_INCLUDE -include "${CMAKE_CURRENT_BINARY_DIR}/cpyInc.hpp")
+endif()
 
 # Only executable targets are replaced in the command
 # all other target names are kept as is

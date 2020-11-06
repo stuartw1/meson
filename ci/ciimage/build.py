@@ -71,6 +71,9 @@ class Builder(BuilderBase):
         for key, val in self.image_def.env.items():
             out_data += f'export {key}="{val}"\n'
 
+        # Also add /ci to PATH
+        out_data += 'export PATH="/ci:$PATH"\n'
+
         out_file.write_text(out_data)
 
         # make it executable
@@ -113,7 +116,7 @@ class Builder(BuilderBase):
             self.temp_dir.as_posix(),
         ]
         if subprocess.run(cmd).returncode != 0:
-            raise RuntimeError('Failde to build the docker image')
+            raise RuntimeError('Failed to build the docker image')
 
 class ImageTester(BuilderBase):
     def __init__(self, data_dir: Path, temp_dir: Path, ci_root: Path) -> None:
@@ -137,12 +140,13 @@ class ImageTester(BuilderBase):
             ignore=shutil.ignore_patterns(
                 '.git',
                 '*_cache',
-                'work area',
+                '__pycache__',
+                # 'work area',
                 self.temp_dir.name,
             )
         )
 
-    def do_test(self):
+    def do_test(self, tty: bool = False) -> None:
         self.copy_meson()
         self.gen_dockerfile()
 
@@ -153,13 +157,28 @@ class ImageTester(BuilderBase):
                 self.temp_dir.as_posix(),
             ]
             if subprocess.run(build_cmd).returncode != 0:
-                raise RuntimeError('Failde to build the test docker image')
+                raise RuntimeError('Failed to build the test docker image')
 
-            test_cmd = [
-                self.docker, 'run', '--rm', '-t', 'meson_test_image',
-                '/usr/bin/bash', '-c', 'source /ci/env_vars.sh; cd meson; ./run_tests.py $CI_ARGS'
-            ]
-            if subprocess.run(test_cmd).returncode != 0:
+            test_cmd = []
+            if tty:
+                test_cmd = [
+                    self.docker, 'run', '--rm', '-t', '-i', 'meson_test_image',
+                    '/bin/bash', '-c', ''
+                    + 'cd meson;'
+                    + 'source /ci/env_vars.sh;'
+                    + f'echo -e "\\n\\nInteractive test shell in the {image_namespace}/{self.data_dir.name} container with the current meson tree";'
+                    + 'echo -e "The file ci/ciimage/user.sh will be sourced if it exists to enable user specific configurations";'
+                    + 'echo -e "Run the following command to run all CI tests: ./run_tests.py $CI_ARGS\\n\\n";'
+                    + '[ -f ci/ciimage/user.sh ] && exec /bin/bash --init-file ci/ciimage/user.sh;'
+                    + 'exec /bin/bash;'
+                ]
+            else:
+                test_cmd = [
+                    self.docker, 'run', '--rm', '-t', 'meson_test_image',
+                    '/bin/bash', '-c', 'source /ci/env_vars.sh; cd meson; ./run_tests.py $CI_ARGS'
+                ]
+
+            if subprocess.run(test_cmd).returncode != 0 and not tty:
                 raise RuntimeError('Running tests failed')
         finally:
             cleanup_cmd = [self.docker, 'rmi', '-f', 'meson_test_image']
@@ -168,7 +187,7 @@ class ImageTester(BuilderBase):
 def main() -> None:
     parser = argparse.ArgumentParser(description='Meson CI image builder')
     parser.add_argument('what', type=str, help='Which image to build / test')
-    parser.add_argument('-t', '--type', choices=['build', 'test'], help='What to do', required=True)
+    parser.add_argument('-t', '--type', choices=['build', 'test', 'testTTY'], help='What to do', required=True)
 
     args = parser.parse_args()
 
@@ -185,6 +204,9 @@ def main() -> None:
         elif args.type == 'test':
             tester = ImageTester(ci_data, ci_build, ci_root)
             tester.do_test()
+        elif args.type == 'testTTY':
+            tester = ImageTester(ci_data, ci_build, ci_root)
+            tester.do_test(tty=True)
 
 if __name__ == '__main__':
     main()

@@ -281,7 +281,13 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
 
     def _set_new_link_args(self, environment):
         """How to set linker args for LLVM versions >= 3.9"""
-        mode = self.get_config_value(['--shared-mode'], 'link_args')[0]
+        try:
+            mode = self.get_config_value(['--shared-mode'], 'link_args')[0]
+        except IndexError:
+            mlog.debug('llvm-config --shared-mode returned an error')
+            self.is_found = False
+            return
+
         if not self.static and mode == 'static':
             # If llvm is configured with LLVM_BUILD_LLVM_DYLIB but not with
             # LLVM_LINK_LLVM_DYLIB and not LLVM_BUILD_SHARED_LIBS (which
@@ -397,6 +403,7 @@ class LLVMDependencyCMake(CMakeDependency):
         # cmake if dynamic is required
         if not self.static:
             self.is_found = False
+            mlog.warning('Ignoring LLVM CMake dependency because dynamic was requested')
             return
 
         if self.traceparser is None:
@@ -405,6 +412,9 @@ class LLVMDependencyCMake(CMakeDependency):
         # Extract extra include directories and definitions
         inc_dirs = self.traceparser.get_cmake_var('PACKAGE_INCLUDE_DIRS')
         defs = self.traceparser.get_cmake_var('PACKAGE_DEFINITIONS')
+        # LLVM explicitly uses space-separated variables rather than semicolon lists
+        if len(defs) == 1:
+            defs = defs[0].split(' ')
         temp = ['-I' + x for x in inc_dirs] + defs
         self.compile_args += [x for x in temp if x not in self.compile_args]
         if not self._add_sub_dependency(threads_factory(env, self.for_machine, {})):
@@ -476,7 +486,7 @@ class ZlibSystemDependency(ExternalDependency):
             for lib in libs:
                 l = self.clib_compiler.find_library(lib, environment, [])
                 h = self.clib_compiler.has_header('zlib.h', '', environment, dependencies=[self])
-                if l and h:
+                if l and h[0]:
                     self.is_found = True
                     self.link_args = l
                     break

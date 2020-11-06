@@ -5,6 +5,7 @@ index.md
 	Manual.md
 		Overview.md
 		Running-Meson.md
+		Commands.md
 		Builtin-options.md
 		Using-with-Visual-Studio.md
 		Meson-sample.md
@@ -48,7 +49,8 @@ index.md
 			SourceSet-module.md
 			Windows-module.md
 			Cuda-module.md
-			Kconfig-module.md
+			Keyval-module.md
+			External-Project-module.md
 		Java.md
 		Vala.md
 		D.md
@@ -77,6 +79,8 @@ index.md
 		Shipping-prebuilt-binaries-as-wraps.md
 		fallback-wraptool.md
 	Release-notes.md
+		Release-notes-for-0.56.0.md
+		Release-notes-for-0.55.0.md
 		Release-notes-for-0.54.0.md
 		Release-notes-for-0.53.0.md
 		Release-notes-for-0.52.0.md
@@ -116,5 +120,6 @@ index.md
 		Using-multiple-build-directories.md
 		Vs-External.md
 	Contributing.md
+		MesonCI.md
 	legal.md
 	Videos.md

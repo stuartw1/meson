@@ -16,8 +16,9 @@ import sys, os
 import subprocess
 import shutil
 import argparse
-from ..mesonlib import MesonException, Popen_safe, is_windows, split_args
+from ..mesonlib import MesonException, Popen_safe, is_windows, is_cygwin, split_args
 from . import destdir_join
+import typing as T
 
 parser = argparse.ArgumentParser()
 
@@ -50,12 +51,12 @@ for tool in ['scan', 'scangobj', 'mkdb', 'mkhtml', 'fixxref']:
     program_name = 'gtkdoc-' + tool
     parser.add_argument('--' + program_name, dest=program_name.replace('-', '_'))
 
-def gtkdoc_run_check(cmd, cwd, library_paths=None):
+def gtkdoc_run_check(cmd: T.List[str], cwd: str, library_paths: T.Optional[T.List[str]] = None) -> None:
     if library_paths is None:
         library_paths = []
 
     env = dict(os.environ)
-    if is_windows():
+    if is_windows() or is_cygwin():
         if 'PATH' in env:
             library_paths.extend(env['PATH'].split(os.pathsep))
         env['PATH'] = os.pathsep.join(library_paths)
@@ -63,6 +64,9 @@ def gtkdoc_run_check(cmd, cwd, library_paths=None):
         if 'LD_LIBRARY_PATH' in env:
             library_paths.extend(env['LD_LIBRARY_PATH'].split(os.pathsep))
         env['LD_LIBRARY_PATH'] = os.pathsep.join(library_paths)
+
+    if is_windows():
+        cmd.insert(0, sys.executable)
 
     # Put stderr into stdout since we want to print it out anyway.
     # This preserves the order of messages.
@@ -73,14 +77,21 @@ def gtkdoc_run_check(cmd, cwd, library_paths=None):
             err_msg.append(out)
         raise MesonException('\n'.join(err_msg))
     elif out:
-        print(out)
+        # Unfortunately Windows cmd.exe consoles may be using a codepage
+        # that might choke print() with a UnicodeEncodeError, so let's
+        # ignore such errors for now, as a compromise as we are outputting
+        # console output here...
+        try:
+            print(out)
+        except UnicodeEncodeError:
+            pass
 
-def build_gtkdoc(source_root, build_root, doc_subdir, src_subdirs,
-                 main_file, module, module_version,
-                 html_args, scan_args, fixxref_args, mkdb_args,
-                 gobject_typesfile, scanobjs_args, run, ld, cc, ldflags, cflags,
-                 html_assets, content_files, ignore_headers, namespace,
-                 expand_content_files, mode, options):
+def build_gtkdoc(source_root: str, build_root: str, doc_subdir: str, src_subdirs: T.List[str],
+                 main_file: str, module: str, module_version: str,
+                 html_args: T.List[str], scan_args: T.List[str], fixxref_args: T.List[str], mkdb_args: T.List[str],
+                 gobject_typesfile: str, scanobjs_args: T.List[str], run: str, ld: str, cc: str, ldflags: str, cflags: str,
+                 html_assets: T.List[str], content_files: T.List[str], ignore_headers: T.List[str], namespace: str,
+                 expand_content_files: T.List[str], mode: str, options: argparse.Namespace) -> None:
     print("Building documentation for %s" % module)
 
     src_dir_args = []
@@ -207,13 +218,13 @@ def build_gtkdoc(source_root, build_root, doc_subdir, src_subdirs,
         shutil.move(os.path.join(htmldir, '{}.devhelp2'.format(module)),
                     os.path.join(htmldir, '{}-{}.devhelp2'.format(module, module_version)))
 
-def install_gtkdoc(build_root, doc_subdir, install_prefix, datadir, module):
+def install_gtkdoc(build_root: str, doc_subdir: str, install_prefix: str, datadir: str, module: str) -> None:
     source = os.path.join(build_root, doc_subdir, 'html')
     final_destination = os.path.join(install_prefix, datadir, module)
     shutil.rmtree(final_destination, ignore_errors=True)
     shutil.copytree(source, final_destination)
 
-def run(args):
+def run(args: T.List[str]) -> int:
     options = parser.parse_args(args)
     if options.htmlargs:
         htmlargs = options.htmlargs.split('@@')

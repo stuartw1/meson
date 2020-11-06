@@ -16,12 +16,13 @@ import re
 import functools
 import typing as T
 
-from . import mparser
+from . import compilers
 from . import coredata
 from . import mesonlib
-from . import compilers
+from . import mparser
+from .interpreterbase import FeatureNew
 
-forbidden_option_names = set(coredata.builtin_options.keys())
+forbidden_option_names = set(coredata.BUILTIN_OPTIONS.keys())
 forbidden_prefixes = [lang + '_' for lang in compilers.all_languages] + ['b_', 'backend_']
 reserved_prefixes = ['cross_']
 
@@ -61,7 +62,6 @@ optname_regex = re.compile('[^a-zA-Z0-9_-]')
 def StringParser(description, kwargs):
     return coredata.UserStringOption(description,
                                      kwargs.get('value', ''),
-                                     kwargs.get('choices', []),
                                      kwargs.get('yield', coredata.default_yielding))
 
 @permitted_kwargs({'value', 'yield'})
@@ -133,11 +133,11 @@ option_types = {'string': StringParser,
                 } # type: T.Dict[str, T.Callable[[str, T.Dict], coredata.UserOption]]
 
 class OptionInterpreter:
-    def __init__(self, subproject):
+    def __init__(self, subproject: str) -> None:
         self.options = {}
         self.subproject = subproject
 
-    def process(self, option_file):
+    def process(self, option_file: str) -> None:
         try:
             with open(option_file, 'r', encoding='utf8') as f:
                 ast = mparser.Parser(f.read(), option_file).parse()
@@ -158,7 +158,7 @@ class OptionInterpreter:
                 e.file = option_file
                 raise e
 
-    def reduce_single(self, arg):
+    def reduce_single(self, arg: T.Union[str, mparser.BaseNode]) -> T.Union[str, int, bool]:
         if isinstance(arg, str):
             return arg
         elif isinstance(arg, (mparser.StringNode, mparser.BooleanNode,
@@ -166,10 +166,29 @@ class OptionInterpreter:
             return arg.value
         elif isinstance(arg, mparser.ArrayNode):
             return [self.reduce_single(curarg) for curarg in arg.args.arguments]
+        elif isinstance(arg, mparser.UMinusNode):
+            res = self.reduce_single(arg.value)
+            if not isinstance(res, (int, float)):
+                raise OptionException('Token after "-" is not a number')
+            FeatureNew.single_use('negative numbers in meson_options.txt', '0.54.1', self.subproject)
+            return -res
+        elif isinstance(arg, mparser.NotNode):
+            res = self.reduce_single(arg.value)
+            if not isinstance(res, bool):
+                raise OptionException('Token after "not" is not a a boolean')
+            FeatureNew.single_use('negation ("not") in meson_options.txt', '0.54.1', self.subproject)
+            return not res
+        elif isinstance(arg, mparser.ArithmeticNode):
+            l = self.reduce_single(arg.left)
+            r = self.reduce_single(arg.right)
+            if not (arg.operation == 'add' and isinstance(l, str) and isinstance(r, str)):
+                raise OptionException('Only string concatenation with the "+" operator is allowed')
+            FeatureNew.single_use('string concatenation in meson_options.txt', '0.55.0', self.subproject)
+            return l + r
         else:
             raise OptionException('Arguments may only be string, int, bool, or array of those.')
 
-    def reduce_arguments(self, args):
+    def reduce_arguments(self, args: mparser.ArgumentNode) -> T.Tuple[T.List[T.Union[str, int, bool]], T.Dict[str, T.Union[str, int, bool]]]:
         assert(isinstance(args, mparser.ArgumentNode))
         if args.incorrect_order():
             raise OptionException('All keyword arguments must be after positional arguments.')
@@ -182,7 +201,7 @@ class OptionInterpreter:
             reduced_kw[key.value] = self.reduce_single(a)
         return reduced_pos, reduced_kw
 
-    def evaluate_statement(self, node):
+    def evaluate_statement(self, node: mparser.BaseNode) -> None:
         if not isinstance(node, mparser.FunctionNode):
             raise OptionException('Option file may only contain option definitions')
         func_name = node.func_name
@@ -190,11 +209,8 @@ class OptionInterpreter:
             raise OptionException('Only calls to option() are allowed in option files.')
         (posargs, kwargs) = self.reduce_arguments(node.args)
 
-        # FIXME: Cannot use FeatureNew while parsing options because we parse
-        # it before reading options in project(). See func_project() in
-        # interpreter.py
-        #if 'yield' in kwargs:
-        #    FeatureNew('option yield', '0.45.0').use(self.subproject)
+        if 'yield' in kwargs:
+            FeatureNew.single_use('option yield', '0.45.0', self.subproject)
 
         if 'type' not in kwargs:
             raise OptionException('Option call missing mandatory "type" keyword argument')

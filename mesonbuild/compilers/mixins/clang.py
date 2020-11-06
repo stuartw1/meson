@@ -20,6 +20,7 @@ import typing as T
 
 from ... import mesonlib
 from ...linkers import AppleDynamicLinker
+from ..compilers import CompileCheckMode
 from .gnu import GnuLikeCompiler
 
 if T.TYPE_CHECKING:
@@ -42,9 +43,11 @@ clang_optimization_args = {
 }  # type: T.Dict[str, T.List[str]]
 
 class ClangCompiler(GnuLikeCompiler):
-    def __init__(self):
+
+    def __init__(self, defines: T.Optional[T.Dict[str, str]]):
         super().__init__()
         self.id = 'clang'
+        self.defines = defines or {}
         self.base_options.append('b_colorout')
         # TODO: this really should be part of the linker base_options, but
         # linkers don't have base_options.
@@ -55,6 +58,12 @@ class ClangCompiler(GnuLikeCompiler):
 
     def get_colorout_args(self, colortype: str) -> T.List[str]:
         return clang_color_args[colortype][:]
+
+    def has_builtin_define(self, define: str) -> bool:
+        return define in self.defines
+
+    def get_builtin_define(self, define: str) -> T.Optional[str]:
+        return self.defines.get(define)
 
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         return clang_optimization_args[optimization_level]
@@ -68,17 +77,17 @@ class ClangCompiler(GnuLikeCompiler):
         # so it might change semantics at any time.
         return ['-include-pch', os.path.join(pch_dir, self.get_pch_name(header))]
 
-    def has_multi_arguments(self, args: T.List[str], env: 'Environment') -> T.List[str]:
-        myargs = ['-Werror=unknown-warning-option', '-Werror=unused-command-line-argument']
-        if mesonlib.version_compare(self.version, '>=3.6.0'):
-            myargs.append('-Werror=ignored-optimization-argument')
-        return super().has_multi_arguments(
-            myargs + args,
-            env)
+    def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
+        myargs = []  # type: T.List[str]
+        if mode is CompileCheckMode.COMPILE:
+            myargs.extend(['-Werror=unknown-warning-option', '-Werror=unused-command-line-argument'])
+            if mesonlib.version_compare(self.version, '>=3.6.0'):
+                myargs.append('-Werror=ignored-optimization-argument')
+        return super().get_compiler_check_args(mode) + myargs
 
     def has_function(self, funcname: str, prefix: str, env: 'Environment', *,
                      extra_args: T.Optional[T.List[str]] = None,
-                     dependencies: T.Optional[T.List['Dependency']] = None) -> bool:
+                     dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         if extra_args is None:
             extra_args = []
         # Starting with XCode 8, we need to pass this to force linker
@@ -89,7 +98,7 @@ class ClangCompiler(GnuLikeCompiler):
         if isinstance(self.linker, AppleDynamicLinker) and mesonlib.version_compare(self.version, '>=8.0'):
             extra_args.append('-Wl,-no_weak_imports')
         return super().has_function(funcname, prefix, env, extra_args=extra_args,
-                                    dependencies=dependencies)
+                                   dependencies=dependencies)
 
     def openmp_flags(self) -> T.List[str]:
         if mesonlib.version_compare(self.version, '>=3.8.0'):
@@ -106,9 +115,22 @@ class ClangCompiler(GnuLikeCompiler):
         # (and other gcc-like compilers) cannot. This is becuse clang (being
         # llvm based) is retargetable, while GCC is not.
         #
+
+        # qcld: Qualcomm Snapdragon linker, based on LLVM
+        if linker == 'qcld':
+            return  ['-fuse-ld=qcld']
+
         if shutil.which(linker):
             if not shutil.which(linker):
                 raise mesonlib.MesonException(
                     'Cannot find linker {}.'.format(linker))
             return ['-fuse-ld={}'.format(linker)]
         return super().use_linker_args(linker)
+
+    def get_has_func_attribute_extra_args(self, name: str) -> T.List[str]:
+        # Clang only warns about unknown or ignored attributes, so force an
+        # error.
+        return ['-Werror=attributes']
+
+    def get_coverage_link_args(self) -> T.List[str]:
+        return ['--coverage']
