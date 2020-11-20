@@ -308,6 +308,7 @@ class ConfigurationDataHolder(MutableInterpreterObject, ObjectHolder):
                              'set_quoted': self.set_quoted_method,
                              'has': self.has_method,
                              'get': self.get_method,
+                             'keys': self.keys_method,
                              'get_unquoted': self.get_unquoted_method,
                              'merge_from': self.merge_from_method,
                              })
@@ -400,6 +401,10 @@ class ConfigurationDataHolder(MutableInterpreterObject, ObjectHolder):
 
     def get(self, name):
         return self.held_object.values[name] # (val, desc)
+
+    @FeatureNew('configuration_data.keys()', '0.57.0')
+    def keys_method(self, args, kwargs):
+        return sorted(self.keys())
 
     def keys(self):
         return self.held_object.values.keys()
@@ -1938,7 +1943,6 @@ class MesonMain(InterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
-                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'get_external_property': self.get_external_property_method,
                              'backend': self.backend_method,
@@ -2218,43 +2222,6 @@ class MesonMain(InterpreterObject):
     @permittedKwargs({})
     def project_name_method(self, args, kwargs):
         return self.interpreter.active_projectname
-
-    @noArgsFlattening
-    @permittedKwargs({})
-    def get_cross_binary_method(self, args, kwargs) -> str:
-        if len(args) < 1 or len(args) > 2:
-            raise InterpreterException('Must have one or two arguments.')
-        binname = args[0]
-        if not isinstance(binname, str):
-            raise InterpreterException('Binary name must be string.')
-        if self.build.environment.is_cross_build():
-            result = self.interpreter.environment.binaries.host.binaries.get(binname, None)
-            if result is None:
-                if len(args) == 2:
-                    return args[1]
-                raise InterpreterException('Unknown cross binary: %s.' % binname)
-            return result
-        else:
-            if binname == 'ar':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    return static_linker.build.get_exelist()[0]
-            elif binname in ('libtool', 'nm', 'objdump', 'otool', 'install_name_tool'):
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    ar_binary = static_linker.build.get_exelist()[0]
-                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
-                        return os.path.join(os.path.dirname(ar_binary), binname)
-                    elif os.path.basename(ar_binary).startswith('frida'):
-                        return subprocess.check_output(['xcrun', '-f', binname], encoding='utf-8').rstrip()
-            elif binname == 'strip':
-                strip_bin = self.build.environment.lookup_binary_entry(MachineChoice.BUILD, 'strip')
-                if strip_bin is None:
-                    strip_bin = [self.build.environment.default_strip[0]]
-                return strip_bin
-            if len(args) == 2:
-                return args[1]
-            raise InterpreterException('Unknown cross binary: %s.' % binname)
 
     @noArgsFlattening
     @permittedKwargs({})
@@ -3208,6 +3175,8 @@ external dependencies (including libraries) must go to "dependencies".''')
             self.build.project_name = proj_name
         self.active_projectname = proj_name
         self.project_version = kwargs.get('version', 'undefined')
+        if not isinstance(self.project_version, str):
+            raise InvalidCode('The version keyword argument must be a string.')
         if self.build.project_version is None:
             self.build.project_version = self.project_version
         proj_license = mesonlib.stringlistify(kwargs.get('license', 'unknown'))
@@ -4674,7 +4643,11 @@ different subdirectory.
         self.add_project_arguments(node, self.build.projects_link_args[for_machine], args, kwargs)
 
     def warn_about_builtin_args(self, args):
-        warnargs = ('/W1', '/W2', '/W3', '/W4', '/Wall', '-Wall', '-Wextra', '-Wpedantic')
+        # -Wpedantic is deliberately not included, since some people want to use it but not use -Wextra
+        # see e.g.
+        # https://github.com/mesonbuild/meson/issues/3275#issuecomment-641354956
+        # https://github.com/mesonbuild/meson/issues/3742
+        warnargs = ('/W1', '/W2', '/W3', '/W4', '/Wall', '-Wall', '-Wextra')
         optargs = ('-O0', '-O2', '-O3', '-Os', '/O1', '/O2', '/Os')
         for arg in args:
             if arg in warnargs:
@@ -4682,6 +4655,9 @@ different subdirectory.
                              location=self.current_node)
             elif arg in optargs:
                 mlog.warning('Consider using the built-in optimization level instead of using "{}".'.format(arg),
+                             location=self.current_node)
+            elif arg == '-Werror':
+                mlog.warning('Consider using the built-in werror option instead of using "{}".'.format(arg),
                              location=self.current_node)
             elif arg == '-g':
                 mlog.warning('Consider using the built-in debug option instead of using "{}".'.format(arg),

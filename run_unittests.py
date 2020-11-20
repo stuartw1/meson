@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from mesonbuild.compilers.objc import AppleClangObjCCompiler
 import time
 import stat
 import subprocess
@@ -885,11 +886,11 @@ class InternalTests(unittest.TestCase):
             def fake_call_pkgbin(self, args, env=None):
                 if '--libs' not in args:
                     return 0, '', ''
-                if args[0] == 'foo':
+                if args[-1] == 'foo':
                     return 0, '-L{} -lfoo -L{} -lbar'.format(p2.as_posix(), p1.as_posix()), ''
-                if args[0] == 'bar':
+                if args[-1] == 'bar':
                     return 0, '-L{} -lbar'.format(p2.as_posix()), ''
-                if args[0] == 'internal':
+                if args[-1] == 'internal':
                     return 0, '-L{} -lpthread -lm -lc -lrt -ldl'.format(p1.as_posix()), ''
 
             old_call = PkgConfigDependency._call_pkgbin
@@ -1186,7 +1187,7 @@ class InternalTests(unittest.TestCase):
         ]:
             d = mesonbuild.depfile.DepFile(f)
             deps = d.get_all_dependencies(target)
-            self.assertEqual(deps, expdeps)
+            self.assertEqual(sorted(deps), sorted(expdeps))
 
     def test_log_once(self):
         f = io.StringIO()
@@ -2942,20 +2943,22 @@ class AllPlatformTests(BasePlatformTests):
         # the source tree leads to all kinds of trouble.
         with tempfile.TemporaryDirectory() as project_dir:
             with open(os.path.join(project_dir, 'meson.build'), 'w') as ofile:
-                ofile.write('''project('disttest', 'c', version : '1.4.3')
-e = executable('distexe', 'distexe.c')
-test('dist test', e)
-subproject('vcssub', required : false)
-subproject('tarballsub', required : false)
-''')
+                ofile.write(textwrap.dedent('''\
+                    project('disttest', 'c', version : '1.4.3')
+                    e = executable('distexe', 'distexe.c')
+                    test('dist test', e)
+                    subproject('vcssub', required : false)
+                    subproject('tarballsub', required : false)
+                    '''))
             with open(os.path.join(project_dir, 'distexe.c'), 'w') as ofile:
-                ofile.write('''#include<stdio.h>
+                ofile.write(textwrap.dedent('''\
+                    #include<stdio.h>
 
-int main(int argc, char **argv) {
-    printf("I am a distribution test.\\n");
-    return 0;
-}
-''')
+                    int main(int argc, char **argv) {
+                        printf("I am a distribution test.\\n");
+                        return 0;
+                    }
+                    '''))
             xz_distfile = os.path.join(self.distdir, 'disttest-1.4.3.tar.xz')
             xz_checksumfile = xz_distfile + '.sha256sum'
             zip_distfile = os.path.join(self.distdir, 'disttest-1.4.3.zip')
@@ -3614,8 +3617,8 @@ int main(int argc, char **argv) {
         """
         tdir = os.path.join(self.unit_test_dir, '30 shared_mod linking')
         out = self.init(tdir)
-        msg = ('''WARNING: target links against shared modules. This is not
-recommended as it is not supported on some platforms''')
+        msg = ('WARNING: target links against shared modules. This is not '
+               'recommended as it is not supported on some platforms')
         self.assertIn(msg, out)
 
     def test_ndebug_if_release_disabled(self):
@@ -7264,16 +7267,18 @@ class LinuxlikeTests(BasePlatformTests):
         testdir = os.path.join(self.unit_test_dir, '61 identity cross')
 
         nativefile = tempfile.NamedTemporaryFile(mode='w')
-        nativefile.write('''[binaries]
-c = ['{0}']
-'''.format(os.path.join(testdir, 'build_wrapper.py')))
+        nativefile.write(textwrap.dedent('''\
+            [binaries]
+            c = ['{0}']
+            '''.format(os.path.join(testdir, 'build_wrapper.py'))))
         nativefile.flush()
         self.meson_native_file = nativefile.name
 
         crossfile = tempfile.NamedTemporaryFile(mode='w')
-        crossfile.write('''[binaries]
-c = ['{0}']
-'''.format(os.path.join(testdir, 'host_wrapper.py')))
+        crossfile.write(textwrap.dedent('''\
+            [binaries]
+            c = ['{0}']
+            '''.format(os.path.join(testdir, 'host_wrapper.py'))))
         crossfile.flush()
         self.meson_cross_file = crossfile.name
 
@@ -7286,9 +7291,10 @@ c = ['{0}']
             'CC_FOR_BUILD': '"' + os.path.join(testdir, 'build_wrapper.py') + '"',
         }
         crossfile = tempfile.NamedTemporaryFile(mode='w')
-        crossfile.write('''[binaries]
-c = ['{0}']
-'''.format(os.path.join(testdir, 'host_wrapper.py')))
+        crossfile.write(textwrap.dedent('''\
+            [binaries]
+            c = ['{0}']
+            '''.format(os.path.join(testdir, 'host_wrapper.py'))))
         crossfile.flush()
         self.meson_cross_file = crossfile.name
         # TODO should someday be explicit about build platform only here
@@ -7334,6 +7340,11 @@ c = ['{0}']
             with mock.patch.dict(os.environ, {envvar: name}):
                 env = get_fake_env()
                 comp = getattr(env, 'detect_{}_compiler'.format(lang))(MachineChoice.HOST)
+                if isinstance(comp, (mesonbuild.compilers.AppleClangCCompiler,
+                                     mesonbuild.compilers.AppleClangCPPCompiler,
+                                     mesonbuild.compilers.AppleClangObjCCompiler,
+                                     mesonbuild.compilers.AppleClangObjCPPCompiler)):
+                    raise unittest.SkipTest('AppleClang is currently only supported with ld64')
                 if lang != 'rust' and comp.use_linker_args('bfd') == []:
                     raise unittest.SkipTest(
                         'Compiler {} does not support using alternative linkers'.format(comp.id))
@@ -7349,8 +7360,9 @@ c = ['{0}']
         self._check_ld('ld.lld', 'lld', 'c', 'ld.lld')
 
     @skip_if_not_language('rust')
+    @skipIfNoExecutable('ld.gold')  # need an additional check here because _check_ld checks for gcc
     def test_ld_environment_variable_rust(self):
-        self._check_ld('ld.gold', 'gold', 'rust', 'ld.gold')
+        self._check_ld('gcc', 'gcc -fuse-ld=gold', 'rust', 'ld.gold')
 
     def test_ld_environment_variable_cpp(self):
         self._check_ld('ld.gold', 'gold', 'cpp', 'ld.gold')

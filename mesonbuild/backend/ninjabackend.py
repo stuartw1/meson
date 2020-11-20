@@ -266,7 +266,7 @@ class NinjaRule:
         # expand variables in command
         command = ' '.join([self._quoter(x) for x in self.command + self.args])
         estimate = len(command)
-        for m in re.finditer(r'(\${\w*}|\$\w*)?[^$]*', command):
+        for m in re.finditer(r'(\${\w+}|\$\w+)?[^$]*', command):
             if m.start(1) != -1:
                 estimate -= m.end(1) - m.start(1) + 1
                 chunk = m.group(1)
@@ -359,9 +359,9 @@ class NinjaBuildElement:
             rulename = self.rulename
         line = 'build {}{}: {} {}'.format(outs, implicit_outs, rulename, ins)
         if len(self.deps) > 0:
-            line += ' | ' + ' '.join([ninja_quote(x, True) for x in self.deps])
+            line += ' | ' + ' '.join([ninja_quote(x, True) for x in sorted(self.deps)])
         if len(self.orderdeps) > 0:
-            line += ' || ' + ' '.join([ninja_quote(x, True) for x in self.orderdeps])
+            line += ' || ' + ' '.join([ninja_quote(x, True) for x in sorted(self.orderdeps)])
         line += '\n'
         # This is the only way I could find to make this work on all
         # platforms including Windows command shell. Slash is a dir separator
@@ -1489,11 +1489,15 @@ int dummy;
         self.create_target_source_introspection(target, valac, args, all_files, [])
         return other_src[0], other_src[1], vala_c_src
 
-    def generate_rust_target(self, target):
+    def generate_rust_target(self, target: build.BuildTarget) -> None:
         rustc = target.compilers['rust']
         # Rust compiler takes only the main file as input and
         # figures out what other files are needed via import
         # statements and magic.
+        base_proxy = self.get_base_options_for_target(target)
+        args = rustc.compiler_args()
+        # Compiler args for compiling this target
+        args += compilers.get_base_compile_args(base_proxy, rustc)
         main_rust_file = None
         for i in target.get_sources():
             if not rustc.can_compile(i):
@@ -1503,7 +1507,6 @@ int dummy;
         if main_rust_file is None:
             raise RuntimeError('A Rust target has no Rust sources. This is weird. Also a bug. Please report')
         target_name = os.path.join(target.subdir, target.get_filename())
-        args = ['--crate-type']
         if isinstance(target, build.Executable):
             cratetype = 'bin'
         elif hasattr(target, 'rust_crate_type'):
@@ -1514,7 +1517,7 @@ int dummy;
             cratetype = 'rlib'
         else:
             raise InvalidArguments('Unknown target type for rustc.')
-        args.append(cratetype)
+        args.extend(['--crate-type', cratetype])
 
         # If we're dynamically linking, add those arguments
         #
@@ -1536,7 +1539,8 @@ int dummy;
         depfile = os.path.join(target.subdir, target.name + '.d')
         args += ['--emit', 'dep-info={}'.format(depfile), '--emit', 'link']
         args += target.get_extra_args('rust')
-        args += ['-o', os.path.join(target.subdir, target.get_filename())]
+        args += rustc.get_output_args(os.path.join(target.subdir, target.get_filename()))
+        args += self.environment.coredata.get_external_args(target.for_machine, rustc.language)
         orderdeps = [os.path.join(t.subdir, t.get_filename()) for t in target.link_targets]
         linkdirs = OrderedDict()
         for d in target.link_targets:
