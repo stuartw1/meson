@@ -27,7 +27,7 @@ from ..mesondata import mesondata
 from ..compilers.compilers import lang_suffixes, header_suffixes, obj_suffixes, lib_suffixes, is_header
 from enum import Enum
 from functools import lru_cache
-from .._pathlib import Path
+from pathlib import Path
 import typing as T
 import re
 from os import environ
@@ -502,6 +502,20 @@ class ConverterTarget:
         self.link_libraries = [x for x in self.link_libraries if x.lower() not in blacklist_link_libs]
         self.link_flags = [x for x in self.link_flags if check_flag(x)]
 
+        # Handle OSX frameworks
+        def handle_frameworks(flags: T.List[str]) -> T.List[str]:
+            res: T.List[str] = []
+            for i in flags:
+                p = Path(i)
+                if not p.exists() or not p.name.endswith('.framework'):
+                    res += [i]
+                    continue
+                res += ['-framework', p.stem]
+            return res
+
+        self.link_libraries = handle_frameworks(self.link_libraries)
+        self.link_flags     = handle_frameworks(self.link_flags)
+
         # Handle explicit CMake add_dependency() calls
         for i in self.depends_raw:
             dep_tgt = output_target_map.target(i)
@@ -850,6 +864,7 @@ class CMakeInterpreter:
 
     def configure(self, extra_cmake_options: T.List[str]) -> CMakeExecutor:
         # Find CMake
+        # TODO: Using MachineChoice.BUILD should always be correct here, but also evaluate the use of self.for_machine
         cmake_exe = CMakeExecutor(self.env, '>=3.7', MachineChoice.BUILD)
         if not cmake_exe.found():
             raise CMakeException('Unable to find CMake')

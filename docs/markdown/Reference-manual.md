@@ -1280,7 +1280,7 @@ them for the default behaviour for each platform.
 
 This function prints its argument to stdout.
 
-*(since 0.54.0)* Can take more more than one argument that will be separated by
+*(since 0.54.0)* Can take more than one argument that will be separated by
 space.
 
 ### warning()
@@ -1293,7 +1293,7 @@ space.
 
 This function prints its argument to stdout prefixed with WARNING:.
 
-*(since 0.54.0)* Can take more more than one argument that will be separated by
+*(since 0.54.0)* Can take more than one argument that will be separated by
 space.
 
 ### summary()
@@ -1573,6 +1573,10 @@ has one argument the others don't have:
    independent code (so it can be linked into a shared library). This
    option has no effect on Windows and OS X since it doesn't make
    sense on Windows and PIC cannot be disabled on OS X.
+
+- `prelink` *since0.57.0*: if `true` the object files in the target
+  will be prelinked, meaning that it will contain only one prelinked
+  object file rather than the individual object files.
 
 ### subdir()
 

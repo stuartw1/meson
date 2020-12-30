@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from mesonbuild.compilers.objc import AppleClangObjCCompiler
 import time
 import stat
 import subprocess
@@ -40,7 +39,7 @@ from unittest import mock
 from configparser import ConfigParser
 from contextlib import contextmanager
 from glob import glob
-from mesonbuild._pathlib import (PurePath, Path)
+from pathlib import (PurePath, Path)
 from distutils.dir_util import copy_tree
 import typing as T
 
@@ -79,6 +78,9 @@ from run_tests import (
     run_configure_inprocess, run_mtest_inprocess
 )
 
+if T.TYPE_CHECKING:
+    from mesonbuild.compilers import Compiler
+
 
 URLOPEN_TIMEOUT = 5
 
@@ -92,7 +94,7 @@ def chdir(path: str):
         os.chdir(curdir)
 
 
-def get_dynamic_section_entry(fname, entry):
+def get_dynamic_section_entry(fname: str, entry: str) -> T.Optional[str]:
     if is_cygwin() or is_osx():
         raise unittest.SkipTest('Test only applicable to ELF platforms')
 
@@ -106,14 +108,21 @@ def get_dynamic_section_entry(fname, entry):
     for line in raw_out.split('\n'):
         m = pattern.search(line)
         if m is not None:
-            return m.group(1)
+            return str(m.group(1))
     return None # The file did not contain the specified entry.
 
-def get_soname(fname):
+def get_soname(fname: str) -> T.Optional[str]:
     return get_dynamic_section_entry(fname, 'soname')
 
-def get_rpath(fname):
-    return get_dynamic_section_entry(fname, r'(?:rpath|runpath)')
+def get_rpath(fname: str) -> T.Optional[str]:
+    raw = get_dynamic_section_entry(fname, r'(?:rpath|runpath)')
+    # Get both '' and None here
+    if not raw:
+        return None
+    # nix/nixos adds a bunch of stuff to the rpath out of necessity that we
+    # don't check for, so clear those
+    final = ':'.join([e for e in raw.split(':') if not e.startswith('/nix')])
+    return final
 
 def is_tarball():
     if not os.path.isdir('docs'):
@@ -125,17 +134,16 @@ def is_ci():
         return True
     return False
 
-def is_pull():
-    # Travis
-    if os.environ.get('TRAVIS_PULL_REQUEST', 'false') != 'false':
-        return True
-    # Azure
-    if 'SYSTEM_PULLREQUEST_ISFORK' in os.environ:
-        return True
-    return False
-
 def _git_init(project_dir):
-    subprocess.check_call(['git', 'init'], cwd=project_dir, stdout=subprocess.DEVNULL)
+    # If a user has git configuration init.defaultBranch set we want to override that
+    with tempfile.TemporaryDirectory() as d:
+        out = git(['--version'], str(d))[1]
+    if version_compare(mesonbuild.environment.search_version(out), '>= 2.28'):
+        extra_cmd = ['--initial-branch', 'master']
+    else:
+        extra_cmd = []
+
+    subprocess.check_call(['git', 'init'] + extra_cmd, cwd=project_dir, stdout=subprocess.DEVNULL)
     subprocess.check_call(['git', 'config',
                            'user.name', 'Author Person'], cwd=project_dir)
     subprocess.check_call(['git', 'config',
@@ -1449,43 +1457,6 @@ class DataTests(unittest.TestCase):
             res = re.search(r'syn keyword mesonBuiltin(\s+\\\s\w+)+', f.read(), re.MULTILINE)
             defined = set([a.strip() for a in res.group().split('\\')][1:])
             self.assertEqual(defined, set(chain(interp.funcs.keys(), interp.builtin.keys())))
-
-    @unittest.skipIf(is_pull(), 'Skipping because this is a pull request')
-    def test_json_grammar_syntax_highlighting(self):
-        '''
-        Ensure that syntax highlighting JSON grammar written by TingPing was
-        updated for new functions in the global namespace in build files.
-        https://github.com/TingPing/language-meson/
-        '''
-        env = get_fake_env()
-        interp = Interpreter(FakeBuild(env), mock=True)
-        url = 'https://raw.githubusercontent.com/TingPing/language-meson/master/grammars/meson.json'
-        try:
-            # Use a timeout to avoid blocking forever in case the network is
-            # slow or unavailable in a weird way
-            r = urllib.request.urlopen(url, timeout=URLOPEN_TIMEOUT)
-        except urllib.error.URLError as e:
-            # Skip test when network is not available, such as during packaging
-            # by a distro or Flatpak
-            if not isinstance(e, urllib.error.HTTPError):
-                raise unittest.SkipTest('Network unavailable')
-            # Don't fail the test if github is down, but do fail if 4xx
-            if e.code >= 500:
-                raise unittest.SkipTest('Server error ' + str(e.code))
-            raise e
-        # On Python 3.5, we must decode bytes to string. Newer versions don't require that.
-        grammar = json.loads(r.read().decode('utf-8', 'surrogatepass'))
-        for each in grammar['patterns']:
-            if 'name' in each and each['name'] == 'support.function.builtin.meson':
-                # The string is of the form: (?x)\\b(func1|func2|...\n)\\b\\s*(?=\\() and
-                # we convert that to [func1, func2, ...] without using regex to parse regex
-                funcs = set(each['match'].split('\\b(')[1].split('\n')[0].split('|'))
-            if 'name' in each and each['name'] == 'support.variable.meson':
-                # \\b(builtin1|builtin2...)\\b
-                builtin = set(each['match'].split('\\b(')[1].split(')\\b')[0].split('|'))
-        self.assertEqual(builtin, set(interp.builtin.keys()))
-        self.assertEqual(funcs, set(interp.funcs.keys()))
-
     def test_all_functions_defined_in_ast_interpreter(self):
         '''
         Ensure that the all functions defined in the Interpreter are also defined
@@ -3498,53 +3469,15 @@ class AllPlatformTests(BasePlatformTests):
         ninja = detect_ninja()
         if ninja is None:
             raise unittest.SkipTest('This test currently requires ninja. Fix this once "meson build" works.')
+
         langs = ['c']
         env = get_fake_env()
-        try:
-            env.detect_cpp_compiler(MachineChoice.HOST)
-            langs.append('cpp')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_cs_compiler(MachineChoice.HOST)
-            langs.append('cs')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_d_compiler(MachineChoice.HOST)
-            langs.append('d')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_java_compiler(MachineChoice.HOST)
-            langs.append('java')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_cuda_compiler(MachineChoice.HOST)
-            langs.append('cuda')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_fortran_compiler(MachineChoice.HOST)
-            langs.append('fortran')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_objc_compiler(MachineChoice.HOST)
-            langs.append('objc')
-        except EnvironmentException:
-            pass
-        try:
-            env.detect_objcpp_compiler(MachineChoice.HOST)
-            langs.append('objcpp')
-        except EnvironmentException:
-            pass
-        # FIXME: omitting rust as Windows AppVeyor CI finds Rust but doesn't link correctly
-        if not is_windows():
+        for l in ['cpp', 'cs', 'd', 'java', 'cuda', 'fortran', 'objc', 'objcpp', 'rust']:
             try:
-                env.detect_rust_compiler(MachineChoice.HOST)
-                langs.append('rust')
+                comp = getattr(env, f'detect_{l}_compiler')(MachineChoice.HOST)
+                with tempfile.TemporaryDirectory() as d:
+                    comp.sanity_check(d, env)
+                langs.append(l)
             except EnvironmentException:
                 pass
 
@@ -3559,12 +3492,12 @@ class AllPlatformTests(BasePlatformTests):
                     self._run(ninja,
                               workdir=os.path.join(tmpdir, 'builddir'))
             # test directory with existing code file
-            if lang in ('c', 'cpp', 'd'):
+            if lang in {'c', 'cpp', 'd'}:
                 with tempfile.TemporaryDirectory() as tmpdir:
                     with open(os.path.join(tmpdir, 'foo.' + lang), 'w') as f:
                         f.write('int main(void) {}')
                     self._run(self.meson_command + ['init', '-b'], workdir=tmpdir)
-            elif lang in ('java'):
+            elif lang in {'java'}:
                 with tempfile.TemporaryDirectory() as tmpdir:
                     with open(os.path.join(tmpdir, 'Foo.' + lang), 'w') as f:
                         f.write('public class Foo { public static void main() {} }')
@@ -5888,6 +5821,16 @@ class WindowsTests(BasePlatformTests):
         self.init(testdir, extra_args=['-Db_vscrt=mtd'])
         sanitycheck_vscrt('/MTd')
 
+    def test_modules(self):
+        if self.backend is not Backend.ninja:
+            raise unittest.SkipTest('C++ modules only work with the Ninja backend (not {}).'.format(self.backend.name))
+        if 'VSCMD_VER' not in os.environ:
+            raise unittest.SkipTest('C++ modules is only supported with Visual Studio.')
+        if version_compare(os.environ['VSCMD_VER'], '<16.9.0'):
+            raise unittest.SkipTest('C++ modules are only supported with VS 2019 Preview or newer.')
+        self.init(os.path.join(self.unit_test_dir, '87 cpp modules'))
+        self.build()
+
 
 @unittest.skipUnless(is_osx(), "requires Darwin")
 class DarwinTests(BasePlatformTests):
@@ -6342,13 +6285,16 @@ class LinuxlikeTests(BasePlatformTests):
             Oargs = [arg for arg in cmd if arg.startswith('-O')]
             self.assertEqual(Oargs, [Oflag, '-O0'])
 
-    def _test_stds_impl(self, testdir, compiler, p: str):
+    def _test_stds_impl(self, testdir, compiler: 'Compiler', p: str) -> None:
         has_cpp17 = (compiler.get_id() not in {'clang', 'gcc'} or
                      compiler.get_id() == 'clang' and _clang_at_least(compiler, '>=5.0.0', '>=9.1') or
                      compiler.get_id() == 'gcc' and version_compare(compiler.version, '>=5.0.0'))
         has_cpp2a_c17 = (compiler.get_id() not in {'clang', 'gcc'} or
                          compiler.get_id() == 'clang' and _clang_at_least(compiler, '>=6.0.0', '>=10.0') or
                          compiler.get_id() == 'gcc' and version_compare(compiler.version, '>=8.0.0'))
+        has_cpp20 = (compiler.get_id() not in {'clang', 'gcc'} or
+                     compiler.get_id() == 'clang' and _clang_at_least(compiler, '>=10.0.0', None) or
+                     compiler.get_id() == 'gcc' and version_compare(compiler.version, '>=10.0.0'))
         has_c18 = (compiler.get_id() not in {'clang', 'gcc'} or
                    compiler.get_id() == 'clang' and _clang_at_least(compiler, '>=8.0.0', '>=11.0') or
                    compiler.get_id() == 'gcc' and version_compare(compiler.version, '>=8.0.0'))
@@ -6362,6 +6308,8 @@ class LinuxlikeTests(BasePlatformTests):
             if '++17' in v and not has_cpp17:
                 continue
             elif '++2a' in v and not has_cpp2a_c17:  # https://en.cppreference.com/w/cpp/compiler_support
+                continue
+            elif '++20' in v and not has_cpp20:
                 continue
             # now C
             elif '17' in v and not has_cpp2a_c17:
@@ -6832,13 +6780,16 @@ class LinuxlikeTests(BasePlatformTests):
         testdir = os.path.join(self.unit_test_dir, '11 cross prog')
         crossfile = tempfile.NamedTemporaryFile(mode='w')
         print(os.path.join(testdir, 'some_cross_tool.py'))
-        crossfile.write(textwrap.dedent('''\
+
+        tool_path = os.path.join(testdir, 'some_cross_tool.py')
+
+        crossfile.write(textwrap.dedent(f'''\
             [binaries]
-            c = '/usr/bin/{1}'
-            ar = '/usr/bin/ar'
-            strip = '/usr/bin/ar'
-            sometool.py = ['{0}']
-            someothertool.py = '{0}'
+            c = '{shutil.which('gcc' if is_sunos() else 'cc')}'
+            ar = '{shutil.which('ar')}'
+            strip = '{shutil.which('strip')}'
+            sometool.py = ['{tool_path}']
+            someothertool.py = '{tool_path}'
 
             [properties]
 
@@ -6847,8 +6798,7 @@ class LinuxlikeTests(BasePlatformTests):
             cpu_family = 'arm'
             cpu = 'armv7' # Not sure if correct.
             endian = 'little'
-            ''').format(os.path.join(testdir, 'some_cross_tool.py'),
-                        'gcc' if is_sunos() else 'cc'))
+            '''))
         crossfile.flush()
         self.meson_cross_file = crossfile.name
         self.init(testdir)
@@ -7456,6 +7406,32 @@ class LinuxlikeTests(BasePlatformTests):
             content = f.read()
             self.assertNotIn('-lfoo', content)
 
+    def test_prelinking(self):
+        # Prelinking currently only works on recently new GNU toolchains.
+        # Skip everything else. When support for other toolchains is added,
+        # remove limitations as necessary.
+        if is_osx():
+            raise unittest.SkipTest('Prelinking not supported on Darwin.')
+        if 'clang' in os.environ.get('CC', 'dummy'):
+            raise unittest.SkipTest('Prelinking not supported with Clang.')
+        gccver = subprocess.check_output(['cc', '--version'])
+        if b'7.5.0' in gccver:
+            raise unittest.SkipTest('GCC on Bionic is too old to be supported.')
+        testdir = os.path.join(self.unit_test_dir, '87 prelinking')
+        self.init(testdir)
+        self.build()
+        outlib = os.path.join(self.builddir, 'libprelinked.a')
+        ar = shutil.which('ar')
+        self.assertTrue(os.path.exists(outlib))
+        self.assertTrue(ar is not None)
+        p = subprocess.run([ar, 't', outlib],
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL,
+                           universal_newlines=True, timeout=1)
+        obj_files = p.stdout.strip().split('\n')
+        self.assertEqual(len(obj_files), 1)
+        self.assertTrue(obj_files[0].endswith('-prelink.o'))
+
 class BaseLinuxCrossTests(BasePlatformTests):
     # Don't pass --libdir when cross-compiling. We have tests that
     # check whether meson auto-detects it correctly.
@@ -7541,6 +7517,19 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
             '-Dbuild.pkg_config_path=' + os.path.join(testdir, 'build_extra_path'),
             '-Dpkg_config_path=' + os.path.join(testdir, 'host_extra_path'),
         ])
+    
+    def test_run_native_test(self):
+        '''
+        https://github.com/mesonbuild/meson/issues/7997
+        check run native test in crossbuild without exe wrapper
+        '''
+        testdir = os.path.join(self.unit_test_dir, '88 run native test')
+        stamp_file = os.path.join(self.builddir, 'native_test_has_run.stamp')
+        self.init(testdir)
+        self.build()
+        self.assertPathDoesNotExist(stamp_file)
+        self.run_tests()
+        self.assertPathExists(stamp_file)
 
 
 def should_run_cross_mingw_tests():
@@ -8567,29 +8556,23 @@ class CrossFileTests(BasePlatformTests):
                               exe_wrapper: T.Optional[T.List[str]] = None) -> str:
         if is_windows():
             raise unittest.SkipTest('Cannot run this test on non-mingw/non-cygwin windows')
-        if is_sunos():
-            cc = 'gcc'
-        else:
-            cc = 'cc'
 
-        return textwrap.dedent("""\
+        return textwrap.dedent(f"""\
             [binaries]
-            c = '/usr/bin/{}'
-            ar = '/usr/bin/ar'
-            strip = '/usr/bin/ar'
-            {}
+            c = '{shutil.which('gcc' if is_sunos() else 'cc')}'
+            ar = '{shutil.which('ar')}'
+            strip = '{shutil.which('strip')}'
+            exe_wrapper = {str(exe_wrapper) if exe_wrapper is not None else '[]'}
 
             [properties]
-            needs_exe_wrapper = {}
+            needs_exe_wrapper = {needs_exe_wrapper}
 
             [host_machine]
             system = 'linux'
             cpu_family = 'x86'
             cpu = 'i686'
             endian = 'little'
-            """.format(cc,
-                       'exe_wrapper = {}'.format(str(exe_wrapper)) if exe_wrapper is not None else '',
-                       needs_exe_wrapper))
+            """)
 
     def _stub_exe_wrapper(self) -> str:
         return textwrap.dedent('''\
@@ -9158,8 +9141,16 @@ class SubprojectsCommandTests(BasePlatformTests):
         return self._git_remote(['rev-parse', ref], name)
 
     def _git_create_repo(self, path):
+        # If a user has git configuration init.defaultBranch set we want to override that
+        with tempfile.TemporaryDirectory() as d:
+            out = git(['--version'], str(d))[1]
+        if version_compare(mesonbuild.environment.search_version(out), '>= 2.28'):
+            extra_cmd = ['--initial-branch', 'master']
+        else:
+            extra_cmd = []
+
         self._create_project(path)
-        self._git(['init'], path)
+        self._git(['init'] + extra_cmd, path)
         self._git_config(path)
         self._git(['add', '.'], path)
         self._git(['commit', '-m', 'Initial commit'], path)
@@ -9308,7 +9299,7 @@ class SubprojectsCommandTests(BasePlatformTests):
         out = self._subprojects_cmd(['foreach', '--types', 'git'] + dummy_cmd)
         self.assertEqual(ran_in(out), ['subprojects/sub_git'])
 
-def _clang_at_least(compiler, minver: str, apple_minver: str) -> bool:
+def _clang_at_least(compiler, minver: str, apple_minver: T.Optional[str]) -> bool:
     """
     check that Clang compiler is at least a specified version, whether AppleClang or regular Clang
 
@@ -9328,6 +9319,8 @@ def _clang_at_least(compiler, minver: str, apple_minver: str) -> bool:
     """
     if isinstance(compiler, (mesonbuild.compilers.AppleClangCCompiler,
                              mesonbuild.compilers.AppleClangCPPCompiler)):
+        if apple_minver is None:
+            return False
         return version_compare(compiler.version, apple_minver)
     return version_compare(compiler.version, minver)
 

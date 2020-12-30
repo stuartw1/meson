@@ -175,11 +175,11 @@ def find_coverage_tools() -> T.Tuple[T.Optional[str], T.Optional[str], T.Optiona
 
     return gcovr_exe, gcovr_new_rootdir, lcov_exe, genhtml_exe, llvm_cov_exe
 
-def detect_ninja(version: str = '1.7', log: bool = False) -> T.List[str]:
+def detect_ninja(version: str = '1.8.2', log: bool = False) -> T.List[str]:
     r = detect_ninja_command_and_version(version, log)
     return r[0] if r else None
 
-def detect_ninja_command_and_version(version: str = '1.7', log: bool = False) -> (T.List[str], str):
+def detect_ninja_command_and_version(version: str = '1.8.2', log: bool = False) -> (T.List[str], str):
     from .dependencies.base import ExternalProgram
     env_ninja = os.environ.get('NINJA', None)
     for n in [env_ninja] if env_ninja else ['ninja', 'ninja-build', 'samu']:
@@ -377,8 +377,11 @@ def detect_cpu_family(compilers: CompilersDict) -> str:
         trial = 'x86_64'
     elif trial in {'sun4u', 'sun4v'}:
         trial = 'sparc64'
-    elif trial in {'mipsel', 'mips64el'}:
-        trial = trial.rstrip('el')
+    elif trial.startswith('mips'):
+        if '64' not in trial:
+            trial = 'mips'
+        else:
+            trial = 'mips64'
     elif trial in {'ip30', 'ip35'}:
         trial = 'mips64'
 
@@ -433,7 +436,10 @@ def detect_cpu(compilers: CompilersDict):
         # Make more precise CPU detection for Elbrus platform.
         trial = platform.processor().lower()
     elif trial.startswith('mips'):
-        trial = trial.rstrip('el')
+        if '64' not in trial:
+            trial = 'mips'
+        else:
+            trial = 'mips64'
 
     # Add more quirks here as bugs are reported. Keep in sync with
     # detect_cpu_family() above.
@@ -940,6 +946,10 @@ class Environment:
                 return LLVMDynamicLinker(
                     compiler, for_machine, comp_class.LINKER_PREFIX,
                     override, version=search_version(o))
+            elif not invoked_directly:
+                return ClangClDynamicLinker(
+                    for_machine, override, exelist=compiler, prefix=comp_class.LINKER_PREFIX,
+                    version=search_version(o), direct=False, machine=None)
 
         if value is not None and invoked_directly:
             compiler = value
@@ -1236,7 +1246,7 @@ class Environment:
                     # style ld, but for clang on "real" windows we'll use
                     # either link.exe or lld-link.exe
                     try:
-                        linker = self._guess_win_linker(compiler, cls, for_machine)
+                        linker = self._guess_win_linker(compiler, cls, for_machine, invoked_directly=False)
                     except MesonException:
                         pass
                 if linker is None:
@@ -1788,7 +1798,7 @@ class Environment:
 
                 return compilers.LLVMDCompiler(
                     exelist, version, for_machine, info, arch,
-                    full_version=full_version, linker=linker)
+                    full_version=full_version, linker=linker, version_output=out)
             elif 'gdc' in out:
                 linker = self._guess_nix_linker(exelist, compilers.GnuDCompiler, for_machine)
                 return compilers.GnuDCompiler(
