@@ -12,27 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import typing as T
 import re
 
 from ..mesonlib import version_compare
-from ..interpreter import CompilerHolder
-from ..compilers import CudaCompiler
+from ..compilers import CudaCompiler, Compiler
 
-from . import ExtensionModule, ModuleReturnValue
+from . import NewExtensionModule
 
 from ..interpreterbase import (
     flatten, permittedKwargs, noKwargs,
     InvalidArguments, FeatureNew
 )
 
-class CudaModule(ExtensionModule):
+if T.TYPE_CHECKING:
+    from . import ModuleState
+
+class CudaModule(NewExtensionModule):
 
     @FeatureNew('CUDA module', '0.50.0')
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__()
+        self.methods.update({
+            "min_driver_version": self.min_driver_version,
+            "nvcc_arch_flags":    self.nvcc_arch_flags,
+            "nvcc_arch_readable": self.nvcc_arch_readable,
+        })
 
     @noKwargs
-    def min_driver_version(self, state, args, kwargs):
+    def min_driver_version(self, state: 'ModuleState',
+                                 args: T.Tuple[str],
+                                 kwargs: T.Dict[str, T.Any]) -> str:
         argerror = InvalidArguments('min_driver_version must have exactly one positional argument: ' +
                                     'a CUDA Toolkit version string. Beware that, since CUDA 11.0, ' +
                                     'the CUDA Toolkit\'s components (including NVCC) are versioned ' +
@@ -43,6 +53,14 @@ class CudaModule(ExtensionModule):
 
         cuda_version = args[0]
         driver_version_table = [
+            {'cuda_version': '>=11.5.0',   'windows': '496.04', 'linux': '495.29.05'},
+            {'cuda_version': '>=11.4.1',   'windows': '471.41', 'linux': '470.57.02'},
+            {'cuda_version': '>=11.4.0',   'windows': '471.11', 'linux': '470.42.01'},
+            {'cuda_version': '>=11.3.0',   'windows': '465.89', 'linux': '465.19.01'},
+            {'cuda_version': '>=11.2.2',   'windows': '461.33', 'linux': '460.32.03'},
+            {'cuda_version': '>=11.2.1',   'windows': '461.09', 'linux': '460.32.03'},
+            {'cuda_version': '>=11.2.0',   'windows': '460.82', 'linux': '460.27.03'},
+            {'cuda_version': '>=11.1.1',   'windows': '456.81', 'linux': '455.32'},
             {'cuda_version': '>=11.1.0',   'windows': '456.38', 'linux': '455.23'},
             {'cuda_version': '>=11.0.3',   'windows': '451.82', 'linux': '450.51.06'},
             {'cuda_version': '>=11.0.2',   'windows': '451.48', 'linux': '450.51.05'},
@@ -66,19 +84,23 @@ class CudaModule(ExtensionModule):
                 driver_version = d.get(state.host_machine.system, d['linux'])
                 break
 
-        return ModuleReturnValue(driver_version, [driver_version])
+        return driver_version
 
     @permittedKwargs(['detected'])
-    def nvcc_arch_flags(self, state, args, kwargs):
-        nvcc_arch_args = self._validate_nvcc_arch_args(state, args, kwargs)
+    def nvcc_arch_flags(self, state: 'ModuleState',
+                              args: T.Tuple[T.Union[Compiler, CudaCompiler, str]],
+                              kwargs: T.Dict[str, T.Any]) -> T.List[str]:
+        nvcc_arch_args = self._validate_nvcc_arch_args(args, kwargs)
         ret = self._nvcc_arch_flags(*nvcc_arch_args)[0]
-        return ModuleReturnValue(ret, [ret])
+        return ret
 
     @permittedKwargs(['detected'])
-    def nvcc_arch_readable(self, state, args, kwargs):
-        nvcc_arch_args = self._validate_nvcc_arch_args(state, args, kwargs)
+    def nvcc_arch_readable(self, state: 'ModuleState',
+                                 args: T.Tuple[T.Union[Compiler, CudaCompiler, str]],
+                                 kwargs: T.Dict[str, T.Any]) -> T.List[str]:
+        nvcc_arch_args = self._validate_nvcc_arch_args(args, kwargs)
         ret = self._nvcc_arch_flags(*nvcc_arch_args)[1]
-        return ModuleReturnValue(ret, [ret])
+        return ret
 
     @staticmethod
     def _break_arch_string(s):
@@ -88,23 +110,19 @@ class CudaModule(ExtensionModule):
 
     @staticmethod
     def _detected_cc_from_compiler(c):
-        if isinstance(c, CompilerHolder):
-            c = c.compiler
         if isinstance(c, CudaCompiler):
             return c.detected_cc
         return ''
 
     @staticmethod
     def _version_from_compiler(c):
-        if isinstance(c, CompilerHolder):
-            c = c.compiler
         if isinstance(c, CudaCompiler):
             return c.version
         if isinstance(c, str):
             return c
         return 'unknown'
 
-    def _validate_nvcc_arch_args(self, state, args, kwargs):
+    def _validate_nvcc_arch_args(self, args, kwargs):
         argerror = InvalidArguments('The first argument must be an NVCC compiler object, or its version string!')
 
         if len(args) < 1:
@@ -248,7 +266,7 @@ class CudaModule(ExtensionModule):
         elif isinstance(cuda_arch_list, str):
             cuda_arch_list = self._break_arch_string(cuda_arch_list)
 
-        cuda_arch_list = sorted([x for x in set(cuda_arch_list) if x])
+        cuda_arch_list = sorted(x for x in set(cuda_arch_list) if x)
 
         cuda_arch_bin = []
         cuda_arch_ptx = []
@@ -278,8 +296,7 @@ class CudaModule(ExtensionModule):
                 }.get(arch_name, (None, None))
 
             if arch_bin is None:
-                raise InvalidArguments('Unknown CUDA Architecture Name {}!'
-                                       .format(arch_name))
+                raise InvalidArguments(f'Unknown CUDA Architecture Name {arch_name}!')
 
             cuda_arch_bin += arch_bin
 

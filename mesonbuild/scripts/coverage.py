@@ -14,17 +14,17 @@
 
 from mesonbuild import environment, mesonlib
 
-import argparse, sys, os, subprocess, pathlib, stat
+import argparse, re, sys, os, subprocess, pathlib, stat
 import typing as T
 
 def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build_root: str, log_dir: str, use_llvm_cov: bool) -> int:
     outfiles = []
     exitcode = 0
 
-    (gcovr_exe, gcovr_new_rootdir, lcov_exe, genhtml_exe, llvm_cov_exe) = environment.find_coverage_tools()
+    (gcovr_exe, gcovr_version, lcov_exe, genhtml_exe, llvm_cov_exe) = environment.find_coverage_tools()
 
     # gcovr >= 4.2 requires a different syntax for out of source builds
-    if gcovr_new_rootdir:
+    if gcovr_exe and mesonlib.version_compare(gcovr_version, '>=4.2'):
         gcovr_base_cmd = [gcovr_exe, '-r', source_root, build_root]
     else:
         gcovr_base_cmd = [gcovr_exe, '-r', build_root]
@@ -35,10 +35,10 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
         gcov_exe_args = []
 
     if not outputs or 'xml' in outputs:
-        if gcovr_exe:
+        if gcovr_exe and mesonlib.version_compare(gcovr_version, '>=3.3'):
             subprocess.check_call(gcovr_base_cmd +
                                   ['-x',
-                                   '-e', subproject_root,
+                                   '-e', re.escape(subproject_root),
                                    '-o', os.path.join(log_dir, 'coverage.xml')
                                    ] + gcov_exe_args)
             outfiles.append(('Xml', pathlib.Path(log_dir, 'coverage.xml')))
@@ -46,10 +46,22 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
             print('gcovr >= 3.3 needed to generate Xml coverage report')
             exitcode = 1
 
-    if not outputs or 'text' in outputs:
-        if gcovr_exe:
+    if not outputs or 'sonarqube' in outputs:
+        if gcovr_exe and mesonlib.version_compare(gcovr_version, '>=4.2'):
             subprocess.check_call(gcovr_base_cmd +
-                                  ['-e', subproject_root,
+                                  ['--sonarqube',
+                                   '-o', os.path.join(log_dir, 'sonarqube.xml'),
+                                   '-e', re.escape(subproject_root)
+                                   ] + gcov_exe_args)
+            outfiles.append(('Sonarqube', pathlib.Path(log_dir, 'sonarqube.xml')))
+        elif outputs:
+            print('gcovr >= 4.2 needed to generate Xml coverage report')
+            exitcode = 1
+
+    if not outputs or 'text' in outputs:
+        if gcovr_exe and mesonlib.version_compare(gcovr_version, '>=3.3'):
+            subprocess.check_call(gcovr_base_cmd +
+                                  ['-e', re.escape(subproject_root),
                                    '-o', os.path.join(log_dir, 'coverage.txt')
                                    ] + gcov_exe_args)
             outfiles.append(('Text', pathlib.Path(log_dir, 'coverage.txt')))
@@ -68,12 +80,12 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
                 # Create a shim to allow using llvm-cov as a gcov tool.
                 if mesonlib.is_windows():
                     llvm_cov_shim_path = os.path.join(log_dir, 'llvm-cov.bat')
-                    with open(llvm_cov_shim_path, 'w') as llvm_cov_bat:
-                        llvm_cov_bat.write('@"{}" gcov %*'.format(llvm_cov_exe))
+                    with open(llvm_cov_shim_path, 'w', encoding='utf-8') as llvm_cov_bat:
+                        llvm_cov_bat.write(f'@"{llvm_cov_exe}" gcov %*')
                 else:
                     llvm_cov_shim_path = os.path.join(log_dir, 'llvm-cov.sh')
-                    with open(llvm_cov_shim_path, 'w') as llvm_cov_sh:
-                        llvm_cov_sh.write('#!/usr/bin/env sh\nexec "{}" gcov $@'.format(llvm_cov_exe))
+                    with open(llvm_cov_shim_path, 'w', encoding='utf-8') as llvm_cov_sh:
+                        llvm_cov_sh.write(f'#!/usr/bin/env sh\nexec "{llvm_cov_exe}" gcov $@')
                     os.chmod(llvm_cov_shim_path, os.stat(llvm_cov_shim_path).st_mode | stat.S_IEXEC)
                 gcov_tool_args = ['--gcov-tool', llvm_cov_shim_path]
             else:
@@ -120,7 +132,7 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
                                    '--branch-coverage',
                                    covinfo])
             outfiles.append(('Html', pathlib.Path(htmloutdir, 'index.html')))
-        elif gcovr_exe:
+        elif gcovr_exe and mesonlib.version_compare(gcovr_version, '>=3.3'):
             htmloutdir = os.path.join(log_dir, 'coveragereport')
             if not os.path.isdir(htmloutdir):
                 os.mkdir(htmloutdir)
@@ -128,7 +140,7 @@ def coverage(outputs: T.List[str], source_root: str, subproject_root: str, build
                                   ['--html',
                                    '--html-details',
                                    '--print-summary',
-                                   '-e', subproject_root,
+                                   '-e', re.escape(subproject_root),
                                    '-o', os.path.join(htmloutdir, 'index.html'),
                                    ])
             outfiles.append(('Html', pathlib.Path(htmloutdir, 'index.html')))
@@ -156,6 +168,8 @@ def run(args: T.List[str]) -> int:
                         const='text', help='generate Text report')
     parser.add_argument('--xml', dest='outputs', action='append_const',
                         const='xml', help='generate Xml report')
+    parser.add_argument('--sonarqube', dest='outputs', action='append_const',
+                        const='sonarqube', help='generate Sonarqube Xml report')
     parser.add_argument('--html', dest='outputs', action='append_const',
                         const='html', help='generate Html report')
     parser.add_argument('--use_llvm_cov', action='store_true',

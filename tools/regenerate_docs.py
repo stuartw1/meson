@@ -20,14 +20,15 @@ Regenerate markdown docs by using `meson.py` from the root dir
 '''
 
 import argparse
-import jinja2
 import os
 import re
 import subprocess
 import sys
 import textwrap
+import json
 import typing as T
 from pathlib import Path
+from urllib.request import urlopen
 
 PathLike = T.Union[Path,str]
 
@@ -95,7 +96,7 @@ def get_commands_data(root_dir: Path) -> T.Dict[str, T.Any]:
         return out
 
     output = _get_meson_output(root_dir, ['--help'])
-    commands = set(c.strip() for c in re.findall(r'usage:(?:.+)?{((?:[a-z]+,*)+?)}', output, re.MULTILINE|re.DOTALL)[0].split(','))
+    commands = {c.strip() for c in re.findall(r'usage:(?:.+)?{((?:[a-z]+,*)+?)}', output, re.MULTILINE|re.DOTALL)[0].split(',')}
     commands.remove('help')
 
     cmd_data = dict()
@@ -108,20 +109,29 @@ def get_commands_data(root_dir: Path) -> T.Dict[str, T.Any]:
 
     return cmd_data
 
-def regenerate_commands(root_dir: Path, output_dir: Path) -> None:
-    with open(root_dir/'docs'/'markdown_dynamic'/'Commands.md') as f:
-        template = f.read()
-
+def generate_hotdoc_includes(root_dir: Path, output_dir: Path) -> None:
     cmd_data = get_commands_data(root_dir)
 
-    t = jinja2.Template(template, undefined=jinja2.StrictUndefined, keep_trailing_newline=True)
-    content = t.render(cmd_help=cmd_data)
+    for cmd, parsed in cmd_data.items():
+        for typ in parsed.keys():
+            with open(output_dir / (cmd+'_'+typ+'.inc'), 'w', encoding='utf-8') as f:
+                f.write(parsed[typ])
 
-    output_file = output_dir/'Commands.md'
-    with open(output_file, 'w') as f:
-        f.write(content)
-
-    print(f'`{output_file}` was regenerated')
+def generate_wrapdb_table(output_dir: Path) -> None:
+    url = urlopen('https://wrapdb.mesonbuild.com/v2/releases.json')
+    releases = json.loads(url.read().decode())
+    with open(output_dir / 'wrapdb-table.md', 'w', encoding='utf-8') as f:
+        f.write('| Project | Versions | Provided dependencies | Provided programs |\n')
+        f.write('| ------- | -------- | --------------------- | ----------------- |\n')
+        for name, info in releases.items():
+            versions = [f'[{v}](https://wrapdb.mesonbuild.com/v2/{name}_{v}/{name}.wrap)' for v in info['versions']]
+            # Highlight latest version.
+            versions_str = f'<big>**{versions[0]}**</big><br/>' + ', '.join(versions[1:])
+            dependency_names = info.get('dependency_names', [])
+            dependency_names_str = ', '.join(dependency_names)
+            program_names = info.get('program_names', [])
+            program_names_str = ', '.join(program_names)
+            f.write(f'| {name} | {versions_str} | {dependency_names_str} | {program_names_str} |\n')
 
 def regenerate_docs(output_dir: PathLike,
                     dummy_output_file: T.Optional[PathLike]) -> None:
@@ -133,10 +143,11 @@ def regenerate_docs(output_dir: PathLike,
 
     root_dir = Path(__file__).resolve().parent.parent
 
-    regenerate_commands(root_dir, output_dir)
+    generate_hotdoc_includes(root_dir, output_dir)
+    generate_wrapdb_table(output_dir)
 
     if dummy_output_file:
-        with open(output_dir/dummy_output_file, 'w') as f:
+        with open(output_dir/dummy_output_file, 'w', encoding='utf-8') as f:
             f.write('dummy file for custom_target output')
 
 if __name__ == '__main__':

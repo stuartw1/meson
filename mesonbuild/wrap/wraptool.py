@@ -19,8 +19,9 @@ import shutil
 import typing as T
 
 from glob import glob
-
-from .wrap import API_ROOT, open_wrapdburl
+from urllib.parse import urlparse
+from urllib.request import urlopen
+from .wrap import WrapException
 
 from .. import mesonlib
 
@@ -57,38 +58,34 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     p.add_argument('project_path')
     p.set_defaults(wrap_func=promote)
 
-def get_result(urlstring: str) -> T.Dict[str, T.Any]:
-    u = open_wrapdburl(urlstring)
-    data = u.read().decode('utf-8')
-    jd = json.loads(data)
-    if jd['output'] != 'ok':
-        print('Got bad output from server.', file=sys.stderr)
-        raise SystemExit(data)
-    assert isinstance(jd, dict)
-    return jd
-
-def get_projectlist() -> T.List[str]:
-    jd = get_result(API_ROOT + 'projects')
-    projects = jd['projects']
-    assert isinstance(projects, list)
-    return projects
+def get_releases() -> T.Dict[str, T.Any]:
+    url = urlopen('https://wrapdb.mesonbuild.com/v2/releases.json')
+    return T.cast(T.Dict[str, T.Any], json.loads(url.read().decode()))
 
 def list_projects(options: 'argparse.Namespace') -> None:
-    projects = get_projectlist()
-    for p in projects:
+    releases = get_releases()
+    for p in releases.keys():
         print(p)
 
 def search(options: 'argparse.Namespace') -> None:
     name = options.name
-    jd = get_result(API_ROOT + 'query/byname/' + name)
-    for p in jd['projects']:
-        print(p)
+    releases = get_releases()
+    for p, info in releases.items():
+        if p.find(name) != -1:
+            print(p)
+        else:
+            for dep in info.get('dependency_names', []):
+                if dep.find(name) != -1:
+                    print(f'Dependency {dep} found in wrap {p}')
 
 def get_latest_version(name: str) -> tuple:
-    jd = get_result(API_ROOT + 'query/get_latest/' + name)
-    branch = jd['branch']
-    revision = jd['revision']
-    return branch, revision
+    releases = get_releases()
+    info = releases.get(name)
+    if not info:
+        raise WrapException(f'Wrap {name} not found in wrapdb')
+    latest_version = info['versions'][0]
+    version, revision = latest_version.rsplit('-', 1)
+    return version, revision
 
 def install(options: 'argparse.Namespace') -> None:
     name = options.name
@@ -99,18 +96,30 @@ def install(options: 'argparse.Namespace') -> None:
     wrapfile = os.path.join('subprojects', name + '.wrap')
     if os.path.exists(wrapfile):
         raise SystemExit('Wrap file already exists.')
-    (branch, revision) = get_latest_version(name)
-    u = open_wrapdburl(API_ROOT + 'projects/{}/{}/{}/get_wrap'.format(name, branch, revision))
-    data = u.read()
+    (version, revision) = get_latest_version(name)
+    url = urlopen(f'https://wrapdb.mesonbuild.com/v2/{name}_{version}-{revision}/{name}.wrap')
     with open(wrapfile, 'wb') as f:
-        f.write(data)
-    print('Installed', name, 'branch', branch, 'revision', revision)
+        f.write(url.read())
+    print(f'Installed {name} version {version} revision {revision}')
 
-def parse_patch_url(patch_url: str) -> T.Tuple[str, int]:
-    arr = patch_url.split('/')
-    return arr[-3], int(arr[-2])
+def parse_patch_url(patch_url: str) -> T.Tuple[str, str]:
+    u = urlparse(patch_url)
+    if u.netloc != 'wrapdb.mesonbuild.com':
+        raise WrapException(f'URL {patch_url} does not seems to be a wrapdb patch')
+    arr = u.path.strip('/').split('/')
+    if arr[0] == 'v1':
+        # e.g. https://wrapdb.mesonbuild.com/v1/projects/zlib/1.2.11/5/get_zip
+        return arr[-3], arr[-2]
+    elif arr[0] == 'v2':
+        # e.g. https://wrapdb.mesonbuild.com/v2/zlib_1.2.11-5/get_patch
+        tag = arr[-2]
+        name, version = tag.rsplit('_', 1)
+        version, revision = version.rsplit('-', 1)
+        return version, revision
+    else:
+        raise WrapException(f'Invalid wrapdb URL {patch_url}')
 
-def get_current_version(wrapfile: str) -> T.Tuple[str, int, str, str, str]:
+def get_current_version(wrapfile: str) -> T.Tuple[str, str, str, str, str]:
     cp = configparser.ConfigParser(interpolation=None)
     cp.read(wrapfile)
     wrap_data = cp['wrap-file']
@@ -118,11 +127,10 @@ def get_current_version(wrapfile: str) -> T.Tuple[str, int, str, str, str]:
     branch, revision = parse_patch_url(patch_url)
     return branch, revision, wrap_data['directory'], wrap_data['source_filename'], wrap_data['patch_filename']
 
-def update_wrap_file(wrapfile: str, name: str, new_branch: str, new_revision: str) -> None:
-    u = open_wrapdburl(API_ROOT + 'projects/{}/{}/{}/get_wrap'.format(name, new_branch, new_revision))
-    data = u.read()
+def update_wrap_file(wrapfile: str, name: str, new_version: str, new_revision: str) -> None:
+    url = urlopen(f'https://wrapdb.mesonbuild.com/v2/{name}_{new_version}-{new_revision}/{name}.wrap')
     with open(wrapfile, 'wb') as f:
-        f.write(data)
+        f.write(url.read())
 
 def update(options: 'argparse.Namespace') -> None:
     name = options.name
@@ -146,27 +154,27 @@ def update(options: 'argparse.Namespace') -> None:
         os.unlink(os.path.join('subprojects/packagecache', patch_file))
     except FileNotFoundError:
         pass
-    print('Updated', name, 'to branch', new_branch, 'revision', new_revision)
+    print(f'Updated {name} version {new_branch} revision {new_revision}')
 
 def info(options: 'argparse.Namespace') -> None:
     name = options.name
-    jd = get_result(API_ROOT + 'projects/' + name)
-    versions = jd['versions']
-    if not versions:
-        raise SystemExit('No available versions of' + name)
-    print('Available versions of {}:'.format(name))
-    for v in versions:
-        print(' ', v['branch'], v['revision'])
+    releases = get_releases()
+    info = releases.get(name)
+    if not info:
+        raise WrapException(f'Wrap {name} not found in wrapdb')
+    print(f'Available versions of {name}:')
+    for v in info['versions']:
+        print(' ', v)
 
 def do_promotion(from_path: str, spdir_name: str) -> None:
     if os.path.isfile(from_path):
-        assert(from_path.endswith('.wrap'))
+        assert from_path.endswith('.wrap')
         shutil.copy(from_path, spdir_name)
     elif os.path.isdir(from_path):
         sproj_name = os.path.basename(from_path)
         outputdir = os.path.join(spdir_name, sproj_name)
         if os.path.exists(outputdir):
-            raise SystemExit('Output dir {} already exists. Will not overwrite.'.format(outputdir))
+            raise SystemExit(f'Output dir {outputdir} already exists. Will not overwrite.')
         shutil.copytree(from_path, outputdir, ignore=shutil.ignore_patterns('subprojects'))
 
 def promote(options: 'argparse.Namespace') -> None:
@@ -183,10 +191,10 @@ def promote(options: 'argparse.Namespace') -> None:
 
     # otherwise the argument is just a subproject basename which must be unambiguous
     if argument not in sprojs:
-        raise SystemExit('Subproject {} not found in directory tree.'.format(argument))
+        raise SystemExit(f'Subproject {argument} not found in directory tree.')
     matches = sprojs[argument]
     if len(matches) > 1:
-        print('There is more than one version of {} in tree. Please specify which one to promote:\n'.format(argument), file=sys.stderr)
+        print(f'There is more than one version of {argument} in tree. Please specify which one to promote:\n', file=sys.stderr)
         for s in matches:
             print(s, file=sys.stderr)
         raise SystemExit(1)
@@ -207,9 +215,9 @@ def status(options: 'argparse.Namespace') -> None:
             print('Wrap file not from wrapdb.', file=sys.stderr)
             continue
         if current_branch == latest_branch and current_revision == latest_revision:
-            print('', name, 'up to date. Branch {}, revision {}.'.format(current_branch, current_revision))
+            print('', name, f'up to date. Branch {current_branch}, revision {current_revision}.')
         else:
-            print('', name, 'not up to date. Have {} {}, but {} {} is available.'.format(current_branch, current_revision, latest_branch, latest_revision))
+            print('', name, f'not up to date. Have {current_branch} {current_revision}, but {latest_branch} {latest_revision} is available.')
 
 def run(options: 'argparse.Namespace') -> int:
     options.wrap_func(options)

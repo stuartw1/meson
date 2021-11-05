@@ -101,13 +101,13 @@ class SwiftCompiler(Compiler):
         src = 'swifttest.swift'
         source_name = os.path.join(work_dir, src)
         output_name = os.path.join(work_dir, 'swifttest')
-        extra_flags = []
+        extra_flags: T.List[str] = []
         extra_flags += environment.coredata.get_external_args(self.for_machine, self.language)
         if self.is_cross:
             extra_flags += self.get_compile_only_args()
         else:
             extra_flags += environment.coredata.get_external_link_args(self.for_machine, self.language)
-        with open(source_name, 'w') as ofile:
+        with open(source_name, 'w', encoding='utf-8') as ofile:
             ofile.write('''print("Swift compilation is working.")
 ''')
         pc = subprocess.Popen(self.exelist + extra_flags + ['-emit-executable', '-o', output_name, src], cwd=work_dir)

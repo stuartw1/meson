@@ -22,20 +22,30 @@ from ..mesonlib import version_compare
 
 import typing as T
 from pathlib import Path
+from functools import lru_cache
 import re
 import json
 import textwrap
 
 class CMakeTraceLine:
-    def __init__(self, file: Path, line: int, func: str, args: T.List[str]) -> None:
-        self.file = file
+    def __init__(self, file_str: str, line: int, func: str, args: T.List[str]) -> None:
+        self.file = CMakeTraceLine._to_path(file_str)
         self.line = line
         self.func = func.lower()
         self.args = args
 
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _to_path(file_str: str) -> Path:
+        return Path(file_str)
+
     def __repr__(self) -> str:
         s = 'CMake TRACE: {0}:{1} {2}({3})'
         return s.format(self.file, self.line, self.func, self.args)
+
+class CMakeCacheEntry(T.NamedTuple):
+    value: T.List[str]
+    type: str
 
 class CMakeTarget:
     def __init__(
@@ -81,8 +91,10 @@ class CMakeGeneratorTarget(CMakeTarget):
 
 class CMakeTraceParser:
     def __init__(self, cmake_version: str, build_dir: Path, permissive: bool = True) -> None:
-        self.vars = {}     # type: T.Dict[str, T.List[str]]
-        self.targets = {}  # type: T.Dict[str, CMakeTarget]
+        self.vars:                      T.Dict[str, T.List[str]]     = {}
+        self.vars_by_file: T.Dict[Path, T.Dict[str, T.List[str]]]    = {}
+        self.targets:                   T.Dict[str, CMakeTarget]     = {}
+        self.cache:                     T.Dict[str, CMakeCacheEntry] = {}
 
         self.explicit_headers = set()  # type: T.Set[Path]
 
@@ -134,7 +146,7 @@ class CMakeTraceParser:
 
         base_args = ['--no-warn-unused-cli']
         if not self.requires_stderr():
-            base_args += ['--trace-redirect={}'.format(self.trace_file)]
+            base_args += [f'--trace-redirect={self.trace_file}']
 
         return arg_map[self.trace_format] + base_args
 
@@ -145,8 +157,8 @@ class CMakeTraceParser:
         # First load the trace (if required)
         if not self.requires_stderr():
             if not self.trace_file_path.exists and not self.trace_file_path.is_file():
-                raise CMakeException('CMake: Trace file "{}" not found'.format(str(self.trace_file_path)))
-            trace = self.trace_file_path.read_text(errors='ignore')
+                raise CMakeException(f'CMake: Trace file "{self.trace_file_path!s}" not found')
+            trace = self.trace_file_path.read_text(errors='ignore', encoding='utf-8')
         if not trace:
             raise CMakeException('CMake: The CMake trace was not provided or is empty')
 
@@ -157,7 +169,7 @@ class CMakeTraceParser:
         elif self.trace_format == 'json-v1':
             lexer1 = self._lex_trace_json(trace)
         else:
-            raise CMakeException('CMake: Internal error: Invalid trace format {}. Expected [human, json-v1]'.format(self.trace_format))
+            raise CMakeException(f'CMake: Internal error: Invalid trace format {self.trace_format}. Expected [human, json-v1]')
 
         # Primary pass -- parse everything
         for l in lexer1:
@@ -168,7 +180,7 @@ class CMakeTraceParser:
 
             # "Execute" the CMake function if supported
             fn = self.functions.get(l.func, None)
-            if(fn):
+            if fn:
                 fn(l)
 
         # Postprocess
@@ -213,9 +225,9 @@ class CMakeTraceParser:
         # Generate an exception if the parser is not in permissive mode
 
         if self.permissive:
-            mlog.debug('CMake trace warning: {}() {}\n{}'.format(function, error, tline))
+            mlog.debug(f'CMake trace warning: {function}() {error}\n{tline}')
             return None
-        raise CMakeException('CMake: {}() {}\n{}'.format(function, error, tline))
+        raise CMakeException(f'CMake: {function}() {error}\n{tline}')
 
     def _cmake_set(self, tline: CMakeTraceLine) -> None:
         """Handler for the CMake set() function in all variaties.
@@ -233,6 +245,14 @@ class CMakeTraceParser:
         - We don't honor the type of CACHE arguments
         """
         # DOC: https://cmake.org/cmake/help/latest/command/set.html
+
+        cache_type  = None
+        cache_force = 'FORCE' in tline.args
+        try:
+            cache_idx  = tline.args.index('CACHE')
+            cache_type = tline.args[cache_idx + 1]
+        except (ValueError, IndexError):
+            pass
 
         # 1st remove PARENT_SCOPE and CACHE from args
         args = []
@@ -256,12 +276,19 @@ class CMakeTraceParser:
         identifier = args.pop(0)
         value = ' '.join(args)
 
+        # Write to the CMake cache instead
+        if cache_type:
+            # Honor how the CMake FORCE parameter works
+            if identifier not in self.cache or cache_force:
+                self.cache[identifier] = CMakeCacheEntry(value.split(';'), cache_type)
+
         if not value:
             # Same as unset
             if identifier in self.vars:
                 del self.vars[identifier]
         else:
             self.vars[identifier] = value.split(';')
+            self.vars_by_file.setdefault(tline.file, {})[identifier] = value.split(';')
 
     def _cmake_unset(self, tline: CMakeTraceLine) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/unset.html
@@ -323,7 +350,7 @@ class CMakeTraceParser:
 
     def _cmake_add_custom_command(self, tline: CMakeTraceLine, name: T.Optional[str] = None) -> None:
         # DOC: https://cmake.org/cmake/help/latest/command/add_custom_command.html
-        args = self._flatten_args(list(tline.args))  # Commands can be passed as ';' seperated lists
+        args = self._flatten_args(list(tline.args))  # Commands can be passed as ';' separated lists
 
         if not args:
             return self._gen_exception('add_custom_command', 'requires at least 1 argument', tline)
@@ -437,17 +464,18 @@ class CMakeTraceParser:
         if not value:
             return
 
-        def do_target(tgt: str) -> None:
-            if i not in self.targets:
-                return self._gen_exception('set_property', 'TARGET {} not found'.format(i), tline)
+        def do_target(t: str) -> None:
+            if t not in self.targets:
+                return self._gen_exception('set_property', f'TARGET {t} not found', tline)
 
-            if identifier not in self.targets[i].properties:
-                self.targets[i].properties[identifier] = []
+            tgt = self.targets[t]
+            if identifier not in tgt.properties:
+                tgt.properties[identifier] = []
 
             if append:
-                self.targets[i].properties[identifier] += value
+                tgt.properties[identifier] += value
             else:
-                self.targets[i].properties[identifier] = value
+                tgt.properties[identifier] = value
 
         def do_source(src: str) -> None:
             if identifier != 'HEADER_FILE_ONLY' or not self._str_to_bool(value):
@@ -525,7 +553,7 @@ class CMakeTraceParser:
         for name, value in arglist:
             for i in targets:
                 if i not in self.targets:
-                    return self._gen_exception('set_target_properties', 'TARGET {} not found'.format(i), tline)
+                    return self._gen_exception('set_target_properties', f'TARGET {i} not found', tline)
 
                 self.targets[i].properties[name] = value
 
@@ -574,7 +602,7 @@ class CMakeTraceParser:
 
         target = args[0]
         if target not in self.targets:
-            return self._gen_exception(func, 'TARGET {} not found'.format(target), tline)
+            return self._gen_exception(func, f'TARGET {target} not found', tline)
 
         interface = []
         private = []
@@ -610,7 +638,7 @@ class CMakeTraceParser:
     def _meson_ps_execute_delayed_calls(self, tline: CMakeTraceLine) -> None:
         for l in self.stored_commands:
             fn = self.functions.get(l.func, None)
-            if(fn):
+            if fn:
                 fn(l)
 
         # clear the stored commands
@@ -624,7 +652,7 @@ class CMakeTraceParser:
         if not args:
             mlog.error('Invalid preload.cmake script! At least one argument to `meson_ps_disabled_function` is expected')
             return
-        mlog.warning('The CMake function "{}" was disabed to avoid compatibility issues with Meson.'.format(args[0]))
+        mlog.warning(f'The CMake function "{args[0]}" was disabled to avoid compatibility issues with Meson.')
 
     def _lex_trace_human(self, trace: str) -> T.Generator[CMakeTraceLine, None, None]:
         # The trace format is: '<file>(<line>):  <func>(<args -- can contain \n> )\n'
@@ -652,7 +680,7 @@ class CMakeTraceParser:
             argl = args.split(' ')
             argl = list(map(lambda x: x.strip(), argl))
 
-            yield CMakeTraceLine(Path(file), int(line), func, argl)
+            yield CMakeTraceLine(file, int(line), func, argl)
 
     def _lex_trace_json(self, trace: str) -> T.Generator[CMakeTraceLine, None, None]:
         lines = trace.splitlines(keepends=False)
@@ -667,7 +695,7 @@ class CMakeTraceParser:
             for j in args:
                 assert isinstance(j, str)
             args = [parse_generator_expressions(x) for x in args]
-            yield CMakeTraceLine(Path(data['file']), data['line'], data['cmd'], args)
+            yield CMakeTraceLine(data['file'], data['line'], data['cmd'], args)
 
     def _flatten_args(self, args: T.List[str]) -> T.List[str]:
         # Split lists in arguments
@@ -706,13 +734,13 @@ class CMakeTraceParser:
                 path_found = False
             elif reg_end.match(i):
                 # File detected
-                curr_str = '{} {}'.format(curr_str, i)
+                curr_str = f'{curr_str} {i}'
                 fixed_list += [curr_str]
                 curr_str = None
                 path_found = False
-            elif Path('{} {}'.format(curr_str, i)).exists():
+            elif Path(f'{curr_str} {i}').exists():
                 # Path detected
-                curr_str = '{} {}'.format(curr_str, i)
+                curr_str = f'{curr_str} {i}'
                 path_found = True
             elif path_found:
                 # Add path to fixed_list after ensuring the whole path is in curr_str
@@ -720,7 +748,7 @@ class CMakeTraceParser:
                 curr_str = i
                 path_found = False
             else:
-                curr_str = '{} {}'.format(curr_str, i)
+                curr_str = f'{curr_str} {i}'
                 path_found = False
 
         if curr_str:

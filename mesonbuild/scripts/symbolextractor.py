@@ -38,30 +38,30 @@ RELINKING_WARNING = 'Relinking will always happen on source changes.'
 
 def dummy_syms(outfilename: str) -> None:
     """Just touch it so relinking happens always."""
-    with open(outfilename, 'w'):
+    with open(outfilename, 'w', encoding='utf-8'):
         pass
 
 def write_if_changed(text: str, outfilename: str) -> None:
     try:
-        with open(outfilename, 'r') as f:
+        with open(outfilename, encoding='utf-8') as f:
             oldtext = f.read()
         if text == oldtext:
             return
     except FileNotFoundError:
         pass
-    with open(outfilename, 'w') as f:
+    with open(outfilename, 'w', encoding='utf-8') as f:
         f.write(text)
 
 def print_tool_warning(tools: T.List[str], msg: str, stderr: T.Optional[str] = None) -> None:
     global TOOL_WARNING_FILE
     if os.path.exists(TOOL_WARNING_FILE):
         return
-    m = '{!r} {}. {}'.format(tools, msg, RELINKING_WARNING)
+    m = f'{tools!r} {msg}. {RELINKING_WARNING}'
     if stderr:
         m += '\n' + stderr
     mlog.warning(m)
     # Write it out so we don't warn again
-    with open(TOOL_WARNING_FILE, 'w'):
+    with open(TOOL_WARNING_FILE, 'w', encoding='utf-8'):
         pass
 
 def get_tool(name: str) -> T.List[str]:
@@ -104,7 +104,7 @@ def gnu_syms(libfilename: str, outfilename: str) -> None:
         dummy_syms(outfilename)
         return
     result = [x for x in output.split('\n') if 'SONAME' in x]
-    assert(len(result) <= 1)
+    assert len(result) <= 1
     # Get a list of all symbols exported
     output = call_tool('nm', ['--dynamic', '--extern-only', '--defined-only',
                               '--format=posix', libfilename])
@@ -161,7 +161,7 @@ def openbsd_syms(libfilename: str, outfilename: str) -> None:
         dummy_syms(outfilename)
         return
     result = [x for x in output.split('\n') if 'SONAME' in x]
-    assert(len(result) <= 1)
+    assert len(result) <= 1
     # Get a list of all symbols exported
     output = call_tool('nm', ['-D', '-P', '-g', libfilename])
     if not output:
@@ -178,7 +178,7 @@ def freebsd_syms(libfilename: str, outfilename: str) -> None:
         dummy_syms(outfilename)
         return
     result = [x for x in output.split('\n') if 'SONAME' in x]
-    assert(len(result) <= 1)
+    assert len(result) <= 1
     # Get a list of all symbols exported
     output = call_tool('nm', ['--dynamic', '--extern-only', '--defined-only',
                               '--format=posix', libfilename])
@@ -309,7 +309,7 @@ def gen_symbols(libfilename: str, impfilename: str, outfilename: str, cross_host
             mlog.warning('Symbol extracting has not been implemented for this '
                          'platform. ' + RELINKING_WARNING)
             # Write it out so we don't warn again
-            with open(TOOL_WARNING_FILE, 'w'):
+            with open(TOOL_WARNING_FILE, 'w', encoding='utf-8'):
                 pass
         dummy_syms(outfilename)
 

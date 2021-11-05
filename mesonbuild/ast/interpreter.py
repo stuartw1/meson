@@ -16,10 +16,29 @@
 # or an interpreter-based tool.
 
 from .visitor import AstVisitor
-from .. import interpreterbase, mparser, mesonlib
+from .. import mparser, mesonlib
 from .. import environment
 
-from ..interpreterbase import InvalidArguments, BreakRequest, ContinueRequest, TYPE_nvar, TYPE_nkwargs
+from ..interpreterbase import (
+    MesonInterpreterObject,
+    InterpreterBase,
+    InvalidArguments,
+    BreakRequest,
+    ContinueRequest,
+    default_resolve_key,
+    TYPE_nvar,
+    TYPE_nkwargs,
+)
+
+from ..interpreter import (
+    Interpreter,
+    StringHolder,
+    BooleanHolder,
+    IntegerHolder,
+    ArrayHolder,
+    DictHolder,
+)
+
 from ..mparser import (
     AndNode,
     ArgumentNode,
@@ -45,35 +64,38 @@ from ..mparser import (
 import os, sys
 import typing as T
 
-class DontCareObject(interpreterbase.InterpreterObject):
+class DontCareObject(MesonInterpreterObject):
     pass
 
-class MockExecutable(interpreterbase.InterpreterObject):
+class MockExecutable(MesonInterpreterObject):
     pass
 
-class MockStaticLibrary(interpreterbase.InterpreterObject):
+class MockStaticLibrary(MesonInterpreterObject):
     pass
 
-class MockSharedLibrary(interpreterbase.InterpreterObject):
+class MockSharedLibrary(MesonInterpreterObject):
     pass
 
-class MockCustomTarget(interpreterbase.InterpreterObject):
+class MockCustomTarget(MesonInterpreterObject):
     pass
 
-class MockRunTarget(interpreterbase.InterpreterObject):
+class MockRunTarget(MesonInterpreterObject):
     pass
 
 ADD_SOURCE = 0
 REMOVE_SOURCE = 1
 
-class AstInterpreter(interpreterbase.InterpreterBase):
+_T = T.TypeVar('_T')
+_V = T.TypeVar('_V')
+
+class AstInterpreter(InterpreterBase):
     def __init__(self, source_root: str, subdir: str, subproject: str, visitors: T.Optional[T.List[AstVisitor]] = None):
         super().__init__(source_root, subdir, subproject)
         self.visitors = visitors if visitors is not None else []
-        self.visited_subdirs = {}     # type: T.Dict[str, bool]
-        self.assignments = {}         # type: T.Dict[str, BaseNode]
-        self.assign_vals = {}         # type: T.Dict[str, T.Any]
-        self.reverse_assignment = {}  # type: T.Dict[str, BaseNode]
+        self.processed_buildfiles = set() # type: T.Set[str]
+        self.assignments = {}             # type: T.Dict[str, BaseNode]
+        self.assign_vals = {}             # type: T.Dict[str, T.Any]
+        self.reverse_assignment = {}      # type: T.Dict[str, BaseNode]
         self.funcs.update({'project': self.func_do_nothing,
                            'test': self.func_do_nothing,
                            'benchmark': self.func_do_nothing,
@@ -81,6 +103,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
                            'install_man': self.func_do_nothing,
                            'install_data': self.func_do_nothing,
                            'install_subdir': self.func_do_nothing,
+                           'install_emptydir': self.func_do_nothing,
                            'configuration_data': self.func_do_nothing,
                            'configure_file': self.func_do_nothing,
                            'find_program': self.func_do_nothing,
@@ -114,6 +137,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
                            'subdir': self.func_subdir,
                            'set_variable': self.func_do_nothing,
                            'get_variable': self.func_do_nothing,
+                           'unset_variable': self.func_do_nothing,
                            'is_disabler': self.func_do_nothing,
                            'is_variable': self.func_do_nothing,
                            'disabler': self.func_do_nothing,
@@ -128,7 +152,14 @@ class AstInterpreter(interpreterbase.InterpreterBase):
                            'subdir_done': self.func_do_nothing,
                            'alias_target': self.func_do_nothing,
                            'summary': self.func_do_nothing,
+                           'range': self.func_do_nothing,
                            })
+
+    def _unholder_args(self, args: _T, kwargs: _V) -> T.Tuple[_T, _V]:
+        return args, kwargs
+
+    def _holderify(self, res: _T) -> _T:
+        return res
 
     def func_do_nothing(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> bool:
         return True
@@ -141,7 +172,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
     def func_subdir(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> None:
         args = self.flatten_args(args)
         if len(args) != 1 or not isinstance(args[0], str):
-            sys.stderr.write('Unable to evaluate subdir({}) in AstInterpreter --> Skipping\n'.format(args))
+            sys.stderr.write(f'Unable to evaluate subdir({args}) in AstInterpreter --> Skipping\n')
             return
 
         prev_subdir = self.subdir
@@ -150,17 +181,18 @@ class AstInterpreter(interpreterbase.InterpreterBase):
         buildfilename = os.path.join(subdir, environment.build_filename)
         absname = os.path.join(self.source_root, buildfilename)
         symlinkless_dir = os.path.realpath(absdir)
-        if symlinkless_dir in self.visited_subdirs:
+        build_file = os.path.join(symlinkless_dir, 'meson.build')
+        if build_file in self.processed_buildfiles:
             sys.stderr.write('Trying to enter {} which has already been visited --> Skipping\n'.format(args[0]))
             return
-        self.visited_subdirs[symlinkless_dir] = True
+        self.processed_buildfiles.add(build_file)
 
         if not os.path.isfile(absname):
-            sys.stderr.write('Unable to find build file {} --> Skipping\n'.format(buildfilename))
+            sys.stderr.write(f'Unable to find build file {buildfilename} --> Skipping\n')
             return
-        with open(absname, encoding='utf8') as f:
+        with open(absname, encoding='utf-8') as f:
             code = f.read()
-        assert(isinstance(code, str))
+        assert isinstance(code, str)
         try:
             codeblock = mparser.Parser(code, absname).parse()
         except mesonlib.MesonException as me:
@@ -176,6 +208,13 @@ class AstInterpreter(interpreterbase.InterpreterBase):
     def method_call(self, node: BaseNode) -> bool:
         return True
 
+    def evaluate_fstring(self, node: mparser.FormatStringNode) -> str:
+        assert isinstance(node, mparser.FormatStringNode)
+        return node.value
+
+    def evaluate_arraystatement(self, cur: mparser.ArrayNode) -> TYPE_nvar:
+        return self.reduce_arguments(cur.args)[0]
+
     def evaluate_arithmeticstatement(self, cur: ArithmeticNode) -> int:
         self.evaluate_statement(cur.left)
         self.evaluate_statement(cur.right)
@@ -186,7 +225,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
         return 0
 
     def evaluate_ternary(self, node: TernaryNode) -> None:
-        assert(isinstance(node, TernaryNode))
+        assert isinstance(node, TernaryNode)
         self.evaluate_statement(node.condition)
         self.evaluate_statement(node.trueblock)
         self.evaluate_statement(node.falseblock)
@@ -197,7 +236,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
                 return node.value
             return '__AST_UNKNOWN__'
         arguments, kwargs = self.reduce_arguments(node.args, key_resolver=resolve_key)
-        assert (not arguments)
+        assert not arguments
         self.argument_depth += 1
         for key, value in kwargs.items():
             if isinstance(key, BaseNode):
@@ -206,7 +245,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
         return {}
 
     def evaluate_plusassign(self, node: PlusAssignmentNode) -> None:
-        assert(isinstance(node, PlusAssignmentNode))
+        assert isinstance(node, PlusAssignmentNode)
         # Cheat by doing a reassignment
         self.assignments[node.var_name] = node.value  # Save a reference to the value node
         if node.value.ast_id:
@@ -222,7 +261,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
     def reduce_arguments(
                 self,
                 args: mparser.ArgumentNode,
-                key_resolver: T.Callable[[mparser.BaseNode], str] = interpreterbase.default_resolve_key,
+                key_resolver: T.Callable[[mparser.BaseNode], str] = default_resolve_key,
                 duplicate_key_error: T.Optional[str] = None,
             ) -> T.Tuple[T.List[TYPE_nvar], TYPE_nkwargs]:
         if isinstance(args, ArgumentNode):
@@ -272,7 +311,7 @@ class AstInterpreter(interpreterbase.InterpreterBase):
         return 0
 
     def assignment(self, node: AssignmentNode) -> None:
-        assert(isinstance(node, AssignmentNode))
+        assert isinstance(node, AssignmentNode)
         self.assignments[node.var_name] = node.value # Save a reference to the value node
         if node.value.ast_id:
             self.reverse_assignment[node.value.ast_id] = node
@@ -338,15 +377,15 @@ class AstInterpreter(interpreterbase.InterpreterBase):
             mkwargs = {} # type: T.Dict[str, TYPE_nvar]
             try:
                 if isinstance(src, str):
-                    result = self.string_method_call(src, node.name, margs, mkwargs)
+                    result = StringHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, bool):
-                    result = self.bool_method_call(src, node.name, margs, mkwargs)
+                    result = BooleanHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, int):
-                    result = self.int_method_call(src, node.name, margs, mkwargs)
+                    result = IntegerHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, list):
-                    result = self.array_method_call(src, node.name, margs, mkwargs)
+                    result = ArrayHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
                 elif isinstance(src, dict):
-                    result = self.dict_method_call(src, node.name, margs, mkwargs)
+                    result = DictHolder(src, T.cast(Interpreter, self)).method_call(node.name, margs, mkwargs)
             except mesonlib.MesonException:
                 return None
 

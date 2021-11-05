@@ -26,9 +26,10 @@ from pathlib import Path
 from . import mlog
 from . import mesonlib
 from . import coredata
-from .mesonlib import MesonException
+from .mesonlib import MesonException, RealPathAction, setup_vsenv
 from mesonbuild.environment import detect_ninja
 from mesonbuild.coredata import UserArrayOption
+from mesonbuild import build
 
 if T.TYPE_CHECKING:
     import argparse
@@ -37,19 +38,11 @@ def array_arg(value: str) -> T.List[str]:
     return UserArrayOption(None, value, allow_dups=True, user_input=True).value
 
 def validate_builddir(builddir: Path) -> None:
-    if not (builddir / 'meson-private' / 'coredata.dat' ).is_file():
-        raise MesonException('Current directory is not a meson build directory: `{}`.\n'
+    if not (builddir / 'meson-private' / 'coredata.dat').is_file():
+        raise MesonException(f'Current directory is not a meson build directory: `{builddir}`.\n'
                              'Please specify a valid build dir or change the working directory to it.\n'
                              'It is also possible that the build directory was generated with an old\n'
-                             'meson version. Please regenerate it in this case.'.format(builddir))
-
-def get_backend_from_coredata(builddir: Path) -> str:
-    """
-    Gets `backend` option value from coredata
-    """
-    backend = coredata.load(str(builddir)).get_builtin_option('backend')
-    assert isinstance(backend, str)
-    return backend
+                             'meson version. Please regenerate it in this case.')
 
 def parse_introspect_data(builddir: Path) -> T.Dict[str, T.List[dict]]:
     """
@@ -57,8 +50,8 @@ def parse_introspect_data(builddir: Path) -> T.Dict[str, T.List[dict]]:
     """
     path_to_intro = builddir / 'meson-info' / 'intro-targets.json'
     if not path_to_intro.exists():
-        raise MesonException('`{}` is missing! Directory is not configured yet?'.format(path_to_intro.name))
-    with path_to_intro.open() as f:
+        raise MesonException(f'`{path_to_intro.name}` is missing! Directory is not configured yet?')
+    with path_to_intro.open(encoding='utf-8') as f:
         schema = json.load(f)
 
     parsed_data = defaultdict(list) # type: T.Dict[str, T.List[dict]]
@@ -78,7 +71,7 @@ class ParsedTargetName:
         if len(split) > 1:
             self.type = split[1]
             if not self._is_valid_type(self.type):
-                raise MesonException('Can\'t invoke target `{}`: unknown target type: `{}`'.format(target, self.type))
+                raise MesonException(f'Can\'t invoke target `{target}`: unknown target type: `{self.type}`')
 
         split = split[0].rsplit('/', 1)
         if len(split) > 1:
@@ -89,7 +82,7 @@ class ParsedTargetName:
 
     @staticmethod
     def _is_valid_type(type: str) -> bool:
-        # Ammend docs in Commands.md when editing this list
+        # Amend docs in Commands.md when editing this list
         allowed_types = {
             'executable',
             'static_library',
@@ -103,7 +96,7 @@ class ParsedTargetName:
 
 def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introspect_data: T.Dict[str, T.Any]) -> T.Dict[str, T.Any]:
     if target.name not in introspect_data:
-        raise MesonException('Can\'t invoke target `{}`: target not found'.format(target.full_name))
+        raise MesonException(f'Can\'t invoke target `{target.full_name}`: target not found')
 
     intro_targets = introspect_data[target.name]
     found_targets = []  # type: T.List[T.Dict[str, T.Any]]
@@ -117,15 +110,15 @@ def get_target_from_intro_data(target: ParsedTargetName, builddir: Path, introsp
             if (intro_target['subproject'] or
                     (target.type and target.type != intro_target['type'].replace(' ', '_')) or
                     (target.path
-                         and intro_target['filename'] != 'no_name'
-                         and Path(target.path) != Path(intro_target['filename'][0]).relative_to(resolved_bdir).parent)):
+                        and intro_target['filename'] != 'no_name'
+                        and Path(target.path) != Path(intro_target['filename'][0]).relative_to(resolved_bdir).parent)):
                 continue
             found_targets += [intro_target]
 
     if not found_targets:
-        raise MesonException('Can\'t invoke target `{}`: target not found'.format(target.full_name))
+        raise MesonException(f'Can\'t invoke target `{target.full_name}`: target not found')
     elif len(found_targets) > 1:
-        raise MesonException('Can\'t invoke target `{}`: ambigious name. Add target type and/or path: `PATH/NAME:TYPE`'.format(target.full_name))
+        raise MesonException(f'Can\'t invoke target `{target.full_name}`: ambiguous name. Add target type and/or path: `PATH/NAME:TYPE`')
 
     return found_targets[0]
 
@@ -142,14 +135,9 @@ def get_parsed_args_ninja(options: 'argparse.Namespace', builddir: Path) -> T.Tu
     if runner is None:
         raise MesonException('Cannot find ninja.')
 
-    cmd = runner + ['-C', builddir.as_posix()]
-
-    if options.targets:
-        intro_data = parse_introspect_data(builddir)
-        for t in options.targets:
-            cmd.extend(generate_target_names_ninja(ParsedTargetName(t), builddir, intro_data))
-    if options.clean:
-        cmd.append('clean')
+    cmd = runner
+    if not builddir.samefile('.'):
+        cmd.extend(['-C', builddir.as_posix()])
 
     # If the value is set to < 1 then don't set anything, which let's
     # ninja/samu decide what to do.
@@ -163,6 +151,14 @@ def get_parsed_args_ninja(options: 'argparse.Namespace', builddir: Path) -> T.Tu
 
     cmd += options.ninja_args
 
+    # operands must be processed after options/option-arguments
+    if options.targets:
+        intro_data = parse_introspect_data(builddir)
+        for t in options.targets:
+            cmd.extend(generate_target_names_ninja(ParsedTargetName(t), builddir, intro_data))
+    if options.clean:
+        cmd.append('clean')
+
     return cmd, None
 
 def generate_target_name_vs(target: ParsedTargetName, builddir: Path, introspect_data: dict) -> str:
@@ -172,7 +168,7 @@ def generate_target_name_vs(target: ParsedTargetName, builddir: Path, introspect
 
     # Normalize project name
     # Source: https://docs.microsoft.com/en-us/visualstudio/msbuild/how-to-build-specific-targets-in-solutions-by-using-msbuild-exe
-    target_name = re.sub('[\%\$\@\;\.\(\)\']', '_', intro_target['id'])  # type: str
+    target_name = re.sub(r"[\%\$\@\;\.\(\)']", '_', intro_target['id'])  # type: str
     rel_path = Path(intro_target['filename'][0]).relative_to(builddir.resolve()).parent
     if rel_path != Path('.'):
         target_name = str(rel_path / target_name)
@@ -216,7 +212,7 @@ def get_parsed_args_vs(options: 'argparse.Namespace', builddir: Path) -> T.Tuple
 
     # In msbuild `-maxCpuCount` with no number means "detect cpus", the default is `-maxCpuCount:1`
     if options.jobs > 0:
-        cmd.append('-maxCpuCount:{}'.format(options.jobs))
+        cmd.append(f'-maxCpuCount:{options.jobs}')
     else:
         cmd.append('-maxCpuCount')
 
@@ -228,9 +224,10 @@ def get_parsed_args_vs(options: 'argparse.Namespace', builddir: Path) -> T.Tuple
 
     cmd += options.vs_args
 
-    # Remove platform from env so that msbuild does not pick x86 platform when solution platform is Win32
+    # Remove platform from env if set so that msbuild does not
+    # pick x86 platform when solution platform is Win32
     env = os.environ.copy()
-    del env['PLATFORM']
+    env.pop('PLATFORM', None)
 
     return cmd, env
 
@@ -283,14 +280,9 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
         action='store_true',
         help='Clean the build directory.'
     )
-    parser.add_argument(
-        '-C',
-        action='store',
-        dest='builddir',
-        type=Path,
-        default='.',
-        help='The directory containing build files to be built.'
-    )
+    parser.add_argument('-C', dest='wd', action=RealPathAction,
+                        help='directory to cd into before running')
+
     parser.add_argument(
         '-j', '--jobs',
         action='store',
@@ -302,7 +294,7 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
         '-l', '--load-average',
         action='store',
         default=0,
-        type=int,
+        type=float,
         help='The system load average to try to maintain (if supported).'
     )
     parser.add_argument(
@@ -330,8 +322,13 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     )
 
 def run(options: 'argparse.Namespace') -> int:
-    bdir = options.builddir  # type: Path
-    validate_builddir(bdir.resolve())
+    cdata = coredata.load(options.wd)
+    bdir = Path(options.wd)
+    buildfile = bdir / 'meson-private' / 'build.dat'
+    if not buildfile.is_file():
+        raise MesonException(f'Directory {options.wd!r} does not seem to be a Meson build directory.')
+    b = build.load(options.wd)
+    setup_vsenv(b.need_vsenv)
 
     cmd = []    # type: T.List[str]
     env = None  # type: T.Optional[T.Dict[str, str]]
@@ -339,7 +336,8 @@ def run(options: 'argparse.Namespace') -> int:
     if options.targets and options.clean:
         raise MesonException('`TARGET` and `--clean` can\'t be used simultaneously')
 
-    backend = get_backend_from_coredata(bdir)
+    backend = cdata.get_option(mesonlib.OptionKey('backend'))
+    assert isinstance(backend, str)
     if backend == 'ninja':
         cmd, env = get_parsed_args_ninja(options, bdir)
     elif backend.startswith('vs'):
@@ -348,7 +346,7 @@ def run(options: 'argparse.Namespace') -> int:
         cmd, env = get_parsed_args_xcode(options, bdir)
     else:
         raise MesonException(
-            'Backend `{}` is not yet supported by `compile`. Use generated project files directly instead.'.format(backend))
+            f'Backend `{backend}` is not yet supported by `compile`. Use generated project files directly instead.')
 
     p, *_ = mesonlib.Popen_safe(cmd, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer, env=env)
 

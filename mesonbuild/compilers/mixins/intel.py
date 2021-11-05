@@ -28,11 +28,6 @@ from ..compilers import CompileCheckMode
 from .gnu import GnuLikeCompiler
 from .visualstudio import VisualStudioLikeCompiler
 
-if T.TYPE_CHECKING:
-    from ...arglist import CompilerArgs
-    from ...dependencies import Dependency
-    from ...environment import Environment
-
 # XXX: avoid circular dependencies
 # TODO: this belongs in a posix compiler class
 # NOTE: the default Intel optimization is -O2, unlike GNU which defaults to -O0.
@@ -79,8 +74,9 @@ class IntelGnuLikeCompiler(GnuLikeCompiler):
         # It does have IPO, which serves much the same purpose as LOT, but
         # there is an unfortunate rule for using IPO (you can't control the
         # name of the output file) which break assumptions meson makes
-        self.base_options = ['b_pch', 'b_lundef', 'b_asneeded', 'b_pgo',
-                             'b_coverage', 'b_ndebug', 'b_staticpic', 'b_pie']
+        self.base_options = {mesonlib.OptionKey(o) for o in [
+            'b_pch', 'b_lundef', 'b_asneeded', 'b_pgo', 'b_coverage',
+            'b_ndebug', 'b_staticpic', 'b_pie']}
         self.id = 'intel'
         self.lang_header = 'none'
 
@@ -167,14 +163,11 @@ class IntelVisualStudioLikeCompiler(VisualStudioLikeCompiler):
         return args
 
     def get_toolset_version(self) -> T.Optional[str]:
-        # Avoid circular dependencies....
-        from ...environment import search_version
-
         # ICL provides a cl.exe that returns the version of MSVC it tries to
         # emulate, so we'll get the version from that and pass it to the same
         # function the real MSVC uses to calculate the toolset version.
         _, _, err = mesonlib.Popen_safe(['cl.exe'])
-        v1, v2, *_ = search_version(err).split('.')
+        v1, v2, *_ = mesonlib.search_version(err).split('.')
         version = int(v1 + v2)
         return self._calculate_toolset_version(version)
 

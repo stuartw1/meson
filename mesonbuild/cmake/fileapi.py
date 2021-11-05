@@ -51,7 +51,7 @@ class CMakeFileAPI:
         }
 
         query_file = self.request_dir / 'query.json'
-        query_file.write_text(json.dumps(query, indent=2))
+        query_file.write_text(json.dumps(query, indent=2), encoding='utf-8')
 
     def load_reply(self) -> None:
         if not self.reply_dir.is_dir():
@@ -75,20 +75,20 @@ class CMakeFileAPI:
         # Debug output
         debug_json = self.build_dir / '..' / 'fileAPI.json'
         debug_json = debug_json.resolve()
-        debug_json.write_text(json.dumps(index, indent=2))
+        debug_json.write_text(json.dumps(index, indent=2), encoding='utf-8')
         mlog.cmd_ci_include(debug_json.as_posix())
 
         # parse the JSON
         for i in index['objects']:
-            assert(isinstance(i, dict))
-            assert('kind' in i)
-            assert(i['kind'] in self.kind_resolver_map)
+            assert isinstance(i, dict)
+            assert 'kind' in i
+            assert i['kind'] in self.kind_resolver_map
 
             self.kind_resolver_map[i['kind']](i)
 
     def _parse_codemodel(self, data: T.Dict[str, T.Any]) -> None:
-        assert('configurations' in data)
-        assert('paths' in data)
+        assert 'configurations' in data
+        assert 'paths' in data
 
         source_dir = data['paths']['source']
         build_dir = data['paths']['build']
@@ -311,9 +311,9 @@ class CMakeFileAPI:
     def _reply_file_content(self, filename: Path) -> T.Dict[str, T.Any]:
         real_path = self.reply_dir / filename
         if not real_path.exists():
-            raise CMakeException('File "{}" does not exist'.format(real_path))
+            raise CMakeException(f'File "{real_path}" does not exist')
 
-        data = json.loads(real_path.read_text())
+        data = json.loads(real_path.read_text(encoding='utf-8'))
         assert isinstance(data, dict)
         for i in data.keys():
             assert isinstance(i, str)

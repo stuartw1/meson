@@ -17,6 +17,7 @@ import textwrap
 import typing as T
 
 from ..mesonlib import EnvironmentException
+from ..linkers import RSPFileSyntax
 
 from .compilers import Compiler, MachineChoice, mono_buildtype_args
 from .mixins.islinker import BasicLinkerIsCompilerMixin
@@ -86,7 +87,7 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
         src = 'sanity.cs'
         obj = 'sanity.exe'
         source_name = os.path.join(work_dir, src)
-        with open(source_name, 'w') as ofile:
+        with open(source_name, 'w', encoding='utf-8') as ofile:
             ofile.write(textwrap.dedent('''
                 public class Sanity {
                     static public void Main () {
@@ -125,6 +126,9 @@ class MonoCompiler(CsCompiler):
         super().__init__(exelist, version, for_machine, info, 'mono',
                          runner='mono')
 
+    def rsp_file_syntax(self) -> 'RSPFileSyntax':
+        return RSPFileSyntax.GCC
+
 
 class VisualStudioCsCompiler(CsCompiler):
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
@@ -141,3 +145,6 @@ class VisualStudioCsCompiler(CsCompiler):
                 tmp.append(flag)
             res = tmp
         return res
+
+    def rsp_file_syntax(self) -> 'RSPFileSyntax':
+        return RSPFileSyntax.MSVC

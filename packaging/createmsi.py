@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2017 The Meson development team
+# Copyright 2017-2021 The Meson development team
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,17 +25,61 @@ import uuid
 import sys
 import os
 from glob import glob
-import platform
 import xml.etree.ElementTree as ET
 
 sys.path.append(os.getcwd())
 from mesonbuild import coredata
+
+# Elementtree does not support CDATA. So hack it.
+WINVER_CHECK = '<![CDATA[Installed OR (VersionNT64 > 602)]]>'
 
 def gen_guid():
     '''
        Generate guid
     '''
     return str(uuid.uuid4()).upper()
+
+def get_all_modules_from_dir(dirname):
+    '''
+    Get all modules required for Meson build MSI package
+    from directories.
+    '''
+    modname = os.path.basename(dirname)
+    modules = [os.path.splitext(os.path.split(x)[1])[0] for x in glob(os.path.join(dirname, '*'))]
+    modules = ['mesonbuild.' + modname + '.' + x for x in modules if not x.startswith('_')]
+    return modules
+
+def get_more_modules():
+    '''
+        Getter for missing Modules.
+        Python packagers want to be minimal and only copy the things
+        that they can see that being used. They are blind to many things.
+    '''
+    return ['distutils.archive_util',
+            'distutils.cmd',
+            'distutils.config',
+            'distutils.core',
+            'distutils.debug',
+            'distutils.dep_util',
+            'distutils.dir_util',
+            'distutils.dist',
+            'distutils.errors',
+            'distutils.extension',
+            'distutils.fancy_getopt',
+            'distutils.file_util',
+            'distutils.spawn',
+            'distutils.util',
+            'distutils.version',
+            'distutils.command.build_ext',
+            'distutils.command.build',
+            'filecmp',
+            ]
+
+def get_modules():
+    modules = get_all_modules_from_dir('mesonbuild/modules')
+    modules += get_all_modules_from_dir('mesonbuild/scripts')
+    modules += get_more_modules()
+    return modules
 
 class Node:
     '''
@@ -65,7 +109,7 @@ class Node:
 
 class PackageGenerator:
     '''
-       Package generator for MSI pacakges
+       Package generator for MSI packages
     '''
 
     def __init__(self):
@@ -77,8 +121,7 @@ class PackageGenerator:
         self.update_guid = '141527EE-E28A-4D14-97A4-92E6075D28B2'
         self.main_xml = 'meson.wxs'
         self.main_o = 'meson.wixobj'
-        self.bytesize = 32 if '32' in platform.architecture()[0] else 64
-        self.final_output = 'meson-{}-{}.msi'.format(self.version, self.bytesize)
+        self.final_output = f'meson-{self.version}-64.msi'
         self.staging_dirs = ['dist', 'dist2']
         self.progfile_dir = 'ProgramFiles64Folder'
         redist_glob = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Redist\\MSVC\\v*\\MergeModules\\Microsoft_VC142_CRT_x64.msm'
@@ -106,43 +149,6 @@ class PackageGenerator:
         for s_d in self.staging_dirs:
             self.feature_components[s_d] = []
 
-    @staticmethod
-    def get_all_modules_from_dir(dirname):
-        '''
-           Get all modules required for Meson build MSI package
-           from directories.
-        '''
-        modname = os.path.basename(dirname)
-        modules = [os.path.splitext(os.path.split(x)[1])[0] for x in glob(os.path.join(dirname, '*'))]
-        modules = ['mesonbuild.' + modname + '.' + x for x in modules if not x.startswith('_')]
-        return modules
-
-    @staticmethod
-    def get_more_modules():
-        '''
-           Getter for missing Modules.
-           Python packagers want to be minimal and only copy the things
-           that they can see that being used. They are blind to many things.
-        '''
-        return ['distutils.archive_util',
-                'distutils.cmd',
-                'distutils.config',
-                'distutils.core',
-                'distutils.debug',
-                'distutils.dep_util',
-                'distutils.dir_util',
-                'distutils.dist',
-                'distutils.errors',
-                'distutils.extension',
-                'distutils.fancy_getopt',
-                'distutils.file_util',
-                'distutils.spawn',
-                'distutils.util',
-                'distutils.version',
-                'distutils.command.build_ext',
-                'distutils.command.build',
-                ]
-
     def build_dist(self):
         '''
            Build dist file from PyInstaller info
@@ -151,9 +157,7 @@ class PackageGenerator:
             if os.path.exists(sdir):
                 shutil.rmtree(sdir)
         main_stage, ninja_stage = self.staging_dirs
-        modules = self.get_all_modules_from_dir('mesonbuild/modules')
-        modules += self.get_all_modules_from_dir('mesonbuild/scripts')
-        modules += self.get_more_modules()
+        modules = get_modules()
 
         pyinstaller = shutil.which('pyinstaller')
         if not pyinstaller:
@@ -169,15 +173,26 @@ class PackageGenerator:
                       pyinstaller_tmpdir]
         for m in modules:
             pyinst_cmd += ['--hidden-import', m]
+        # https://github.com/pyinstaller/pyinstaller/issues/5693
+        pyinst_cmd += ['--exclude-module', '_bootlocale']
         pyinst_cmd += ['meson.py']
         subprocess.check_call(pyinst_cmd)
         shutil.move(pyinstaller_tmpdir + '/meson', main_stage)
+        self.del_infodirs(main_stage)
         if not os.path.exists(os.path.join(main_stage, 'meson.exe')):
             sys.exit('Meson exe missing from staging dir.')
         os.mkdir(ninja_stage)
         shutil.copy(shutil.which('ninja'), ninja_stage)
         if not os.path.exists(os.path.join(ninja_stage, 'ninja.exe')):
             sys.exit('Ninja exe missing from staging dir.')
+
+    def del_infodirs(self, dirname):
+        # Starting with 3.9.something there are some
+        # extra metadatadirs that have a hyphen in their
+        # file names. This is a forbidden character in WiX
+        # filenames so delete them.
+        for d in glob(os.path.join(dirname, '*-info')):
+            shutil.rmtree(d)
 
     def generate_files(self):
         '''
@@ -197,7 +212,7 @@ class PackageGenerator:
         package = ET.SubElement(product, 'Package', {
             'Id': '*',
             'Keywords': 'Installer',
-            'Description': 'Meson {} installer'.format(self.version),
+            'Description': f'Meson {self.version} installer',
             'Comments': 'Meson is a high performance build system',
             'Manufacturer': 'The Meson Development Team',
             'InstallerVersion': '500',
@@ -206,11 +221,13 @@ class PackageGenerator:
             'SummaryCodepage': '1252',
         })
 
+        condition = ET.SubElement(product, 'Condition', {'Message': 'This application is only supported on Windows 10 or higher.'})
+
+        condition.text = 'X'*len(WINVER_CHECK)
         ET.SubElement(product, 'MajorUpgrade',
                       {'DowngradeErrorMessage': 'A newer version of Meson is already installed.'})
 
-        if self.bytesize == 64:
-            package.set('Platform', 'x64')
+        package.set('Platform', 'x64')
         ET.SubElement(product, 'Media', {
             'Id': '1',
             'Cabinet': 'meson.cab',
@@ -272,6 +289,12 @@ class PackageGenerator:
         doc = xml.dom.minidom.parse(self.main_xml)
         with open(self.main_xml, 'w') as open_file:
             open_file.write(doc.toprettyxml())
+        # One last fix, add CDATA.
+        with open(self.main_xml) as open_file:
+            data = open_file.read()
+        data = data.replace('X'*len(WINVER_CHECK), WINVER_CHECK)
+        with open(self.main_xml, 'w') as open_file:
+            open_file.write(data)
 
     def build_features(self, top_feature, staging_dir):
         '''
@@ -289,14 +312,13 @@ class PackageGenerator:
         '''
         cur_node = nodes[current_dir]
         if cur_node.files:
-            component_id = 'ApplicationFiles{}'.format(self.component_num)
+            component_id = f'ApplicationFiles{self.component_num}'
             comp_xml_node = ET.SubElement(parent_xml_node, 'Component', {
                 'Id': component_id,
                 'Guid': gen_guid(),
             })
             self.feature_components[staging_dir].append(component_id)
-            if self.bytesize == 64:
-                comp_xml_node.set('Win64', 'yes')
+            comp_xml_node.set('Win64', 'yes')
             if self.component_num == 0:
                 ET.SubElement(comp_xml_node, 'Environment', {
                     'Id': 'Environment',

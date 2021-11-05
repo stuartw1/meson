@@ -75,14 +75,12 @@ def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> N
     if not options.name:
         options.name = Path().resolve().stem
         if not re.match('[a-zA-Z_][a-zA-Z0-9]*', options.name) and sample:
-            raise SystemExit('Name of current directory "{}" is not usable as a sample project name.\n'
-                             'Specify a project name with --name.'.format(options.name))
-        print('Using "{}" (name of current directory) as project name.'
-              .format(options.name))
+            raise SystemExit(f'Name of current directory "{options.name}" is not usable as a sample project name.\n'
+                             'Specify a project name with --name.')
+        print(f'Using "{options.name}" (name of current directory) as project name.')
     if not options.executable:
         options.executable = options.name
-        print('Using "{}" (project name) as name of executable to build.'
-              .format(options.executable))
+        print(f'Using "{options.executable}" (project name) as name of executable to build.')
     if sample:
         # The rest of the autodetection is not applicable to generating sample projects.
         return
@@ -105,7 +103,7 @@ def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> N
             if f.suffix in ('.cc', '.cpp'):
                 options.language = 'cpp'
                 break
-            if f.suffix in '.cs':
+            if f.suffix == '.cs':
                 options.language = 'cs'
                 break
             if f.suffix == '.cu':
@@ -139,7 +137,8 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     Meson project.
     '''
     parser.add_argument("srcfiles", metavar="sourcefile", nargs="*", help="source files. default: all recognized files in current directory")
-    parser.add_argument('-C', default='.', dest='wd', help='directory to cd into before running')
+    parser.add_argument('-C', dest='wd', action=mesonlib.RealPathAction,
+                        help='directory to cd into before running')
     parser.add_argument("-n", "--name", help="project name. default: name of current directory")
     parser.add_argument("-e", "--executable", help="executable name. default: project name")
     parser.add_argument("-d", "--deps", help="dependencies, comma-separated")
@@ -147,8 +146,8 @@ def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     parser.add_argument("-b", "--build", action='store_true', help="build after generation")
     parser.add_argument("--builddir", default='build', help="directory for build")
     parser.add_argument("-f", "--force", action="store_true", help="force overwrite of existing files and directories.")
-    parser.add_argument('--type', default=DEFAULT_PROJECT, choices=('executable', 'library'), help="project type. default: {} based project".format(DEFAULT_PROJECT))
-    parser.add_argument('--version', default=DEFAULT_VERSION, help="project version. default: {}".format(DEFAULT_VERSION))
+    parser.add_argument('--type', default=DEFAULT_PROJECT, choices=('executable', 'library'), help=f"project type. default: {DEFAULT_PROJECT} based project")
+    parser.add_argument('--version', default=DEFAULT_VERSION, help=f"project version. default: {DEFAULT_VERSION}")
 
 def run(options: 'argparse.Namespace') -> int:
     '''
@@ -174,7 +173,7 @@ def run(options: 'argparse.Namespace') -> int:
             print('Build directory already exists, deleting it.')
             shutil.rmtree(options.builddir)
         print('Building...')
-        cmd = mesonlib.meson_command + [options.builddir]
+        cmd = mesonlib.get_meson_command() + [options.builddir]
         ret = subprocess.run(cmd)
         if ret.returncode:
             raise SystemExit

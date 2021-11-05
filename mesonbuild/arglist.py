@@ -36,7 +36,7 @@ class Dedup(enum.Enum):
 
     """What kind of deduplication can be done to compiler args.
 
-    OVERRIDEN - Whether an argument can be 'overridden' by a later argument.
+    OVERRIDDEN - Whether an argument can be 'overridden' by a later argument.
         For example, -DFOO defines FOO and -UFOO undefines FOO. In this case,
         we can safely remove the previous occurrence and add a new one. The
         same is true for include paths and library paths with -I and -L.
@@ -50,7 +50,7 @@ class Dedup(enum.Enum):
 
     NO_DEDUP = 0
     UNIQUE = 1
-    OVERRIDEN = 2
+    OVERRIDDEN = 2
 
 
 class CompilerArgs(collections.abc.MutableSequence):
@@ -129,13 +129,13 @@ class CompilerArgs(collections.abc.MutableSequence):
             dedup = self._can_dedup(a)
             if a not in pre_flush_set:
                 new.append(a)
-                if dedup is Dedup.OVERRIDEN:
+                if dedup is Dedup.OVERRIDDEN:
                     pre_flush_set.add(a)
         for a in reversed(self.post):
             dedup = self._can_dedup(a)
             if a not in post_flush_set:
                 post_flush.appendleft(a)
-                if dedup is Dedup.OVERRIDEN:
+                if dedup is Dedup.OVERRIDDEN:
                     post_flush_set.add(a)
 
         #pre and post will overwrite every element that is in the container
@@ -178,7 +178,7 @@ class CompilerArgs(collections.abc.MutableSequence):
 
     def __setitem__(self, index: T.Union[int, slice], value: T.Union[str, T.Iterable[str]]) -> None:  # noqa: F811
         self.flush_pre_post()
-        self._container[index] = value  # type: ignore  # TODO: fix 'Invalid index type' and 'Incompatible types in assignment' erros
+        self._container[index] = value  # type: ignore  # TODO: fix 'Invalid index type' and 'Incompatible types in assignment' errors
 
     def __delitem__(self, index: T.Union[int, slice]) -> None:
         self.flush_pre_post()
@@ -219,7 +219,7 @@ class CompilerArgs(collections.abc.MutableSequence):
         if arg in cls.dedup2_args or \
            arg.startswith(cls.dedup2_prefixes) or \
            arg.endswith(cls.dedup2_suffixes):
-            return Dedup.OVERRIDEN
+            return Dedup.OVERRIDDEN
         if arg in cls.dedup1_args or \
            arg.startswith(cls.dedup1_prefixes) or \
            arg.endswith(cls.dedup1_suffixes) or \
@@ -290,7 +290,7 @@ class CompilerArgs(collections.abc.MutableSequence):
         '''
         tmp_pre = collections.deque()  # type: T.Deque[str]
         if not isinstance(args, collections.abc.Iterable):
-            raise TypeError('can only concatenate Iterable[str] (not "{}") to CompilerArgs'.format(args))
+            raise TypeError(f'can only concatenate Iterable[str] (not "{args}") to CompilerArgs')
         for arg in args:
             # If the argument can be de-duped, do it either by removing the
             # previous occurrence of it and adding a new one, or not adding the
@@ -331,4 +331,4 @@ class CompilerArgs(collections.abc.MutableSequence):
 
     def __repr__(self) -> str:
         self.flush_pre_post()
-        return 'CompilerArgs({!r}, {!r})'.format(self.compiler, self._container)
+        return f'CompilerArgs({self.compiler!r}, {self._container!r})'

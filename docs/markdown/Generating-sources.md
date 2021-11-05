@@ -8,8 +8,8 @@ Sometimes source files need to be preprocessed before they are passed
 to the actual compiler. As an example you might want build an IDL
 compiler and then run some files through that to generate actual
 source files. In Meson this is done with
-[`generator()`](Reference-manual.md#generator) or
-[`custom_target()`](Reference-manual.md#custom_target).
+[[generator]] or
+[[custom_target]].
 
 ## Using custom_target()
 
@@ -48,8 +48,9 @@ Then you just put that in your program and you're done.
 
 ### Generating headers
 
-Adding a generated header to a source list will ensure that the header is
-generated and that the proper include paths are created for the target:
+Adding a generated header to a source list will ensure that the header
+is generated and that the proper include paths are created for the
+target:
 
 ```meson
 prog_python = import('python').find_installation('python3')
@@ -73,18 +74,19 @@ libfoo = static_library('foo', [foo_c, foo_h])
 executable('myexe', ['main.c', foo_h], link_with : libfoo)
 ```
 
-Each target that depends on a generated header should add that header to it's sources,
-as seen above with `libfoo` and `myexe`. This is because there is no way for
-meson or the backend to know that `myexe` depends on `foo.h` just because
-`libfoo` does, it could be a private header.
+Each target that depends on a generated header should add that header
+to it's sources, as seen above with `libfoo` and `myexe`. This is
+because there is no way for Meson or the backend to know that `myexe`
+depends on `foo.h` just because `libfoo` does, it could be a private
+header.
 
 ### Generating multiple files at a time
 
-Sometimes it makes sense for a single generator to create two or more files at
-a time, (perhaps a header and source file), meson has this case covered as
-well. `custom_target`s can be indexed like a list to get each output file
-separately. The order is the same as the order of the output argument to
-`custom_target`
+Sometimes it makes sense for a single generator to create two or more
+files at a time, (perhaps a header and source file), Meson has this
+case covered as well. `custom_target`s can be indexed like a list to
+get each output file separately. The order is the same as the order of
+the output argument to `custom_target`
 
 ```meson
 prog_python = import('python').find_installation('python3')
@@ -101,13 +103,14 @@ libfoo = static_library('foo', [foo_ch])
 executable('myexe', ['main.c', foo_ch[1]], link_with : libfoo)
 ```
 
-In this case `libfoo` depends on both `foo.c` and `foo.h` but `myexe` only
-depends on `foo.h`, the second output.
+In this case `libfoo` depends on both `foo.c` and `foo.h` but `myexe`
+only depends on `foo.h`, the second output.
 
 ### Using dependencies to manage generated resources
 
-In some cases it might be easier to use `declare_dependency` to "bundle" the header
-and library dependency, especially if there are many generated headers:
+In some cases it might be easier to use `declare_dependency` to
+"bundle" the header and library dependency, especially if there are
+many generated headers:
 
 ```meson
 idep_foo = declare_dependency(
@@ -117,7 +120,8 @@ idep_foo = declare_dependency(
 ```
 
 See [dependencies](Dependencies.md#declaring-your-own), and
-[reference](Reference-manual.md#declare_dependency) for more information.
+[[declare_dependency]] for more
+information.
 
 ## Using generator()
 
@@ -135,7 +139,7 @@ output will be created in a target-private directory `@BUILD_DIR@`.
 If you want to generate files for general purposes such as for
 generating headers to be used by several sources, or data that will be
 installed, and so on, use a
-[`custom_target()`](Reference-manual.md#custom_target) instead.
+[[custom_target]] instead.
 
 
 ```meson

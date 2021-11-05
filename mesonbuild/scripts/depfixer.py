@@ -13,8 +13,12 @@
 # limitations under the License.
 
 
-import sys, struct
-import shutil, subprocess
+import sys
+import os
+import stat
+import struct
+import shutil
+import subprocess
 import typing as T
 
 from ..mesonlib import OrderedSet
@@ -120,9 +124,9 @@ class Elf(DataSizes):
     def __init__(self, bfile: str, verbose: bool = True) -> None:
         self.bfile = bfile
         self.verbose = verbose
-        self.bf = open(bfile, 'r+b')
         self.sections = []  # type: T.List[SectionHeader]
         self.dynamic = []   # type: T.List[DynamicEntry]
+        self.open_bf(bfile)
         try:
             (self.ptrsize, self.is_le) = self.detect_elf_type()
             super().__init__(self.ptrsize, self.is_le)
@@ -130,19 +134,40 @@ class Elf(DataSizes):
             self.parse_sections()
             self.parse_dynamic()
         except (struct.error, RuntimeError):
-            self.bf.close()
+            self.close_bf()
             raise
+
+    def open_bf(self, bfile: str) -> None:
+        self.bf = None
+        self.bf_perms = None
+        try:
+            self.bf = open(bfile, 'r+b')
+        except PermissionError as e:
+            self.bf_perms = stat.S_IMODE(os.lstat(bfile).st_mode)
+            os.chmod(bfile, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+            try:
+                self.bf = open(bfile, 'r+b')
+            except Exception:
+                os.chmod(bfile, self.bf_perms)
+                self.bf_perms = None
+                raise e
+
+    def close_bf(self) -> None:
+        if self.bf is not None:
+            if self.bf_perms is not None:
+                os.fchmod(self.bf.fileno(), self.bf_perms)
+                self.bf_perms = None
+            self.bf.close()
+            self.bf = None
 
     def __enter__(self) -> 'Elf':
         return self
 
     def __del__(self) -> None:
-        if self.bf:
-            self.bf.close()
+        self.close_bf()
 
     def __exit__(self, exc_type: T.Any, exc_value: T.Any, traceback: T.Any) -> None:
-        self.bf.close()
-        self.bf = None
+        self.close_bf()
 
     def detect_elf_type(self) -> T.Tuple[int, bool]:
         data = self.bf.read(6)
@@ -290,17 +315,17 @@ class Elf(DataSizes):
                 basename = name.split(b'/')[-1]
                 padding = b'\0' * (len(name) - len(basename))
                 newname = basename + padding
-                assert(len(newname) == len(name))
+                assert len(newname) == len(name)
                 self.bf.seek(offset)
                 self.bf.write(newname)
 
-    def fix_rpath(self, rpath_dirs_to_remove: T.List[bytes], new_rpath: bytes) -> None:
+    def fix_rpath(self, rpath_dirs_to_remove: T.Set[bytes], new_rpath: bytes) -> None:
         # The path to search for can be either rpath or runpath.
         # Fix both of them to be sure.
         self.fix_rpathtype_entry(rpath_dirs_to_remove, new_rpath, DT_RPATH)
         self.fix_rpathtype_entry(rpath_dirs_to_remove, new_rpath, DT_RUNPATH)
 
-    def fix_rpathtype_entry(self, rpath_dirs_to_remove: T.List[bytes], new_rpath: bytes, entrynum: int) -> None:
+    def fix_rpathtype_entry(self, rpath_dirs_to_remove: T.Set[bytes], new_rpath: bytes, entrynum: int) -> None:
         rp_off = self.get_entry_offset(entrynum)
         if rp_off is None:
             if self.verbose:
@@ -365,7 +390,7 @@ class Elf(DataSizes):
             entry.write(self.bf)
         return None
 
-def fix_elf(fname: str, rpath_dirs_to_remove: T.List[bytes], new_rpath: T.Optional[bytes], verbose: bool = True) -> None:
+def fix_elf(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Optional[bytes], verbose: bool = True) -> None:
     with Elf(fname, verbose) as e:
         if new_rpath is None:
             e.print_rpath()
@@ -443,7 +468,7 @@ def fix_darwin(fname: str, new_rpath: str, final_path: str, install_name_mapping
 
 def fix_jar(fname: str) -> None:
     subprocess.check_call(['jar', 'xfv', fname, 'META-INF/MANIFEST.MF'])
-    with open('META-INF/MANIFEST.MF', 'r+') as f:
+    with open('META-INF/MANIFEST.MF', 'r+', encoding='utf-8') as f:
         lines = f.readlines()
         f.seek(0)
         for line in lines:
@@ -452,7 +477,7 @@ def fix_jar(fname: str) -> None:
         f.truncate()
     subprocess.check_call(['jar', 'ufm', fname, 'META-INF/MANIFEST.MF'])
 
-def fix_rpath(fname: str, rpath_dirs_to_remove: T.List[bytes], new_rpath: T.Union[str, bytes], final_path: str, install_name_mappings: T.Dict[str, str], verbose: bool = True) -> None:
+def fix_rpath(fname: str, rpath_dirs_to_remove: T.Set[bytes], new_rpath: T.Union[str, bytes], final_path: str, install_name_mappings: T.Dict[str, str], verbose: bool = True) -> None:
     global INSTALL_NAME_TOOL
     # Static libraries, import libraries, debug information, headers, etc
     # never have rpaths
@@ -474,7 +499,7 @@ def fix_rpath(fname: str, rpath_dirs_to_remove: T.List[bytes], new_rpath: T.Unio
             raise
     # We don't look for this on import because it will do a useless PATH lookup
     # on non-mac platforms. That can be expensive on some Windows machines
-    # (upto 30ms), which is significant with --only-changed. For details, see:
+    # (up to 30ms), which is significant with --only-changed. For details, see:
     # https://github.com/mesonbuild/meson/pull/6612#discussion_r378581401
     if INSTALL_NAME_TOOL is False:
         INSTALL_NAME_TOOL = bool(shutil.which('install_name_tool'))

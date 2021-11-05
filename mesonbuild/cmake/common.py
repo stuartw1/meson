@@ -15,10 +15,13 @@
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool.
 
-from ..mesonlib import MesonException
+from ..mesonlib import MesonException, OptionKey
 from .. import mlog
 from pathlib import Path
 import typing as T
+
+if T.TYPE_CHECKING:
+    from ..environment import Environment
 
 language_map = {
     'c': 'C',
@@ -30,6 +33,17 @@ language_map = {
     'java': 'Java',
     'fortran': 'Fortran',
     'swift': 'Swift',
+}
+
+backend_generator_map = {
+    'ninja': 'Ninja',
+    'xcode': 'Xcode',
+    'vs2010': 'Visual Studio 10 2010',
+    'vs2012': 'Visual Studio 11 2012',
+    'vs2013': 'Visual Studio 12 2013',
+    'vs2015': 'Visual Studio 14 2015',
+    'vs2017': 'Visual Studio 15 2017',
+    'vs2019': 'Visual Studio 16 2019',
 }
 
 blacklist_cmake_defs = [
@@ -56,7 +70,7 @@ class CMakeBuildFile:
         self.is_temp = is_temp
 
     def __repr__(self) -> str:
-        return '<{}: {}; cmake={}; temp={}>'.format(self.__class__.__name__, self.file, self.is_cmake, self.is_temp)
+        return f'<{self.__class__.__name__}: {self.file}; cmake={self.is_cmake}; temp={self.is_temp}>'
 
 def _flags_to_list(raw: str) -> T.List[str]:
     # Convert a raw commandline string into a list of strings
@@ -87,6 +101,12 @@ def _flags_to_list(raw: str) -> T.List[str]:
     res = list(filter(lambda x: len(x) > 0, res))
     return res
 
+def cmake_get_generator_args(env: 'Environment') -> T.List[str]:
+    backend_name = env.coredata.get_option(OptionKey('backend'))
+    assert isinstance(backend_name, str)
+    assert backend_name in backend_generator_map
+    return ['-G', backend_generator_map[backend_name]]
+
 def cmake_defines_to_args(raw: T.Any, permissive: bool = False) -> T.List[str]:
     res = []  # type: T.List[str]
     if not isinstance(raw, list):
@@ -103,10 +123,10 @@ def cmake_defines_to_args(raw: T.Any, permissive: bool = False) -> T.List[str]:
                 mlog.warning('  --> Ignoring this option')
                 continue
             if isinstance(val, (str, int, float)):
-                res += ['-D{}={}'.format(key, val)]
+                res += [f'-D{key}={val}']
             elif isinstance(val, bool):
                 val_str = 'ON' if val else 'OFF'
-                res += ['-D{}={}'.format(key, val_str)]
+                res += [f'-D{key}={val_str}']
             else:
                 raise MesonException('Type "{}" of "{}" is not supported as for a CMake define value'.format(type(val).__name__, key))
 
@@ -132,7 +152,7 @@ class CMakeInclude:
         self.isSystem = isSystem
 
     def __repr__(self) -> str:
-        return '<CMakeInclude: {} -- isSystem = {}>'.format(self.path, self.isSystem)
+        return f'<CMakeInclude: {self.path} -- isSystem = {self.isSystem}>'
 
 class CMakeFileGroup:
     def __init__(self, data: T.Dict[str, T.Any]) -> None:
@@ -201,7 +221,7 @@ class CMakeTarget:
         mlog.log('type                  =', mlog.bold(self.type))
         # mlog.log('is_generator_provided =', mlog.bold('true' if self.is_generator_provided else 'false'))
         for idx, i in enumerate(self.files):
-            mlog.log('Files {}:'.format(idx))
+            mlog.log(f'Files {idx}:')
             with mlog.nested():
                 i.log()
 
@@ -220,7 +240,7 @@ class CMakeProject:
         mlog.log('build_dir =', mlog.bold(self.build_dir.as_posix()))
         mlog.log('name      =', mlog.bold(self.name))
         for idx, i in enumerate(self.targets):
-            mlog.log('Target {}:'.format(idx))
+            mlog.log(f'Target {idx}:')
             with mlog.nested():
                 i.log()
 
@@ -234,7 +254,7 @@ class CMakeConfiguration:
     def log(self) -> None:
         mlog.log('name =', mlog.bold(self.name))
         for idx, i in enumerate(self.projects):
-            mlog.log('Project {}:'.format(idx))
+            mlog.log(f'Project {idx}:')
             with mlog.nested():
                 i.log()
 
@@ -265,7 +285,7 @@ class SingleTargetOptions:
             opt = i[:i.find('=')]
             if opt not in self.opts:
                 res += [i]
-        res += ['{}={}'.format(k, v) for k, v in self.opts.items()]
+        res += [f'{k}={v}' for k, v in self.opts.items()]
         return res
 
     def get_compile_args(self, lang: str, initial: T.List[str]) -> T.List[str]:

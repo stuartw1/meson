@@ -22,10 +22,10 @@ classes for those cases.
 
 import typing as T
 
-from ... import mesonlib
+from ...mesonlib import EnvironmentException, MesonException, is_windows
 
 if T.TYPE_CHECKING:
-    from ...coredata import OptionDictType
+    from ...coredata import KeyedOptionDictType
     from ...environment import Environment
     from ...compilers.compilers import Compiler
 else:
@@ -48,11 +48,11 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def sanitizer_link_args(self, value: str) -> T.List[str]:
         return []
 
-    def get_lto_link_args(self) -> T.List[str]:
+    def get_lto_link_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
         return []
 
     def can_linker_accept_rsp(self) -> bool:
-        return mesonlib.is_windows()
+        return is_windows()
 
     def get_linker_exelist(self) -> T.List[str]:
         return self.exelist.copy()
@@ -66,7 +66,7 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_linker_lib_prefix(self) -> str:
         return ''
 
-    def get_option_link_args(self, options: 'OptionDictType') -> T.List[str]:
+    def get_option_link_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
         return []
 
     def has_multi_link_args(self, args: T.List[str], env: 'Environment') -> T.Tuple[bool, bool]:
@@ -78,20 +78,17 @@ class BasicLinkerIsCompilerMixin(Compiler):
     def get_std_shared_lib_link_args(self) -> T.List[str]:
         return []
 
-    def get_std_shared_module_args(self, options: 'OptionDictType') -> T.List[str]:
+    def get_std_shared_module_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
         return self.get_std_shared_lib_link_args()
 
     def get_link_whole_for(self, args: T.List[str]) -> T.List[str]:
-        raise mesonlib.EnvironmentException(
-            'Linker {} does not support link_whole'.format(self.id))
+        raise EnvironmentException(f'Linker {self.id} does not support link_whole')
 
     def get_allow_undefined_link_args(self) -> T.List[str]:
-        raise mesonlib.EnvironmentException(
-            'Linker {} does not support allow undefined'.format(self.id))
+        raise EnvironmentException(f'Linker {self.id} does not support allow undefined')
 
     def get_pie_link_args(self) -> T.List[str]:
-        m = 'Linker {} does not support position-independent executable'
-        raise mesonlib.EnvironmentException(m.format(self.id))
+        raise EnvironmentException(f'Linker {self.id} does not support position-independent executable')
 
     def get_undefined_link_args(self) -> T.List[str]:
         return []
@@ -103,13 +100,12 @@ class BasicLinkerIsCompilerMixin(Compiler):
         return []
 
     def bitcode_args(self) -> T.List[str]:
-        raise mesonlib.MesonException("This linker doesn't support bitcode bundles")
+        raise MesonException("This linker doesn't support bitcode bundles")
 
     def get_soname_args(self, env: 'Environment', prefix: str, shlib_name: str,
                         suffix: str, soversion: str,
-                        darwin_versions: T.Tuple[str, str],
-                        is_shared_module: bool) -> T.List[str]:
-        raise mesonlib.MesonException("This linker doesn't support soname args")
+                        darwin_versions: T.Tuple[str, str]) -> T.List[str]:
+        raise MesonException("This linker doesn't support soname args")
 
     def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
                          rpath_paths: str, build_rpath: str,

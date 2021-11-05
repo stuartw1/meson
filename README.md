@@ -41,6 +41,14 @@ python3 -m pip install ninja
 More on Installing Meson build can be found at the
 [getting meson page](https://mesonbuild.com/Getting-meson.html).
 
+#### Creating a standalone script
+
+Meson can be run as a [Python zip
+app](https://docs.python.org/3/library/zipapp.html). To generate the
+executable run the following command:
+
+    ./packaging/create_zipapp.py --outfile meson.pyz --interpreter '/usr/bin/env python3' <source checkout>
+
 #### Running
 
 Meson requires that you have a source directory and a build directory
@@ -79,12 +87,11 @@ details.
 
 #### IRC
 
-The irc channel for Meson is `#mesonbuild` over at Freenode.
+The channel to use is `#mesonbuild` either via Matrix ([web
+interface][matrix_web]) or [OFTC IRC][oftc_irc].
 
-You can use [FreeNode's official webchat][meson_irc]
-to connect to this channel.
-
-[meson_irc]: https://webchat.freenode.net/?channels=%23mesonbuild
+[matrix_web]: https://app.element.io/#/room/#mesonbuild:matrix.org
+[oftc_irc]: https://www.oftc.net/
 
 #### Further info
 

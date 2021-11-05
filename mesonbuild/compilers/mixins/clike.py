@@ -35,14 +35,17 @@ from ... import mesonlib
 from ... import mlog
 from ...linkers import GnuLikeDynamicLinkerMixin, SolarisDynamicLinker, CompCertDynamicLinker
 from ...mesonlib import LibType
+from ...coredata import OptionKey
 from .. import compilers
 from ..compilers import CompileCheckMode
 from .visualstudio import VisualStudioLikeCompiler
 
 if T.TYPE_CHECKING:
-    from ...dependencies import Dependency, ExternalProgram
+    from ...dependencies import Dependency
+    from ..._typing import ImmutableListProtocol
     from ...environment import Environment
     from ...compilers.compilers import Compiler
+    from ...programs import ExternalProgram
 else:
     # This is a bit clever, for mypy we pretend that these mixins descend from
     # Compiler, so we get all of the methods and attributes defined for us, but
@@ -117,7 +120,7 @@ class CLikeCompilerArgs(arglist.CompilerArgs):
 
     def __repr__(self) -> str:
         self.flush_pre_post()
-        return 'CLikeCompilerArgs({!r}, {!r})'.format(self.compiler, self._container)
+        return f'CLikeCompilerArgs({self.compiler!r}, {self._container!r})'
 
 
 class CLikeCompiler(Compiler):
@@ -153,7 +156,7 @@ class CLikeCompiler(Compiler):
         '''
         Args that are always-on for all C compilers other than MSVC
         '''
-        return ['-pipe'] + self.get_largefile_args()
+        return self.get_largefile_args()
 
     def get_no_stdinc_args(self) -> T.List[str]:
         return ['-nostdinc']
@@ -205,7 +208,7 @@ class CLikeCompiler(Compiler):
 
     @functools.lru_cache()
     def _get_library_dirs(self, env: 'Environment',
-                          elf_class: T.Optional[int] = None) -> T.List[str]:
+                          elf_class: T.Optional[int] = None) -> 'ImmutableListProtocol[str]':
         # TODO: replace elf_class with enum
         dirs = self.get_compiler_dirs(env, 'libraries')
         if elf_class is None or elf_class == 0:
@@ -235,7 +238,7 @@ class CLikeCompiler(Compiler):
                             retval.append(d)
                         # at this point, it's an ELF file which doesn't match the
                         # appropriate elf_class, so skip this one
-                    # stop scanning after the first sucessful read
+                    # stop scanning after the first successful read
                     break
                 except OSError:
                     # Skip the file if we can't read it
@@ -251,7 +254,7 @@ class CLikeCompiler(Compiler):
         return self._get_library_dirs(env, elf_class).copy()
 
     @functools.lru_cache()
-    def _get_program_dirs(self, env: 'Environment') -> T.List[str]:
+    def _get_program_dirs(self, env: 'Environment') -> 'ImmutableListProtocol[str]':
         '''
         Programs used by the compiler. Also where toolchain DLLs such as
         libstdc++-6.dll are found with MinGW.
@@ -270,9 +273,6 @@ class CLikeCompiler(Compiler):
     def get_pch_name(self, header_name: str) -> str:
         return os.path.basename(header_name) + '.' + self.get_pch_suffix()
 
-    def get_linker_search_args(self, dirname: str) -> T.List[str]:
-        return self.linker.get_search_args(dirname)
-
     def get_default_include_dirs(self) -> T.List[str]:
         return []
 
@@ -283,9 +283,9 @@ class CLikeCompiler(Compiler):
         return self.linker.import_library_args(implibname)
 
     def _sanity_check_impl(self, work_dir: str, environment: 'Environment',
-                         sname: str, code: str) -> None:
+                           sname: str, code: str) -> None:
         mlog.debug('Sanity testing ' + self.get_display_language() + ' compiler:', ' '.join(self.exelist))
-        mlog.debug('Is cross compiler: %s.' % str(self.is_cross))
+        mlog.debug(f'Is cross compiler: {self.is_cross!s}.')
 
         source_name = os.path.join(work_dir, sname)
         binname = sname.rsplit('.', 1)[0]
@@ -306,12 +306,12 @@ class CLikeCompiler(Compiler):
         binname += '.exe'
         # Write binary check source
         binary_name = os.path.join(work_dir, binname)
-        with open(source_name, 'w') as ofile:
+        with open(source_name, 'w', encoding='utf-8') as ofile:
             ofile.write(code)
         # Compile sanity check
         # NOTE: extra_flags must be added at the end. On MSVC, it might contain a '/link' argument
         # after which all further arguments will be passed directly to the linker
-        cmdlist = self.exelist + [source_name] + self.get_output_args(binary_name) + extra_flags
+        cmdlist = self.exelist + [sname] + self.get_output_args(binname) + extra_flags
         pc, stdo, stde = mesonlib.Popen_safe(cmdlist, cwd=work_dir)
         mlog.debug('Sanity check compiler command line:', ' '.join(cmdlist))
         mlog.debug('Sanity check compile stdout:')
@@ -320,7 +320,7 @@ class CLikeCompiler(Compiler):
         mlog.debug(stde)
         mlog.debug('-----')
         if pc.returncode != 0:
-            raise mesonlib.EnvironmentException('Compiler {0} can not compile programs.'.format(self.name_string()))
+            raise mesonlib.EnvironmentException(f'Compiler {self.name_string()} can not compile programs.')
         # Run sanity check
         if self.is_cross:
             if self.exe_wrapper is None:
@@ -333,47 +333,44 @@ class CLikeCompiler(Compiler):
         try:
             pe = subprocess.Popen(cmdlist)
         except Exception as e:
-            raise mesonlib.EnvironmentException('Could not invoke sanity test executable: %s.' % str(e))
+            raise mesonlib.EnvironmentException(f'Could not invoke sanity test executable: {e!s}.')
         pe.wait()
         if pe.returncode != 0:
-            raise mesonlib.EnvironmentException('Executables created by {0} compiler {1} are not runnable.'.format(self.language, self.name_string()))
+            raise mesonlib.EnvironmentException(f'Executables created by {self.language} compiler {self.name_string()} are not runnable.')
 
     def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
         code = 'int main(void) { int class=0; return class; }\n'
         return self._sanity_check_impl(work_dir, environment, 'sanitycheckc.c', code)
 
     def check_header(self, hname: str, prefix: str, env: 'Environment', *,
-                     extra_args: T.Optional[T.List[str]] = None,
+                     extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
-        fargs = {'prefix': prefix, 'header': hname}
-        code = '''{prefix}
-        #include <{header}>'''
-        return self.compiles(code.format(**fargs), env, extra_args=extra_args,
+        code = f'''{prefix}
+        #include <{hname}>'''
+        return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies)
 
     def has_header(self, hname: str, prefix: str, env: 'Environment', *,
-                   extra_args: T.Optional[T.List[str]] = None,
+                   extra_args: T.Union[None, T.List[str], T.Callable[['CompileCheckMode'], T.List[str]]] = None,
                    dependencies: T.Optional[T.List['Dependency']] = None,
                    disable_cache: bool = False) -> T.Tuple[bool, bool]:
-        fargs = {'prefix': prefix, 'header': hname}
-        code = '''{prefix}
+        code = f'''{prefix}
         #ifdef __has_include
-         #if !__has_include("{header}")
-          #error "Header '{header}' could not be found"
+         #if !__has_include("{hname}")
+          #error "Header '{hname}' could not be found"
          #endif
         #else
-         #include <{header}>
+         #include <{hname}>
         #endif'''
-        return self.compiles(code.format(**fargs), env, extra_args=extra_args,
+        return self.compiles(code, env, extra_args=extra_args,
                              dependencies=dependencies, mode='preprocess', disable_cache=disable_cache)
 
     def has_header_symbol(self, hname: str, symbol: str, prefix: str,
                           env: 'Environment', *,
-                          extra_args: T.Optional[T.List[str]] = None,
+                          extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                           dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
-        fargs = {'prefix': prefix, 'header': hname, 'symbol': symbol}
-        t = '''{prefix}
-        #include <{header}>
+        t = f'''{prefix}
+        #include <{hname}>
         int main(void) {{
             /* If it's not defined as a macro, try to use as a symbol */
             #ifndef {symbol}
@@ -381,7 +378,7 @@ class CLikeCompiler(Compiler):
             #endif
             return 0;
         }}'''
-        return self.compiles(t.format(**fargs), env, extra_args=extra_args,
+        return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
     def _get_basic_compiler_args(self, env: 'Environment', mode: CompileCheckMode) -> T.Tuple[T.List[str], T.List[str]]:
@@ -393,14 +390,16 @@ class CLikeCompiler(Compiler):
             # linking with static libraries since MSVC won't select a CRT for
             # us in that case and will error out asking us to pick one.
             try:
-                crt_val = env.coredata.base_options['b_vscrt'].value
-                buildtype = env.coredata.builtins['buildtype'].value
+                crt_val = env.coredata.options[OptionKey('b_vscrt')].value
+                buildtype = env.coredata.options[OptionKey('buildtype')].value
                 cargs += self.get_crt_compile_args(crt_val, buildtype)
             except (KeyError, AttributeError):
                 pass
 
         # Add CFLAGS/CXXFLAGS/OBJCFLAGS/OBJCXXFLAGS and CPPFLAGS from the env
         sys_args = env.coredata.get_external_args(self.for_machine, self.language)
+        if isinstance(sys_args, str):
+            sys_args = [sys_args]
         # Apparently it is a thing to inject linker flags both
         # via CFLAGS _and_ LDFLAGS, even though the former are
         # also used during linking. These flags can break
@@ -423,7 +422,7 @@ class CLikeCompiler(Compiler):
         return cargs, largs
 
     def build_wrapper_args(self, env: 'Environment',
-                           extra_args: T.Union[None, arglist.CompilerArgs, T.List[str]],
+                           extra_args: T.Union[None, arglist.CompilerArgs, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                            dependencies: T.Optional[T.List['Dependency']],
                            mode: CompileCheckMode = CompileCheckMode.COMPILE) -> arglist.CompilerArgs:
         # TODO: the caller should handle the listfing of these arguments
@@ -457,23 +456,21 @@ class CLikeCompiler(Compiler):
 
         # on MSVC compiler and linker flags must be separated by the "/link" argument
         # at this point, the '/link' argument may already be part of extra_args, otherwise, it is added here
-        if self.linker_to_compiler_args([]) == ['/link'] and largs != [] and not ('/link' in extra_args):
+        if self.linker_to_compiler_args([]) == ['/link'] and largs != [] and '/link' not in extra_args:
             extra_args += ['/link']
 
         args = cargs + extra_args + largs
         return args
 
-    def run(self, code: str, env: 'Environment', *,
-            extra_args: T.Optional[T.List[str]] = None,
+    def run(self, code: 'mesonlib.FileOrString', env: 'Environment', *,
+            extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]], None] = None,
             dependencies: T.Optional[T.List['Dependency']] = None) -> compilers.RunResult:
         need_exe_wrapper = env.need_exe_wrapper(self.for_machine)
         if need_exe_wrapper and self.exe_wrapper is None:
             raise compilers.CrossNoRunException('Can not run test applications in this cross environment.')
         with self._build_wrapper(code, env, extra_args, dependencies, mode='link', want_output=True) as p:
             if p.returncode != 0:
-                mlog.debug('Could not compile test file %s: %d\n' % (
-                    p.input_name,
-                    p.returncode))
+                mlog.debug(f'Could not compile test file {p.input_name}: {p.returncode}\n')
                 return compilers.RunResult(False)
             if need_exe_wrapper:
                 cmdlist = self.exe_wrapper.get_command() + [p.output_name]
@@ -482,7 +479,7 @@ class CLikeCompiler(Compiler):
             try:
                 pe, so, se = mesonlib.Popen_safe(cmdlist)
             except Exception as e:
-                mlog.debug('Could not run: %s (error: %s)\n' % (cmdlist, e))
+                mlog.debug(f'Could not run: {cmdlist} (error: {e})\n')
                 return compilers.RunResult(False)
 
         mlog.debug('Program stdout:\n')
@@ -492,31 +489,30 @@ class CLikeCompiler(Compiler):
         return compilers.RunResult(True, pe.returncode, so, se)
 
     def _compile_int(self, expression: str, prefix: str, env: 'Environment',
-                     extra_args: T.Optional[T.List[str]],
+                     extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                      dependencies: T.Optional[T.List['Dependency']]) -> bool:
-        fargs = {'prefix': prefix, 'expression': expression}
-        t = '''#include <stdio.h>
+        t = f'''#include <stdio.h>
         {prefix}
         int main(void) {{ static int a[1-2*!({expression})]; a[0]=0; return 0; }}'''
-        return self.compiles(t.format(**fargs), env, extra_args=extra_args,
+        return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]
 
     def cross_compute_int(self, expression: str, low: T.Optional[int], high: T.Optional[int],
                           guess: T.Optional[int], prefix: str, env: 'Environment',
-                          extra_args: T.Optional[T.List[str]] = None,
+                          extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                           dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         # Try user's guess first
         if isinstance(guess, int):
-            if self._compile_int('%s == %d' % (expression, guess), prefix, env, extra_args, dependencies):
+            if self._compile_int(f'{expression} == {guess}', prefix, env, extra_args, dependencies):
                 return guess
 
         # If no bounds are given, compute them in the limit of int32
         maxint = 0x7fffffff
         minint = -0x80000000
         if not isinstance(low, int) or not isinstance(high, int):
-            if self._compile_int('%s >= 0' % (expression), prefix, env, extra_args, dependencies):
+            if self._compile_int(f'{expression} >= 0', prefix, env, extra_args, dependencies):
                 low = cur = 0
-                while self._compile_int('%s > %d' % (expression, cur), prefix, env, extra_args, dependencies):
+                while self._compile_int(f'{expression} > {cur}', prefix, env, extra_args, dependencies):
                     low = cur + 1
                     if low > maxint:
                         raise mesonlib.EnvironmentException('Cross-compile check overflowed')
@@ -526,7 +522,7 @@ class CLikeCompiler(Compiler):
                 high = cur
             else:
                 high = cur = -1
-                while self._compile_int('%s < %d' % (expression, cur), prefix, env, extra_args, dependencies):
+                while self._compile_int(f'{expression} < {cur}', prefix, env, extra_args, dependencies):
                     high = cur - 1
                     if high < minint:
                         raise mesonlib.EnvironmentException('Cross-compile check overflowed')
@@ -538,14 +534,14 @@ class CLikeCompiler(Compiler):
             # Sanity check limits given by user
             if high < low:
                 raise mesonlib.EnvironmentException('high limit smaller than low limit')
-            condition = '%s <= %d && %s >= %d' % (expression, high, expression, low)
+            condition = f'{expression} <= {high} && {expression} >= {low}'
             if not self._compile_int(condition, prefix, env, extra_args, dependencies):
                 raise mesonlib.EnvironmentException('Value out of given range')
 
         # Binary search
         while low != high:
             cur = low + int((high - low) / 2)
-            if self._compile_int('%s <= %d' % (expression, cur), prefix, env, extra_args, dependencies):
+            if self._compile_int(f'{expression} <= {cur}', prefix, env, extra_args, dependencies):
                 high = cur
             else:
                 low = cur + 1
@@ -554,20 +550,19 @@ class CLikeCompiler(Compiler):
 
     def compute_int(self, expression: str, low: T.Optional[int], high: T.Optional[int],
                     guess: T.Optional[int], prefix: str, env: 'Environment', *,
-                    extra_args: T.Optional[T.List[str]] = None,
+                    extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                     dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         if extra_args is None:
             extra_args = []
         if self.is_cross:
             return self.cross_compute_int(expression, low, high, guess, prefix, env, extra_args, dependencies)
-        fargs = {'prefix': prefix, 'expression': expression}
-        t = '''#include<stdio.h>
+        t = f'''#include<stdio.h>
         {prefix}
         int main(void) {{
             printf("%ld\\n", (long)({expression}));
             return 0;
-        }};'''
-        res = self.run(t.format(**fargs), env, extra_args=extra_args,
+        }}'''
+        res = self.run(t, env, extra_args=extra_args,
                        dependencies=dependencies)
         if not res.compiled:
             return -1
@@ -576,38 +571,36 @@ class CLikeCompiler(Compiler):
         return int(res.stdout)
 
     def cross_sizeof(self, typename: str, prefix: str, env: 'Environment', *,
-                     extra_args: T.Optional[T.List[str]] = None,
+                     extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                      dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         if extra_args is None:
             extra_args = []
-        fargs = {'prefix': prefix, 'type': typename}
-        t = '''#include <stdio.h>
+        t = f'''#include <stdio.h>
         {prefix}
         int main(void) {{
-            {type} something;
+            {typename} something;
             return 0;
         }}'''
-        if not self.compiles(t.format(**fargs), env, extra_args=extra_args,
+        if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
-        return self.cross_compute_int('sizeof(%s)' % typename, None, None, None, prefix, env, extra_args, dependencies)
+        return self.cross_compute_int(f'sizeof({typename})', None, None, None, prefix, env, extra_args, dependencies)
 
     def sizeof(self, typename: str, prefix: str, env: 'Environment', *,
-               extra_args: T.Optional[T.List[str]] = None,
+               extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         if extra_args is None:
             extra_args = []
-        fargs = {'prefix': prefix, 'type': typename}
         if self.is_cross:
             return self.cross_sizeof(typename, prefix, env, extra_args=extra_args,
                                      dependencies=dependencies)
-        t = '''#include<stdio.h>
+        t = f'''#include<stdio.h>
         {prefix}
         int main(void) {{
-            printf("%ld\\n", (long)(sizeof({type})));
+            printf("%ld\\n", (long)(sizeof({typename})));
             return 0;
-        }};'''
-        res = self.run(t.format(**fargs), env, extra_args=extra_args,
+        }}'''
+        res = self.run(t, env, extra_args=extra_args,
                        dependencies=dependencies)
         if not res.compiled:
             return -1
@@ -620,23 +613,22 @@ class CLikeCompiler(Compiler):
                         dependencies: T.Optional[T.List['Dependency']] = None) -> int:
         if extra_args is None:
             extra_args = []
-        fargs = {'prefix': prefix, 'type': typename}
-        t = '''#include <stdio.h>
+        t = f'''#include <stdio.h>
         {prefix}
         int main(void) {{
-            {type} something;
+            {typename} something;
             return 0;
         }}'''
-        if not self.compiles(t.format(**fargs), env, extra_args=extra_args,
+        if not self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)[0]:
             return -1
-        t = '''#include <stddef.h>
+        t = f'''#include <stddef.h>
         {prefix}
         struct tmp {{
             char c;
-            {type} target;
+            {typename} target;
         }};'''
-        return self.cross_compute_int('offsetof(struct tmp, target)', None, None, None, t.format(**fargs), env, extra_args, dependencies)
+        return self.cross_compute_int('offsetof(struct tmp, target)', None, None, None, t, env, extra_args, dependencies)
 
     def alignment(self, typename: str, prefix: str, env: 'Environment', *,
                   extra_args: T.Optional[T.List[str]] = None,
@@ -646,19 +638,18 @@ class CLikeCompiler(Compiler):
         if self.is_cross:
             return self.cross_alignment(typename, prefix, env, extra_args=extra_args,
                                         dependencies=dependencies)
-        fargs = {'prefix': prefix, 'type': typename}
-        t = '''#include <stdio.h>
+        t = f'''#include <stdio.h>
         #include <stddef.h>
         {prefix}
         struct tmp {{
             char c;
-            {type} target;
+            {typename} target;
         }};
         int main(void) {{
             printf("%d", (int)offsetof(struct tmp, target));
             return 0;
         }}'''
-        res = self.run(t.format(**fargs), env, extra_args=extra_args,
+        res = self.run(t, env, extra_args=extra_args,
                        dependencies=dependencies)
         if not res.compiled:
             raise mesonlib.EnvironmentException('Could not compile alignment test.')
@@ -666,30 +657,29 @@ class CLikeCompiler(Compiler):
             raise mesonlib.EnvironmentException('Could not run alignment test binary.')
         align = int(res.stdout)
         if align == 0:
-            raise mesonlib.EnvironmentException('Could not determine alignment of %s. Sorry. You might want to file a bug.' % typename)
+            raise mesonlib.EnvironmentException(f'Could not determine alignment of {typename}. Sorry. You might want to file a bug.')
         return align
 
     def get_define(self, dname: str, prefix: str, env: 'Environment',
-                   extra_args: T.Optional[T.List[str]],
+                   extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]]],
                    dependencies: T.Optional[T.List['Dependency']],
                    disable_cache: bool = False) -> T.Tuple[str, bool]:
         delim = '"MESON_GET_DEFINE_DELIMITER"'
-        fargs = {'prefix': prefix, 'define': dname, 'delim': delim}
-        code = '''
+        code = f'''
         {prefix}
-        #ifndef {define}
-        # define {define}
+        #ifndef {dname}
+        # define {dname}
         #endif
-        {delim}\n{define}'''
+        {delim}\n{dname}'''
         args = self.build_wrapper_args(env, extra_args, dependencies,
-                                             mode=CompileCheckMode.PREPROCESS).to_native()
-        func = functools.partial(self.cached_compile, code.format(**fargs), env.coredata, extra_args=args, mode='preprocess')
+                                       mode=CompileCheckMode.PREPROCESS).to_native()
+        func = functools.partial(self.cached_compile, code, env.coredata, extra_args=args, mode='preprocess')
         if disable_cache:
-            func = functools.partial(self.compile, code.format(**fargs), extra_args=args, mode='preprocess', temp_dir=env.scratch_dir)
+            func = functools.partial(self.compile, code, extra_args=args, mode='preprocess', temp_dir=env.scratch_dir)
         with func() as p:
             cached = p.cached
             if p.returncode != 0:
-                raise mesonlib.EnvironmentException('Could not get define {!r}'.format(dname))
+                raise mesonlib.EnvironmentException(f'Could not get define {dname!r}')
         # Get the preprocessed value after the delimiter,
         # minus the extra newline at the end and
         # merge string literals.
@@ -707,26 +697,23 @@ class CLikeCompiler(Compiler):
             fmt = '%lli'
             cast = '(long long int)'
         else:
-            raise AssertionError('BUG: Unknown return type {!r}'.format(rtype))
-        fargs = {'prefix': prefix, 'f': fname, 'cast': cast, 'fmt': fmt}
-        code = '''{prefix}
+            raise AssertionError(f'BUG: Unknown return type {rtype!r}')
+        code = f'''{prefix}
         #include <stdio.h>
         int main(void) {{
-            printf ("{fmt}", {cast} {f}());
+            printf ("{fmt}", {cast} {fname}());
             return 0;
-        }}'''.format(**fargs)
+        }}'''
         res = self.run(code, env, extra_args=extra_args, dependencies=dependencies)
         if not res.compiled:
-            m = 'Could not get return value of {}()'
-            raise mesonlib.EnvironmentException(m.format(fname))
+            raise mesonlib.EnvironmentException(f'Could not get return value of {fname}()')
         if rtype == 'string':
             return res.stdout
         elif rtype == 'int':
             try:
                 return int(res.stdout.strip())
             except ValueError:
-                m = 'Return value of {}() is not an int'
-                raise mesonlib.EnvironmentException(m.format(fname))
+                raise mesonlib.EnvironmentException(f'Return value of {fname}() is not an int')
         assert False, 'Unreachable'
 
     @staticmethod
@@ -807,7 +794,7 @@ class CLikeCompiler(Compiler):
             if val is not None:
                 if isinstance(val, bool):
                     return val, False
-                raise mesonlib.EnvironmentException('Cross variable {0} is not a boolean.'.format(varname))
+                raise mesonlib.EnvironmentException(f'Cross variable {varname} is not a boolean.')
 
         # TODO: we really need a protocol for this,
         #
@@ -887,32 +874,30 @@ class CLikeCompiler(Compiler):
 
     def has_members(self, typename: str, membernames: T.List[str],
                     prefix: str, env: 'Environment', *,
-                    extra_args: T.Optional[T.List[str]] = None,
+                    extra_args: T.Union[None, T.List[str], T.Callable[[CompileCheckMode], T.List[str]]] = None,
                     dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
         if extra_args is None:
             extra_args = []
-        fargs = {'prefix': prefix, 'type': typename, 'name': 'foo'}
         # Create code that accesses all members
         members = ''
         for member in membernames:
-            members += '{}.{};\n'.format(fargs['name'], member)
-        fargs['members'] = members
-        t = '''{prefix}
+            members += f'foo.{member};\n'
+        t = f'''{prefix}
         void bar(void) {{
-            {type} {name};
+            {typename} foo;
             {members}
-        }};'''
-        return self.compiles(t.format(**fargs), env, extra_args=extra_args,
+        }}'''
+        return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
-    def has_type(self, typename: str, prefix: str, env: 'Environment', extra_args: T.List[str],
+    def has_type(self, typename: str, prefix: str, env: 'Environment',
+                 extra_args: T.Union[T.List[str], T.Callable[[CompileCheckMode], T.List[str]]], *,
                  dependencies: T.Optional[T.List['Dependency']] = None) -> T.Tuple[bool, bool]:
-        fargs = {'prefix': prefix, 'type': typename}
-        t = '''{prefix}
+        t = f'''{prefix}
         void bar(void) {{
-            sizeof({type});
-        }};'''
-        return self.compiles(t.format(**fargs), env, extra_args=extra_args,
+            sizeof({typename});
+        }}'''
+        return self.compiles(t, env, extra_args=extra_args,
                              dependencies=dependencies)
 
     def symbols_have_underscore_prefix(self, env: 'Environment') -> bool:
@@ -932,11 +917,9 @@ class CLikeCompiler(Compiler):
         n = 'symbols_have_underscore_prefix'
         with self._build_wrapper(code, env, extra_args=args, mode='compile', want_output=True, temp_dir=env.scratch_dir) as p:
             if p.returncode != 0:
-                m = 'BUG: Unable to compile {!r} check: {}'
-                raise RuntimeError(m.format(n, p.stdout))
+                raise RuntimeError(f'BUG: Unable to compile {n!r} check: {p.stdout}')
             if not os.path.isfile(p.output_name):
-                m = 'BUG: Can\'t find compiled test code for {!r} check'
-                raise RuntimeError(m.format(n))
+                raise RuntimeError(f'BUG: Can\'t find compiled test code for {n!r} check')
             with open(p.output_name, 'rb') as o:
                 for line in o:
                     # Check if the underscore form of the symbol is somewhere
@@ -948,7 +931,7 @@ class CLikeCompiler(Compiler):
                     elif symbol_name in line:
                         mlog.debug("Symbols have underscore prefix: NO")
                         return False
-        raise RuntimeError('BUG: {!r} check failed unexpectedly'.format(n))
+        raise RuntimeError(f'BUG: {n!r} check failed unexpectedly')
 
     def _get_patterns(self, env: 'Environment', prefixes: T.List[str], suffixes: T.List[str], shared: bool = False) -> T.List[str]:
         patterns = []  # type: T.List[str]
@@ -1060,8 +1043,7 @@ class CLikeCompiler(Compiler):
             if archs and env.machines.host.cpu_family in archs:
                 return p
             else:
-                mlog.debug('Rejected {}, supports {} but need {}'
-                           .format(p, archs, env.machines.host.cpu_family))
+                mlog.debug(f'Rejected {p}, supports {archs} but need {env.machines.host.cpu_family}')
         return None
 
     @functools.lru_cache()
@@ -1114,7 +1096,7 @@ class CLikeCompiler(Compiler):
         return None
 
     def _find_library_impl(self, libname: str, env: 'Environment', extra_dirs: T.List[str],
-                         code: str, libtype: LibType) -> T.Optional[T.List[str]]:
+                           code: str, libtype: LibType) -> T.Optional[T.List[str]]:
         # These libraries are either built-in or invalid
         if libname in self.ignore_libs:
             return []
@@ -1176,7 +1158,7 @@ class CLikeCompiler(Compiler):
         return None
 
     def _find_framework_impl(self, name: str, env: 'Environment', extra_dirs: T.List[str],
-                            allow_system: bool) -> T.Optional[T.List[str]]:
+                             allow_system: bool) -> T.Optional[T.List[str]]:
         if isinstance(extra_dirs, str):
             extra_dirs = [extra_dirs]
         key = (tuple(self.exelist), name, tuple(extra_dirs), allow_system)
@@ -1195,9 +1177,7 @@ class CLikeCompiler(Compiler):
         Finds the framework with the specified name, and returns link args for
         the same or returns None when the framework is not found.
         '''
-        # TODO: maybe this belongs in clang? also, should probably check for macOS?
-        if self.id != 'clang':
-            raise mesonlib.MesonException('Cannot find frameworks with non-clang compiler')
+        # TODO: should probably check for macOS?
         return self._find_framework_impl(name, env, extra_dirs, allow_system)
 
     def get_crt_compile_args(self, crt_val: str, buildtype: str) -> T.List[str]:
@@ -1231,14 +1211,13 @@ class CLikeCompiler(Compiler):
             if arg.startswith('-Wno-'):
                 new_args.append('-W' + arg[5:])
             if arg.startswith('-Wl,'):
-                mlog.warning('{} looks like a linker argument, '
+                mlog.warning(f'{arg} looks like a linker argument, '
                              'but has_argument and other similar methods only '
                              'support checking compiler arguments. Using them '
                              'to check linker arguments are never supported, '
                              'and results are likely to be wrong regardless of '
                              'the compiler you are using. has_link_argument or '
-                             'other similar method can be used instead.'
-                             .format(arg))
+                             'other similar method can be used instead.')
             new_args.append(arg)
         return self.has_arguments(new_args, env, code, mode='compile')
 
@@ -1268,7 +1247,7 @@ class CLikeCompiler(Compiler):
 
     def get_has_func_attribute_extra_args(self, name: str) -> T.List[str]:
         # Most compilers (such as GCC and Clang) only warn about unknown or
-        # ignored attributes, so force an error. Overriden in GCC and Clang
+        # ignored attributes, so force an error. Overridden in GCC and Clang
         # mixins.
         return ['-Werror']
 

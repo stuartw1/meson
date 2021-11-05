@@ -18,8 +18,9 @@ have multiple statements on one line as in e.g. *C*. Function and
 method calls' argument lists can be split over multiple lines. Meson
 will autodetect this case and do the right thing.
 
-In other cases, *(added 0.50)* you can get multi-line statements by ending the
-line with a `\`.  Apart from line ending whitespace has no syntactic meaning.
+In other cases, *(added 0.50)* you can get multi-line statements by
+ending the line with a `\`. Apart from line ending whitespace has no
+syntactic meaning.
 
 ## Variables
 
@@ -35,8 +36,10 @@ var2 = 102
 ```
 
 One important difference in how variables work in Meson is that all
-objects are immutable. This is different from, for example, how Python
-works.
+objects are immutable. When you see an operation which appears like
+a mutation, actually a new object is created and assigned to the
+name. This is different from, for example, how Python works for
+objects, but similar to e.g. Python strings.
 
 ```meson
 var1 = [1, 2, 3]
@@ -90,6 +93,14 @@ A boolean is either `true` or `false`.
 
 ```meson
 truth = true
+```
+
+Booleans can be converted to a string or to a number:
+
+```meson
+bool_var = true
+string_var = bool_var.to_string()
+int_var = bool_var.to_int()
 ```
 
 ## Strings
@@ -148,7 +159,7 @@ joined = 'C:\\foo\\bar' / 'builddir'     # => C:/foo/bar/builddir
 joined = 'C:\\foo\\bar' / 'D:\\builddir' # => D:/builddir
 ```
 
-Note that this is equivalent to using [`join_paths()`](Reference-manual.md#join_paths),
+Note that this is equivalent to using [[join_paths]],
 which was obsoleted by this operator.
 
 ### Strings running over multiple lines
@@ -167,7 +178,21 @@ These are raw strings that do not support the escape sequences listed
 above.  These strings can also be combined with the string formatting
 functionality described below.
 
+### String index
+
+Strings support the indexing (`[<num>]`) operator. This operator allows (read
+only) accessing a specific character. The returned value is guaranteed to be
+a string of length 1.
+
+```meson
+foo = 'abcd'
+message(foo[1])  # Will print 'b'
+foo[2] = 'C'     # ERROR: Meson objects are immutable!
+```
+
 ### String formatting
+
+#### .format()
 
 Strings can be built using the string formatting functionality.
 
@@ -180,10 +205,46 @@ res = template.format('text', 1, true)
 As can be seen, the formatting works by replacing placeholders of type
 `@number@` with the corresponding argument.
 
+#### Format strings
+*(Added 0.58)*
+
+Format strings can be used as a non-positional alternative to the
+string formatting functionality described above.
+
+```meson
+n = 10
+m = 'hi'
+
+s = f'int: @n@, string: @m@'
+# s now has the value 'int: 10, string: hi'
+```
+
+Currently only identity-expressions are supported inside of format
+strings, meaning you cannot use arbitrary Meson expressions inside of them.
+
+```meson
+n = 10
+m = 5
+
+# The following is not a valid format string
+s = f'result: @n + m@'
+```
+
 ### String methods
 
 Strings also support a number of other methods that return transformed
 copies.
+
+#### .replace()
+
+Since 0.58.0, you can replace a substring from a string.
+
+```meson
+# Replaces all instances of one substring with another
+s = 'semicolons;as;separators'
+s = s.replace('as', 'are')
+# 's' now has the value of 'semicolons;are;separators'
+```
 
 #### .strip()
 
@@ -192,7 +253,15 @@ copies.
 define = ' -Dsomedefine '
 stripped_define = define.strip()
 # 'stripped_define' now has the value '-Dsomedefine'
+
+# You may also pass a string to strip, which specifies the set of characters to
+# be removed.
+string = 'xyxHelloxyx'.strip('xy')
+# 'string' now has the value 'Hello'
 ```
+
+Since 0.43.0, you can specify one positional string argument,
+and all characters in that string will be stripped.
 
 #### .to_upper(), .to_lower()
 
@@ -365,10 +434,11 @@ The following methods are defined for all arrays:
 
 ## Dictionaries
 
-Dictionaries are delimited by curly braces. A dictionary can contain an
-arbitrary number of key: value pairs. Keys are required to be strings, but values can
-be objects of any type. Prior to *0.53.0* keys were required to be literal
-strings, i.e., you could not use a variable containing a string value as a key.
+Dictionaries are delimited by curly braces. A dictionary can contain
+an arbitrary number of key: value pairs. Keys are required to be
+strings, but values can be objects of any type. Prior to *0.53.0* keys
+were required to be literal strings, i.e., you could not use a
+variable containing a string value as a key.
 
 ```meson
 my_dict = {'foo': 42, 'bar': 'baz'}
@@ -385,7 +455,7 @@ Dictionaries are immutable and do not have a guaranteed order.
 
 Dictionaries are available since 0.47.0.
 
-Visit the [Reference Manual](Reference-manual.md#dictionary-object) to read
+Visit the [[@dict]] objects page in the Reference Manual to read
 about the methods exposed by dictionaries.
 
 Since 0.49.0, you can check if a dictionary contains a key like this:
@@ -403,8 +473,8 @@ if 'foo' not in my_dict
 endif
 ```
 
-*Since 0.53.0* Keys can be any expression evaluating to a string value, not limited
-to string literals any more.
+*Since 0.53.0* Keys can be any expression evaluating to a string
+value, not limited to string literals any more.
 
 ```meson
 d = {'a' + 'b' : 42}
@@ -443,7 +513,7 @@ executable('progname',
   kwargs: d)
 ```
 
-A single function can take keyword argumets both directly in the
+A single function can take keyword arguments both directly in the
 function call and indirectly via the `kwargs` keyword argument. The
 only limitation is that it is a hard error to pass any particular key
 both as a direct and indirect argument.
@@ -616,24 +686,25 @@ subdir('tests')
 
 ## User-defined functions and methods
 
-Meson does not currently support user-defined functions or
-methods. The addition of user-defined functions would make Meson
+Meson does not currently support user-defined functions or methods.
+The addition of user-defined functions would make Meson
 Turing-complete which would make it harder to reason about and more
 difficult to integrate with tools like IDEs. More details about this
 are [in the
-FAQ](FAQ.md#why-is-meson-not-just-a-python-module-so-i-could-code-my-build-setup-in-python). If
-because of this limitation you find yourself copying and pasting code
-a lot you may be able to use a [`foreach` loop
+FAQ](FAQ.md#why-is-meson-not-just-a-python-module-so-i-could-code-my-build-setup-in-python).
+If because of this limitation you find yourself copying and pasting
+code a lot you may be able to use a [`foreach` loop
 instead](#foreach-statements).
 
 ## Stability Promises
 
 Meson is very actively developed and continuously improved. There is a
-possibility that future enhancements to the Meson build system will require
-changes to the syntax. Such changes might be the addition of new reserved
-keywords, changing the meaning of existing keywords or additions around the
-basic building blocks like statements and fundamental types. It is planned
-to stabilize the syntax with the 1.0 release.
+possibility that future enhancements to the Meson build system will
+require changes to the syntax. Such changes might be the addition of
+new reserved keywords, changing the meaning of existing keywords or
+additions around the basic building blocks like statements and
+fundamental types. It is planned to stabilize the syntax with the 1.0
+release.
 
 ## Grammar
 
@@ -644,7 +715,7 @@ additive_expression: multiplicative_expression | (additive_expression additive_o
 additive_operator: "+" | "-"
 argument_list: positional_arguments ["," keyword_arguments] | keyword_arguments
 array_literal: "[" [expression_list] "]"
-assignment_expression: conditional_expression | (logical_or_expression assignment_operator assignment_expression)
+assignment_statement: expression asssignment_operator expression
 assignment_operator: "=" | "*=" | "/=" | "%=" | "+=" | "-="
 boolean_literal: "true" | "false"
 build_definition: (NEWLINE | statement)*
@@ -655,9 +726,9 @@ DECIMAL_NUMBER: /[1-9][0-9]*/
 dictionary_literal: "{" [key_value_list] "}"
 equality_expression: relational_expression | (equality_expression equality_operator relational_expression)
 equality_operator: "==" | "!="
-expression: assignment_expression
+expression: conditional_expression | logical_or_expression
 expression_list: expression ("," expression)*
-expression_statememt: expression
+expression_statement: expression
 function_expression: id_expression "(" [argument_list] ")"
 hex_literal: "0x" HEX_NUMBER
 HEX_NUMBER: /[a-fA-F0-9]+/
@@ -685,7 +756,7 @@ primary_expression: literal | ("(" expression ")") | id_expression
 relational_expression: additive_expression | (relational_expression relational_operator additive_expression)
 relational_operator: ">" | "<" | ">=" | "<=" | "in" | ("not" "in")
 selection_statement: "if" condition NEWLINE (statement)* ("elif" condition NEWLINE (statement)*)* ["else" (statement)*] "endif"
-statement: (expression_statement | selection_statement | iteration_statement) NEWLINE
+statement: (expression_statement | selection_statement | iteration_statement | assignment_statement) NEWLINE
 string_literal: ("'" STRING_SIMPLE_VALUE "'") | ("'''" STRING_MULTILINE_VALUE "'''")
 STRING_MULTILINE_VALUE: \.*?(''')\
 STRING_SIMPLE_VALUE: \.*?(?<!\\)(\\\\)*?'\

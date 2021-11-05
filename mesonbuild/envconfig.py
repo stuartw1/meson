@@ -12,16 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os, subprocess
+import subprocess
 import typing as T
 from enum import Enum
 
 from . import mesonlib
-from .mesonlib import EnvironmentException, MachineChoice, PerMachine, split_args
+from .mesonlib import EnvironmentException, HoldableObject
 from . import mlog
 from pathlib import Path
-
-_T = T.TypeVar('_T')
 
 
 # These classes contains all the data pulled from configuration files (native
@@ -44,9 +42,11 @@ known_cpu_families = (
     'arm',
     'avr',
     'c2000',
+    'csky',
     'dspic',
     'e2k',
     'ia64',
+    'loongarch64',
     'm68k',
     'microblaze',
     'mips',
@@ -70,12 +70,13 @@ known_cpu_families = (
     'x86_64',
 )
 
-# It would feel more natural to call this "64_BIT_CPU_FAMILES", but
+# It would feel more natural to call this "64_BIT_CPU_FAMILIES", but
 # python identifiers cannot start with numbers
-CPU_FAMILES_64_BIT = [
+CPU_FAMILIES_64_BIT = [
     'aarch64',
     'alpha',
     'ia64',
+    'loongarch64',
     'mips64',
     'ppc64',
     'riscv64',
@@ -85,52 +86,61 @@ CPU_FAMILES_64_BIT = [
     'x86_64',
 ]
 
+# Map from language identifiers to environment variables.
+ENV_VAR_PROG_MAP: T.Mapping[str, str] = {
+    # Compilers
+    'c': 'CC',
+    'cpp': 'CXX',
+    'cs': 'CSC',
+    'd': 'DC',
+    'fortran': 'FC',
+    'objc': 'OBJC',
+    'objcpp': 'OBJCXX',
+    'rust': 'RUSTC',
+    'vala': 'VALAC',
+
+    # Linkers
+    'c_ld': 'CC_LD',
+    'cpp_ld': 'CXX_LD',
+    'd_ld': 'DC_LD',
+    'fortran_ld': 'FC_LD',
+    'objc_ld': 'OBJC_LD',
+    'objcpp_ld': 'OBJCXX_LD',
+    'rust_ld': 'RUSTC_LD',
+
+    # Binutils
+    'strip': 'STRIP',
+    'ar': 'AR',
+    'windres': 'WINDRES',
+
+    # Other tools
+    'cmake': 'CMAKE',
+    'qmake': 'QMAKE',
+    'pkgconfig': 'PKG_CONFIG',
+    'make': 'MAKE',
+    'vapigen': 'VAPIGEN',
+}
+
+# Deprecated environment variables mapped from the new variable to the old one
+# Deprecated in 0.54.0
+DEPRECATED_ENV_PROG_MAP: T.Mapping[str, str] = {
+    'd_ld': 'D_LD',
+    'fortran_ld': 'F_LD',
+    'rust_ld': 'RUST_LD',
+    'objcpp_ld': 'OBJCPP_LD',
+}
+
 class CMakeSkipCompilerTest(Enum):
     ALWAYS = 'always'
     NEVER = 'never'
     DEP_ONLY = 'dep_only'
 
-
-def get_env_var_pair(for_machine: MachineChoice,
-                     is_cross: bool,
-                     var_name: str) -> T.Optional[T.Tuple[str, str]]:
-    """
-    Returns the exact env var and the value.
-    """
-    candidates = PerMachine(
-        # The prefixed build version takes priority, but if we are native
-        # compiling we fall back on the unprefixed host version. This
-        # allows native builds to never need to worry about the 'BUILD_*'
-        # ones.
-        ([var_name + '_FOR_BUILD'] if is_cross else [var_name]),
-        # Always just the unprefixed host verions
-        [var_name]
-    )[for_machine]
-    for var in candidates:
-        value = os.environ.get(var)
-        if value is not None:
-            break
-    else:
-        formatted = ', '.join(['{!r}'.format(var) for var in candidates])
-        mlog.debug('None of {} are defined in the environment, not changing global flags.'.format(formatted))
-        return None
-    mlog.debug('Using {!r} from environment with value: {!r}'.format(var, value))
-    return var, value
-
-def get_env_var(for_machine: MachineChoice,
-                is_cross: bool,
-                var_name: str) -> T.Optional[str]:
-    ret = get_env_var_pair(for_machine, is_cross, var_name)
-    if ret is None:
-        return None
-    return ret[1]
-
 class Properties:
     def __init__(
             self,
-            properties: T.Optional[T.Dict[str, T.Union[str, bool, int, T.List[str]]]] = None,
+            properties: T.Optional[T.Dict[str, T.Optional[T.Union[str, bool, int, T.List[str]]]]] = None,
     ):
-        self.properties = properties or {}  # type: T.Dict[str, T.Union[str, bool, int, T.List[str]]]
+        self.properties = properties or {}  # type: T.Dict[str, T.Optional[T.Union[str, bool, int, T.List[str]]]]
 
     def has_stdlib(self, language: str) -> bool:
         return language + '_stdlib' in self.properties
@@ -180,7 +190,7 @@ class Properties:
         assert isinstance(raw, str)
         cmake_toolchain_file = Path(raw)
         if not cmake_toolchain_file.is_absolute():
-            raise EnvironmentException('cmake_toolchain_file ({}) is not absolute'.format(raw))
+            raise EnvironmentException(f'cmake_toolchain_file ({raw}) is not absolute')
         return cmake_toolchain_file
 
     def get_cmake_skip_compiler_test(self) -> CMakeSkipCompilerTest:
@@ -202,13 +212,17 @@ class Properties:
         assert isinstance(res, bool)
         return res
 
+    def get_java_home(self) -> T.Optional[Path]:
+        value = T.cast(T.Optional[str], self.properties.get('java_home'))
+        return Path(value) if value else None
+
     def __eq__(self, other: object) -> bool:
         if isinstance(other, type(self)):
             return self.properties == other.properties
         return NotImplemented
 
     # TODO consider removing so Properties is less freeform
-    def __getitem__(self, key: str) -> T.Union[str, bool, int, T.List[str]]:
+    def __getitem__(self, key: str) -> T.Optional[T.Union[str, bool, int, T.List[str]]]:
         return self.properties[key]
 
     # TODO consider removing so Properties is less freeform
@@ -216,16 +230,16 @@ class Properties:
         return item in self.properties
 
     # TODO consider removing, for same reasons as above
-    def get(self, key: str, default: T.Union[str, bool, int, T.List[str]] = None) -> T.Union[str, bool, int, T.List[str]]:
+    def get(self, key: str, default: T.Optional[T.Union[str, bool, int, T.List[str]]] = None) -> T.Optional[T.Union[str, bool, int, T.List[str]]]:
         return self.properties.get(key, default)
 
-class MachineInfo:
+class MachineInfo(HoldableObject):
     def __init__(self, system: str, cpu_family: str, cpu: str, endian: str):
         self.system = system
         self.cpu_family = cpu_family
         self.cpu = cpu
         self.endian = endian
-        self.is_64_bit = cpu_family in CPU_FAMILES_64_BIT  # type: bool
+        self.is_64_bit = cpu_family in CPU_FAMILIES_64_BIT  # type: bool
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, MachineInfo):
@@ -242,23 +256,23 @@ class MachineInfo:
         return not self.__eq__(other)
 
     def __repr__(self) -> str:
-        return '<MachineInfo: {} {} ({})>'.format(self.system, self.cpu_family, self.cpu)
+        return f'<MachineInfo: {self.system} {self.cpu_family} ({self.cpu})>'
 
     @classmethod
     def from_literal(cls, literal: T.Dict[str, str]) -> 'MachineInfo':
         minimum_literal = {'cpu', 'cpu_family', 'endian', 'system'}
         if set(literal) < minimum_literal:
             raise EnvironmentException(
-                'Machine info is currently {}\n'.format(literal) +
+                f'Machine info is currently {literal}\n' +
                 'but is missing {}.'.format(minimum_literal - set(literal)))
 
         cpu_family = literal['cpu_family']
         if cpu_family not in known_cpu_families:
-            mlog.warning('Unknown CPU family {}, please report this at https://github.com/mesonbuild/meson/issues/new'.format(cpu_family))
+            mlog.warning(f'Unknown CPU family {cpu_family}, please report this at https://github.com/mesonbuild/meson/issues/new')
 
         endian = literal['endian']
         if endian not in ('little', 'big'):
-            mlog.warning('Unknown endian {}'.format(endian))
+            mlog.warning(f'Unknown endian {endian}')
 
         return cls(literal['system'], cpu_family, literal['cpu'], endian)
 
@@ -351,60 +365,18 @@ class MachineInfo:
         return self.is_windows() or self.is_cygwin()
 
 class BinaryTable:
+
     def __init__(
             self,
             binaries: T.Optional[T.Dict[str, T.Union[str, T.List[str]]]] = None,
     ):
-        self.binaries = binaries or {}  # type: T.Dict[str, T.Union[str, T.List[str]]]
-        for name, command in self.binaries.items():
-            if not isinstance(command, (list, str)):
-                # TODO generalize message
-                raise mesonlib.MesonException(
-                    'Invalid type {!r} for binary {!r} in cross file'
-                    ''.format(command, name))
-
-    # Map from language identifiers to environment variables.
-    evarMap = {
-        # Compilers
-        'c': 'CC',
-        'cpp': 'CXX',
-        'cs': 'CSC',
-        'd': 'DC',
-        'fortran': 'FC',
-        'objc': 'OBJC',
-        'objcpp': 'OBJCXX',
-        'rust': 'RUSTC',
-        'vala': 'VALAC',
-
-        # Linkers
-        'c_ld': 'CC_LD',
-        'cpp_ld': 'CXX_LD',
-        'd_ld': 'DC_LD',
-        'fortran_ld': 'FC_LD',
-        'objc_ld': 'OBJC_LD',
-        'objcpp_ld': 'OBJCXX_LD',
-        'rust_ld': 'RUSTC_LD',
-
-        # Binutils
-        'strip': 'STRIP',
-        'ar': 'AR',
-        'windres': 'WINDRES',
-
-        # Other tools
-        'cmake': 'CMAKE',
-        'qmake': 'QMAKE',
-        'pkgconfig': 'PKG_CONFIG',
-        'make': 'MAKE',
-    }  # type: T.Dict[str, str]
-
-    # Deprecated environment variables mapped from the new variable to the old one
-    # Deprecated in 0.54.0
-    DEPRECATION_MAP = {
-        'DC_LD': 'D_LD',
-        'FC_LD': 'F_LD',
-        'RUSTC_LD': 'RUST_LD',
-        'OBJCXX_LD': 'OBJCPP_LD',
-    }  # type: T.Dict[str, str]
+        self.binaries: T.Dict[str, T.List[str]] = {}
+        if binaries:
+            for name, command in binaries.items():
+                if not isinstance(command, (list, str)):
+                    raise mesonlib.MesonException(
+                        f'Invalid type {command!r} for entry {name!r} in cross file')
+                self.binaries[name] = mesonlib.listify(command)
 
     @staticmethod
     def detect_ccache() -> T.List[str]:
@@ -414,6 +386,22 @@ class BinaryTable:
             return []
         return ['ccache']
 
+    @staticmethod
+    def detect_sccache() -> T.List[str]:
+        try:
+            subprocess.check_call(['sccache', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (OSError, subprocess.CalledProcessError):
+            return []
+        return ['sccache']
+
+    @staticmethod
+    def detect_compiler_cache() -> T.List[str]:
+        # Sccache is "newer" so it is assumed that people would prefer it by default.
+        cache = BinaryTable.detect_sccache()
+        if cache:
+            return cache
+        return BinaryTable.detect_ccache()
+
     @classmethod
     def parse_entry(cls, entry: T.Union[str, T.List[str]]) -> T.Tuple[T.List[str], T.List[str]]:
         compiler = mesonlib.stringlistify(entry)
@@ -421,47 +409,25 @@ class BinaryTable:
         if compiler[0] == 'ccache':
             compiler = compiler[1:]
             ccache = cls.detect_ccache()
+        elif compiler[0] == 'sccache':
+            compiler = compiler[1:]
+            ccache = cls.detect_sccache()
         else:
             ccache = []
         # Return value has to be a list of compiler 'choices'
         return compiler, ccache
 
-    def lookup_entry(self,
-                     for_machine: MachineChoice,
-                     is_cross: bool,
-                     name: str) -> T.Optional[T.List[str]]:
+    def lookup_entry(self, name: str) -> T.Optional[T.List[str]]:
         """Lookup binary in cross/native file and fallback to environment.
 
         Returns command with args as list if found, Returns `None` if nothing is
         found.
         """
-        # Try explicit map, don't fall back on env var
-        # Try explict map, then env vars
-        for _ in [()]: # a trick to get `break`
-            raw_command = self.binaries.get(name)
-            if raw_command is not None:
-                command = mesonlib.stringlistify(raw_command)
-                break # found
-            evar = self.evarMap.get(name)
-            if evar is not None:
-                raw_command = get_env_var(for_machine, is_cross, evar)
-                if raw_command is None:
-                    deprecated = self.DEPRECATION_MAP.get(evar)
-                    if deprecated is not None:
-                        raw_command = get_env_var(for_machine, is_cross, deprecated)
-                        if raw_command is not None:
-                            mlog.deprecation(
-                                'The', deprecated, 'environment variable is deprecated in favor of',
-                                evar, once=True)
-                if raw_command is not None:
-                    command = split_args(raw_command)
-                    break # found
-            command = None
-
-
-        # Do not return empty or blank string entries
-        if command is not None and (len(command) == 0 or len(command[0].strip()) == 0):
-            command = None
+        command = self.binaries.get(name)
+        if not command:
+            return None
+        elif not command[0].strip():
+            return None
         return command
 
 class CMakeVariables:

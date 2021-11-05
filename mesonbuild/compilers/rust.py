@@ -17,15 +17,18 @@ import textwrap
 import typing as T
 
 from .. import coredata
-from ..mesonlib import EnvironmentException, MachineChoice, MesonException, Popen_safe
+from ..mesonlib import (
+    EnvironmentException, MachineChoice, MesonException, Popen_safe,
+    OptionKey,
+)
 from .compilers import Compiler, rust_buildtype_args, clike_debug_args
 
 if T.TYPE_CHECKING:
-    from ..coredata import OptionDictType
-    from ..dependencies import ExternalProgram
+    from ..coredata import KeyedOptionDictType
     from ..envconfig import MachineInfo
     from ..environment import Environment  # noqa: F401
     from ..linkers import DynamicLinker
+    from ..programs import ExternalProgram
 
 
 rust_optimization_args = {
@@ -42,6 +45,13 @@ class RustCompiler(Compiler):
     # rustc doesn't invoke the compiler itself, it doesn't need a LINKER_PREFIX
     language = 'rust'
 
+    _WARNING_LEVELS: T.Dict[str, T.List[str]] = {
+        '0': ['-A', 'warnings'],
+        '1': [],
+        '2': [],
+        '3': ['-W', 'warnings'],
+    }
+
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
                  is_cross: bool, info: 'MachineInfo',
                  exe_wrapper: T.Optional['ExternalProgram'] = None,
@@ -52,9 +62,9 @@ class RustCompiler(Compiler):
                          linker=linker)
         self.exe_wrapper = exe_wrapper
         self.id = 'rustc'
-        self.base_options.append('b_colorout')
+        self.base_options.add(OptionKey('b_colorout'))
         if 'link' in self.linker.id:
-            self.base_options.append('b_vscrt')
+            self.base_options.add(OptionKey('b_vscrt'))
 
     def needs_static_linker(self) -> bool:
         return False
@@ -62,7 +72,7 @@ class RustCompiler(Compiler):
     def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
         source_name = os.path.join(work_dir, 'sanity.rs')
         output_name = os.path.join(work_dir, 'rusttest')
-        with open(source_name, 'w') as ofile:
+        with open(source_name, 'w', encoding='utf-8') as ofile:
             ofile.write(textwrap.dedent(
                 '''fn main() {
                 }
@@ -77,7 +87,7 @@ class RustCompiler(Compiler):
         stdo = _stdo.decode('utf-8', errors='replace')
         stde = _stde.decode('utf-8', errors='replace')
         if pc.returncode != 0:
-            raise EnvironmentException('Rust compiler %s can not compile programs.\n%s\n%s' % (
+            raise EnvironmentException('Rust compiler {} can not compile programs.\n{}\n{}'.format(
                 self.name_string(),
                 stdo,
                 stde))
@@ -116,7 +126,7 @@ class RustCompiler(Compiler):
             if i[:2] == '-L':
                 for j in ['dependency', 'crate', 'native', 'framework', 'all']:
                     combined_len = len(j) + 3
-                    if i[:combined_len] == '-L{}='.format(j):
+                    if i[:combined_len] == f'-L{j}=':
                         parameter_list[idx] = i[:combined_len] + os.path.normpath(os.path.join(build_dir, i[combined_len:]))
                         break
 
@@ -127,24 +137,26 @@ class RustCompiler(Compiler):
 
     @classmethod
     def use_linker_args(cls, linker: str) -> T.List[str]:
-        return ['-C', 'linker={}'.format(linker)]
+        return ['-C', f'linker={linker}']
 
     # Rust does not have a use_linker_args because it dispatches to a gcc-like
     # C compiler for dynamic linking, as such we invoke the C compiler's
     # use_linker_args method instead.
 
-    def get_options(self) -> 'OptionDictType':
+    def get_options(self) -> 'KeyedOptionDictType':
+        key = OptionKey('std', machine=self.for_machine, lang=self.language)
         return {
-            'std': coredata.UserComboOption(
-                'Rust Eddition to use',
-                ['none', '2015', '2018'],
+            key: coredata.UserComboOption(
+                'Rust edition to use',
+                ['none', '2015', '2018', '2021'],
                 'none',
             ),
         }
 
-    def get_option_compile_args(self, options: 'OptionDictType') -> T.List[str]:
+    def get_option_compile_args(self, options: 'KeyedOptionDictType') -> T.List[str]:
         args = []
-        std = options['std']
+        key = OptionKey('std', machine=self.for_machine, lang=self.language)
+        std = options[key]
         if std.value != 'none':
             args.append('--edition=' + std.value)
         return args
@@ -157,3 +169,47 @@ class RustCompiler(Compiler):
         if colortype in {'always', 'never', 'auto'}:
             return [f'--color={colortype}']
         raise MesonException(f'Invalid color type for rust {colortype}')
+
+    def get_linker_always_args(self) -> T.List[str]:
+        args: T.List[str] = []
+        for a in super().get_linker_always_args():
+            args.extend(['-C', f'link-arg={a}'])
+        return args
+
+    def get_werror_args(self) -> T.List[str]:
+        # Use -D warnings, which makes every warning not explicitly allowed an
+        # error
+        return ['-D', 'warnings']
+
+    def get_warn_args(self, level: str) -> T.List[str]:
+        # TODO: I'm not really sure what to put here, Rustc doesn't have warning
+        return self._WARNING_LEVELS[level]
+
+    def get_no_warn_args(self) -> T.List[str]:
+        return self._WARNING_LEVELS["0"]
+
+    def get_pic_args(self) -> T.List[str]:
+        # This defaults to
+        return ['-C', 'relocation-model=pic']
+
+    def get_pie_args(self) -> T.List[str]:
+        # Rustc currently has no way to toggle this, it's controlled by whether
+        # pic is on by rustc
+        return []
+
+
+class ClippyRustCompiler(RustCompiler):
+
+    """Clippy is a linter that wraps Rustc.
+
+    This just provides us a different id
+    """
+
+    def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
+                 is_cross: bool, info: 'MachineInfo',
+                 exe_wrapper: T.Optional['ExternalProgram'] = None,
+                 full_version: T.Optional[str] = None,
+                 linker: T.Optional['DynamicLinker'] = None):
+        super().__init__(exelist, version, for_machine, is_cross, info,
+                         exe_wrapper, full_version, linker)
+        self.id = 'clippy-driver rustc'

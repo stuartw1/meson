@@ -16,8 +16,7 @@ from . import ExtensionModule
 
 from .. import mesonlib
 from ..mesonlib import typeslistify
-from ..interpreterbase import FeatureNew, noKwargs
-from ..interpreter import InvalidCode
+from ..interpreterbase import FeatureNew, noKwargs, InvalidCode
 
 import os
 
@@ -26,12 +25,14 @@ class KeyvalModule(ExtensionModule):
     @FeatureNew('Keyval Module', '0.55.0')
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.snippets.add('load')
+        self.methods.update({
+            'load': self.load,
+        })
 
     def _load_file(self, path_to_config):
         result = dict()
         try:
-            with open(path_to_config) as f:
+            with open(path_to_config, encoding='utf-8') as f:
                 for line in f:
                     if '#' in line:
                         comment_idx = line.index('#')
@@ -42,13 +43,13 @@ class KeyvalModule(ExtensionModule):
                     except ValueError:
                         continue
                     result[name.strip()] = val.strip()
-        except IOError as e:
-            raise mesonlib.MesonException('Failed to load {}: {}'.format(path_to_config, e))
+        except OSError as e:
+            raise mesonlib.MesonException(f'Failed to load {path_to_config}: {e}')
 
         return result
 
     @noKwargs
-    def load(self, interpreter, state, args, kwargs):
+    def load(self, state, args, kwargs):
         sources = typeslistify(args, (str, mesonlib.File))
         if len(sources) != 1:
             raise InvalidCode('load takes only one file input.')
@@ -57,12 +58,12 @@ class KeyvalModule(ExtensionModule):
         is_built = False
         if isinstance(s, mesonlib.File):
             is_built = is_built or s.is_built
-            s = s.absolute_path(interpreter.environment.source_dir, interpreter.environment.build_dir)
+            s = s.absolute_path(self.interpreter.environment.source_dir, self.interpreter.environment.build_dir)
         else:
-            s = os.path.join(interpreter.environment.source_dir, s)
+            s = os.path.join(self.interpreter.environment.source_dir, s)
 
-        if s not in interpreter.build_def_files and not is_built:
-            interpreter.build_def_files.append(s)
+        if s not in self.interpreter.build_def_files and not is_built:
+            self.interpreter.build_def_files.append(s)
 
         return self._load_file(s)
 

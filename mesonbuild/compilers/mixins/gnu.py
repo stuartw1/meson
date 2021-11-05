@@ -17,6 +17,7 @@
 import abc
 import functools
 import os
+import multiprocessing
 import pathlib
 import re
 import subprocess
@@ -24,8 +25,10 @@ import typing as T
 
 from ... import mesonlib
 from ... import mlog
+from ...mesonlib import OptionKey
 
 if T.TYPE_CHECKING:
+    from ..._typing import ImmutableListProtocol
     from ...environment import Environment
     from ..compilers import Compiler
 else:
@@ -90,7 +93,7 @@ gnu_color_args = {
 
 
 @functools.lru_cache(maxsize=None)
-def gnulike_default_include_dirs(compiler: T.Tuple[str], lang: str) -> T.List[str]:
+def gnulike_default_include_dirs(compiler: T.Tuple[str, ...], lang: str) -> 'ImmutableListProtocol[str]':
     lang_map = {
         'c': 'c',
         'cpp': 'c++',
@@ -102,7 +105,7 @@ def gnulike_default_include_dirs(compiler: T.Tuple[str], lang: str) -> T.List[st
     lang = lang_map[lang]
     env = os.environ.copy()
     env["LC_ALL"] = 'C'
-    cmd = list(compiler) + ['-x{}'.format(lang), '-E', '-v', '-']
+    cmd = list(compiler) + [f'-x{lang}', '-E', '-v', '-']
     p = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -146,14 +149,15 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
     LINKER_PREFIX = '-Wl,'
 
     def __init__(self) -> None:
-        self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_coverage',
-                             'b_ndebug', 'b_staticpic', 'b_pie']
+        self.base_options = {
+            OptionKey(o) for o in ['b_pch', 'b_lto', 'b_pgo', 'b_coverage',
+                                   'b_ndebug', 'b_staticpic', 'b_pie']}
         if not (self.info.is_windows() or self.info.is_cygwin() or self.info.is_openbsd()):
-            self.base_options.append('b_lundef')
+            self.base_options.add(OptionKey('b_lundef'))
         if not self.info.is_windows() or self.info.is_cygwin():
-            self.base_options.append('b_asneeded')
+            self.base_options.add(OptionKey('b_asneeded'))
         if not self.info.is_hurd():
-            self.base_options.append('b_sanitize')
+            self.base_options.add(OptionKey('b_sanitize'))
         # All GCC-like backends can do assembly
         self.can_compile_suffixes.add('s')
 
@@ -186,7 +190,7 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         return gnulike_instruction_set_args.get(instruction_set, None)
 
     def get_default_include_dirs(self) -> T.List[str]:
-        return gnulike_default_include_dirs(tuple(self.exelist), self.language)
+        return gnulike_default_include_dirs(tuple(self.exelist), self.language).copy()
 
     @abc.abstractmethod
     def openmp_flags(self) -> T.List[str]:
@@ -279,7 +283,9 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
                 return self._split_fetch_real_dirs(line.split('=', 1)[1])
         return []
 
-    def get_lto_compile_args(self) -> T.List[str]:
+    def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+        # This provides a base for many compilers, GCC and Clang override this
+        # for their specific arguments
         return ['-flto']
 
     def sanitizer_compile_args(self, value: str) -> T.List[str]:
@@ -310,9 +316,8 @@ class GnuLikeCompiler(Compiler, metaclass=abc.ABCMeta):
     def use_linker_args(cls, linker: str) -> T.List[str]:
         if linker not in {'gold', 'bfd', 'lld'}:
             raise mesonlib.MesonException(
-                'Unsupported linker, only bfd, gold, and lld are supported, '
-                'not {}.'.format(linker))
-        return ['-fuse-ld={}'.format(linker)]
+                f'Unsupported linker, only bfd, gold, and lld are supported, not {linker}.')
+        return [f'-fuse-ld={linker}']
 
     def get_coverage_args(self) -> T.List[str]:
         return ['--coverage']
@@ -328,7 +333,7 @@ class GnuCompiler(GnuLikeCompiler):
         super().__init__()
         self.id = 'gcc'
         self.defines = defines or {}
-        self.base_options.append('b_colorout')
+        self.base_options.update({OptionKey('b_colorout'), OptionKey('b_lto_threads')})
 
     def get_colorout_args(self, colortype: str) -> T.List[str]:
         if mesonlib.version_compare(self.version, '>=4.9.0'):
@@ -381,3 +386,13 @@ class GnuCompiler(GnuLikeCompiler):
 
     def get_prelink_args(self, prelink_name: str, obj_list: T.List[str]) -> T.List[str]:
         return ['-r', '-o', prelink_name] + obj_list
+
+    def get_lto_compile_args(self, *, threads: int = 0, mode: str = 'default') -> T.List[str]:
+        if threads == 0:
+            if mesonlib.version_compare(self.version, '>= 10.0'):
+                return ['-flto=auto']
+            # This matches clang's behavior of using the number of cpus
+            return [f'-flto={multiprocessing.cpu_count()}']
+        elif threads > 0:
+            return [f'-flto={threads}']
+        return super().get_lto_compile_args(threads=threads)

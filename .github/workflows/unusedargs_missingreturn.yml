@@ -9,6 +9,10 @@ env:
   CPPFLAGS: "-Werror=unused-parameter -Werror=return-type"
   FFLAGS: "-fimplicit-none"
 
+concurrency:
+  group: unusedargs-${{ github.head_ref }}
+  cancel-in-progress: true
+
 on:
   push:
     paths:
@@ -45,7 +49,12 @@ jobs:
       run: |
         sudo apt update -yq
         sudo apt install -yq --no-install-recommends g++ gfortran ninja-build gobjc gobjc++
-    - run: python run_project_tests.py --only cmake common fortran platform-linux "objective c" "objective c++"
+        python -m pip install coverage codecov
+    - run: ./tools/run_with_cov.py run_project_tests.py --only cmake common fortran platform-linux "objective c" "objective c++"
+      env:
+        MESON_CI_JOBNAME: linux-ubuntu-gcc-werror
+    - name: Upload coverage report
+      run: ./ci/upload_cov.sh "UnusedMissingReturn"
 
   windows:
     runs-on: windows-latest
@@ -55,10 +64,14 @@ jobs:
       with:
         python-version: '3.x'
 
-    - run: pip install ninja pefile
+    - run: pip install ninja pefile coverage codecov
 
-    - run: python run_project_tests.py --only platform-windows
+    - run: python ./tools/run_with_cov.py run_project_tests.py --only platform-windows
       env:
         CC: gcc
         CXX: g++
         FC: gfortran
+        MESON_CI_JOBNAME: msys2-gcc-werror
+
+    - name: Upload coverage report
+      run: ./ci/upload_cov.sh "UnusedMissingReturn Windows"

@@ -1,16 +1,22 @@
 name: msys2
 
+concurrency:
+  group: msys2-${{ github.head_ref }}
+  cancel-in-progress: true
+
 on:
   push:
     paths:
       - "mesonbuild/**"
       - "test cases/**"
+      - "unittests/**"
       - ".github/workflows/msys2.yml"
       - "run_unittests.py"
   pull_request:
     paths:
       - "mesonbuild/**"
       - "test cases/**"
+      - "unittests/**"
       - ".github/workflows/msys2.yml"
       - "run_unittests.py"
 
@@ -40,6 +46,8 @@ jobs:
             MSYS2_CURSES:
             COMPILER: clang
             TOOLCHAIN: clang
+    env:
+      MESON_CI_JOBNAME: msys2-${{ matrix.NAME }}
 
     defaults:
       run:
@@ -71,7 +79,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-xdist
+          python3 -m pip --disable-pip-version-check install gcovr jsonschema pefile pytest pytest-xdist coverage codecov
 
       - name: Run Tests
         run: |
@@ -89,9 +97,12 @@ jobs:
             pacman --noconfirm --needed -S mingw-w64-${{ matrix.MSYS2_ARCH }}-${{ matrix.MSYS2_CURSES }}
           fi
 
-          MSYSTEM= python3 run_tests.py --backend=ninja
+          MSYSTEM= python3 ./tools/run_with_cov.py run_tests.py --backend=ninja
 
       - uses: actions/upload-artifact@v2
         with:
           name: ${{ matrix.NAME }}
           path: meson-test-run.*
+
+      - name: Upload coverage report
+        run: ./ci/upload_cov.sh "${{ matrix.NAME }}"

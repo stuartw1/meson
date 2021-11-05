@@ -1,48 +1,79 @@
 #!/usr/bin/env python3
 
-import sys
-import subprocess
-import argparse
 from pathlib import Path
+import argparse
+import os
+import subprocess
+import sys
 import typing as T
+
+from mesonbuild.mesonlib import version_compare
 
 modules = [
     # fully typed submodules
-    'mesonbuild/ast',
+    # 'mesonbuild/ast',
     'mesonbuild/cmake',
     'mesonbuild/compilers',
+    'mesonbuild/dependencies',
+    'mesonbuild/interpreter/primitives',
+    'mesonbuild/interpreterbase',
+    'mesonbuild/linkers',
     'mesonbuild/scripts',
     'mesonbuild/wrap',
 
     # specific files
     'mesonbuild/arglist.py',
+    'mesonbuild/backend/backends.py',
     # 'mesonbuild/coredata.py',
-    'mesonbuild/dependencies/boost.py',
-    'mesonbuild/dependencies/hdf5.py',
-    'mesonbuild/dependencies/mpi.py',
     'mesonbuild/envconfig.py',
-    'mesonbuild/interpreterbase.py',
-    'mesonbuild/linkers.py',
+    'mesonbuild/interpreter/compiler.py',
+    'mesonbuild/interpreter/mesonmain.py',
+    'mesonbuild/interpreter/interpreterobjects.py',
+    'mesonbuild/interpreter/type_checking.py',
     'mesonbuild/mcompile.py',
-    'mesonbuild/mesonlib.py',
+    'mesonbuild/mdevenv.py',
+    'mesonbuild/mesonlib/platform.py',
+    'mesonbuild/mesonlib/universal.py',
     'mesonbuild/minit.py',
+    'mesonbuild/minstall.py',
     'mesonbuild/mintro.py',
     'mesonbuild/mlog.py',
     'mesonbuild/modules/fs.py',
+    'mesonbuild/modules/i18n.py',
+    'mesonbuild/modules/java.py',
+    'mesonbuild/modules/qt.py',
+    'mesonbuild/modules/unstable_external_project.py',
+    'mesonbuild/modules/unstable_rust.py',
+    'mesonbuild/modules/windows.py',
     'mesonbuild/mparser.py',
     'mesonbuild/msetup.py',
     'mesonbuild/mtest.py',
     'mesonbuild/optinterpreter.py',
+    'mesonbuild/programs.py',
 
+    'run_custom_lint.py',
     'run_mypy.py',
-    'tools'
+    'run_project_tests.py',
+    'run_single_test.py',
+    'tools',
+    'docs/genrefman.py',
+    'docs/refman',
 ]
+
+if os.name == 'posix':
+    modules.append('mesonbuild/mesonlib/posix.py')
+elif os.name == 'nt':
+    modules.append('mesonbuild/mesonlib/win32.py')
 
 def check_mypy() -> None:
     try:
         import mypy
     except ImportError:
         print('Failed import mypy')
+        sys.exit(1)
+    from mypy.version import __version__ as mypy_version
+    if not version_compare(mypy_version, '>=0.812'):
+        print('mypy >=0.812 is required, older versions report spurious errors')
         sys.exit(1)
 
 def main() -> int:
