@@ -71,7 +71,6 @@ class MesonMain(MesonInterpreterObject):
                              'project_license': self.project_license_method,
                              'version': self.version_method,
                              'project_name': self.project_name_method,
-                             'get_cross_binary': self.get_cross_binary_method,
                              'get_cross_property': self.get_cross_property_method,
                              'get_external_property': self.get_external_property_method,
                              'has_external_property': self.has_external_property_method,
@@ -96,9 +95,9 @@ class MesonMain(MesonInterpreterObject):
 
     def _process_script_args(
             self, name: str, args: T.Sequence[T.Union[
-                str, mesonlib.File, build.Target,
+                str, mesonlib.File, build.BuildTarget, build.CustomTarget,
                 build.CustomTargetIndex,
-                ExternalProgram, build.Executable,
+                ExternalProgram,
             ]], allow_built: bool = False) -> T.List[str]:
         script_args = []  # T.List[str]
         new = False
@@ -108,7 +107,7 @@ class MesonMain(MesonInterpreterObject):
             elif isinstance(a, mesonlib.File):
                 new = True
                 script_args.append(a.rel_to_builddir(self.interpreter.environment.source_dir))
-            elif isinstance(a, (build.Target, build.CustomTargetIndex)):
+            elif isinstance(a, (build.BuildTarget, build.CustomTarget, build.CustomTargetIndex)):
                 if not allow_built:
                     raise InterpreterException(f'Arguments to {name} cannot be built')
                 new = True
@@ -136,7 +135,7 @@ class MesonMain(MesonInterpreterObject):
     @typed_pos_args(
         'meson.add_install_script',
         (str, mesonlib.File, build.Executable, ExternalProgram),
-        varargs=(str, mesonlib.File, build.Target, build.CustomTargetIndex, ExternalProgram)
+        varargs=(str, mesonlib.File, build.BuildTarget, build.CustomTarget, build.CustomTargetIndex, ExternalProgram)
     )
     @typed_kwargs(
         'meson.add_install_script',
@@ -146,7 +145,7 @@ class MesonMain(MesonInterpreterObject):
     def add_install_script_method(
             self,
             args: T.Tuple[T.Union[str, mesonlib.File, build.Executable, ExternalProgram],
-                          T.List[T.Union[str, mesonlib.File, build.Target, build.CustomTargetIndex, ExternalProgram]]],
+                          T.List[T.Union[str, mesonlib.File, build.BuildTarget, build.CustomTarget, build.CustomTargetIndex, ExternalProgram]]],
             kwargs: 'AddInstallScriptKW') -> None:
         if isinstance(args[0], mesonlib.File):
             FeatureNew.single_use('Passing file object to script parameter of add_install_script',
@@ -411,43 +410,6 @@ class MesonMain(MesonInterpreterObject):
     @noKwargs
     def project_name_method(self, args: T.List['TYPE_var'], kwargs: 'TYPE_kwargs') -> str:
         return self.interpreter.active_projectname
-
-    @noArgsFlattening
-    @noKwargs
-    def get_cross_binary_method(self, args: T.Tuple[str], kwargs: 'TYPE_kwargs') -> str:
-        if len(args) < 1 or len(args) > 2:
-            raise InterpreterException('Must have one or two arguments.')
-        binname = args[0]
-        if not isinstance(binname, str):
-            raise InterpreterException('Binary name must be string.')
-        if self.build.environment.is_cross_build():
-            result = self.interpreter.environment.binaries.host.binaries.get(binname, None)
-            if result is None:
-                if len(args) == 2:
-                    return args[1]
-                raise InterpreterException('Unknown cross binary: %s.' % binname)
-            return result
-        else:
-            if binname == 'ar':
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    return static_linker.build.get_exelist()[0]
-            elif binname in ('libtool', 'nm', 'objdump', 'otool', 'install_name_tool'):
-                static_linker = self.build.static_linker
-                if static_linker is not None:
-                    ar_binary = static_linker.build.get_exelist()[0]
-                    if ar_binary.endswith('.xctoolchain/usr/bin/ar'):
-                        return os.path.join(os.path.dirname(ar_binary), binname)
-                    elif os.path.basename(ar_binary).startswith('frida'):
-                        return subprocess.check_output(['xcrun', '-f', binname], encoding='utf-8').rstrip()
-            elif binname == 'strip':
-                strip_bin = self.build.environment.lookup_binary_entry(MachineChoice.BUILD, 'strip')
-                if strip_bin is None:
-                    strip_bin = [self.build.environment.default_strip[0]]
-                return strip_bin
-            if len(args) == 2:
-                return args[1]
-            raise InterpreterException('Unknown cross binary: %s.' % binname)
 
     def __get_external_property_impl(self, propname: str, fallback: T.Optional[object], machine: MachineChoice) -> object:
         """Shared implementation for get_cross_property and get_external_property."""

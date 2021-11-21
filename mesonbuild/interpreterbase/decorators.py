@@ -458,7 +458,7 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
 
         @wraps(f)
         def wrapper(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            _kwargs, subproject = get_callee_args(wrapped_args)[2:4]
+            node, _, _kwargs, subproject = get_callee_args(wrapped_args)
             # Cast here, as the convertor function may place something other than a TYPE_var in the kwargs
             kwargs = T.cast(T.Dict[str, object], _kwargs)
 
@@ -492,10 +492,10 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                 if value is not None:
                     if info.since:
                         feature_name = info.name + ' arg in ' + name
-                        FeatureNew.single_use(feature_name, info.since, subproject)
+                        FeatureNew.single_use(feature_name, info.since, subproject, location=node)
                     if info.deprecated:
                         feature_name = info.name + ' arg in ' + name
-                        FeatureDeprecated.single_use(feature_name, info.deprecated, subproject)
+                        FeatureDeprecated.single_use(feature_name, info.deprecated, subproject, location=node)
                     if info.listify:
                         kwargs[info.name] = value = mesonlib.listify(value)
                     if not check_value_type(value):
@@ -516,7 +516,7 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                                 warn = n == value
 
                             if warn:
-                                FeatureDeprecated.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, subproject)
+                                FeatureDeprecated.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, subproject, location=node)
 
                     if info.since_values is not None:
                         for n, version in info.since_values.items():
@@ -526,7 +526,7 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                                 warn = n == value
 
                             if warn:
-                                FeatureNew.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, subproject)
+                                FeatureNew.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, subproject, location=node)
 
                 elif info.required:
                     raise InvalidArguments(f'{name} is missing required keyword argument "{info.name}"')
@@ -551,12 +551,14 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
 class FeatureCheckBase(metaclass=abc.ABCMeta):
     "Base class for feature version checks"
 
-    feature_registry: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[str]]]]
+    feature_registry: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[T.Tuple[str, T.Optional['mparser.BaseNode']]]]]]
+    emit_notice = False
 
-    def __init__(self, feature_name: str, version: str, extra_message: T.Optional[str] = None):
+    def __init__(self, feature_name: str, version: str, extra_message: T.Optional[str] = None, location: T.Optional['mparser.BaseNode'] = None):
         self.feature_name = feature_name  # type: str
         self.feature_version = version    # type: str
         self.extra_message = extra_message or ''  # type: str
+        self.location = location
 
     @staticmethod
     def get_target_version(subproject: str) -> str:
@@ -575,21 +577,26 @@ class FeatureCheckBase(metaclass=abc.ABCMeta):
         # No target version
         if tv == '':
             return
-        # Target version is new enough
-        if self.check_version(tv, self.feature_version):
+        # Target version is new enough, don't warn
+        if self.check_version(tv, self.feature_version) and not self.emit_notice:
             return
-        # Feature is too new for target version, register it
+        # Feature is too new for target version or we want to emit notices, register it
         if subproject not in self.feature_registry:
             self.feature_registry[subproject] = {self.feature_version: set()}
         register = self.feature_registry[subproject]
         if self.feature_version not in register:
             register[self.feature_version] = set()
-        if self.feature_name in register[self.feature_version]:
+
+        feature_key = (self.feature_name, self.location)
+        if feature_key in register[self.feature_version]:
             # Don't warn about the same feature multiple times
             # FIXME: This is needed to prevent duplicate warnings, but also
             # means we won't warn about a feature used in multiple places.
             return
-        register[self.feature_version].add(self.feature_name)
+        register[self.feature_version].add(feature_key)
+        # Target version is new enough, don't warn even if it is registered for notice
+        if self.check_version(tv, self.feature_version):
+            return
         self.log_usage_warning(tv)
 
     @classmethod
@@ -597,10 +604,18 @@ class FeatureCheckBase(metaclass=abc.ABCMeta):
         if subproject not in cls.feature_registry:
             return
         warning_str = cls.get_warning_str_prefix(cls.get_target_version(subproject))
+        notice_str = cls.get_notice_str_prefix(cls.get_target_version(subproject))
         fv = cls.feature_registry[subproject]
+        tv = cls.get_target_version(subproject)
         for version in sorted(fv.keys()):
-            warning_str += '\n * {}: {}'.format(version, fv[version])
-        mlog.warning(warning_str)
+            if cls.check_version(tv, version):
+                notice_str += '\n * {}: {}'.format(version, {i[0] for i in fv[version]})
+            else:
+                warning_str += '\n * {}: {}'.format(version, {i[0] for i in fv[version]})
+        if '\n' in notice_str:
+            mlog.notice(notice_str, fatal=False)
+        if '\n' in warning_str:
+            mlog.warning(warning_str)
 
     def log_usage_warning(self, tv: str) -> None:
         raise InterpreterException('log_usage_warning not implemented')
@@ -609,21 +624,26 @@ class FeatureCheckBase(metaclass=abc.ABCMeta):
     def get_warning_str_prefix(tv: str) -> str:
         raise InterpreterException('get_warning_str_prefix not implemented')
 
+    @staticmethod
+    def get_notice_str_prefix(tv: str) -> str:
+        raise InterpreterException('get_notice_str_prefix not implemented')
+
     def __call__(self, f: TV_func) -> TV_func:
         @wraps(f)
         def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            subproject = get_callee_args(wrapped_args)[3]
+            node, _, _, subproject = get_callee_args(wrapped_args)
             if subproject is None:
                 raise AssertionError(f'{wrapped_args!r}')
+            self.location = node
             self.use(subproject)
             return f(*wrapped_args, **wrapped_kwargs)
         return T.cast(TV_func, wrapped)
 
     @classmethod
     def single_use(cls, feature_name: str, version: str, subproject: str,
-                   extra_message: T.Optional[str] = None) -> None:
+                   extra_message: T.Optional[str] = None, location: T.Optional['mparser.BaseNode'] = None) -> None:
         """Oneline version that instantiates and calls use()."""
-        cls(feature_name, version, extra_message).use(subproject)
+        cls(feature_name, version, extra_message, location).use(subproject)
 
 
 class FeatureNew(FeatureCheckBase):
@@ -632,7 +652,7 @@ class FeatureNew(FeatureCheckBase):
     # Class variable, shared across all instances
     #
     # Format: {subproject: {feature_version: set(feature_names)}}
-    feature_registry = {}  # type: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[str]]]]
+    feature_registry = {}  # type: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[T.Tuple[str, T.Optional[mparser.BaseNode]]]]]]
 
     @staticmethod
     def check_version(target_version: str, feature_version: str) -> bool:
@@ -641,6 +661,10 @@ class FeatureNew(FeatureCheckBase):
     @staticmethod
     def get_warning_str_prefix(tv: str) -> str:
         return f'Project specifies a minimum meson_version \'{tv}\' but uses features which were added in newer versions:'
+
+    @staticmethod
+    def get_notice_str_prefix(tv: str) -> str:
+        return ''
 
     def log_usage_warning(self, tv: str) -> None:
         args = [
@@ -651,7 +675,7 @@ class FeatureNew(FeatureCheckBase):
         ]
         if self.extra_message:
             args.append(self.extra_message)
-        mlog.warning(*args)
+        mlog.warning(*args, location=self.location)
 
 class FeatureDeprecated(FeatureCheckBase):
     """Checks for deprecated features"""
@@ -659,7 +683,8 @@ class FeatureDeprecated(FeatureCheckBase):
     # Class variable, shared across all instances
     #
     # Format: {subproject: {feature_version: set(feature_names)}}
-    feature_registry = {}  # type: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[str]]]]
+    feature_registry = {}  # type: T.ClassVar[T.Dict[str, T.Dict[str, T.Set[T.Tuple[str, T.Optional[mparser.BaseNode]]]]]]
+    emit_notice = True
 
     @staticmethod
     def check_version(target_version: str, feature_version: str) -> bool:
@@ -670,6 +695,10 @@ class FeatureDeprecated(FeatureCheckBase):
     def get_warning_str_prefix(tv: str) -> str:
         return 'Deprecated features used:'
 
+    @staticmethod
+    def get_notice_str_prefix(tv: str) -> str:
+        return 'Future-deprecated features used:'
+
     def log_usage_warning(self, tv: str) -> None:
         args = [
             'Project targeting', f"'{tv}'",
@@ -679,7 +708,7 @@ class FeatureDeprecated(FeatureCheckBase):
         ]
         if self.extra_message:
             args.append(self.extra_message)
-        mlog.warning(*args)
+        mlog.warning(*args, location=self.location)
 
 
 class FeatureCheckKwargsBase(metaclass=abc.ABCMeta):
@@ -690,16 +719,17 @@ class FeatureCheckKwargsBase(metaclass=abc.ABCMeta):
         pass
 
     def __init__(self, feature_name: str, feature_version: str,
-                 kwargs: T.List[str], extra_message: T.Optional[str] = None):
+                 kwargs: T.List[str], extra_message: T.Optional[str] = None, location: T.Optional['mparser.BaseNode'] = None):
         self.feature_name = feature_name
         self.feature_version = feature_version
         self.kwargs = kwargs
         self.extra_message = extra_message
+        self.location = location
 
     def __call__(self, f: TV_func) -> TV_func:
         @wraps(f)
         def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
-            kwargs, subproject = get_callee_args(wrapped_args)[2:4]
+            node, _, kwargs, subproject = get_callee_args(wrapped_args)
             if subproject is None:
                 raise AssertionError(f'{wrapped_args!r}')
             for arg in self.kwargs:
@@ -707,7 +737,7 @@ class FeatureCheckKwargsBase(metaclass=abc.ABCMeta):
                     continue
                 name = arg + ' arg in ' + self.feature_name
                 self.feature_check_class.single_use(
-                        name, self.feature_version, subproject, self.extra_message)
+                        name, self.feature_version, subproject, self.extra_message, node)
             return f(*wrapped_args, **wrapped_kwargs)
         return T.cast(TV_func, wrapped)
 

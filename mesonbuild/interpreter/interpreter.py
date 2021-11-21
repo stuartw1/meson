@@ -192,7 +192,7 @@ known_build_target_kwargs = (
 )
 
 TEST_KWARGS: T.List[KwargInfo] = [
-    KwargInfo('args', ContainerTypeInfo(list, (str, mesonlib.File, build.Target)),
+    KwargInfo('args', ContainerTypeInfo(list, (str, mesonlib.File, build.BuildTarget, build.CustomTarget)),
               listify=True, default=[]),
     KwargInfo('should_fail', bool, default=False),
     KwargInfo('timeout', int, default=30),
@@ -1723,7 +1723,7 @@ external dependencies (including libraries) must go to "dependencies".''')
             # they could need substitutions (e.g. @BASENAME@) first. CustomTarget()
             # will take care of setting a proper default but name must be an empty
             # string in the meantime.
-            FeatureNew('custom_target() with no name argument', '0.60.0').use(self.subproject)
+            FeatureNew('custom_target() with no name argument', '0.60.0', location=node).use(self.subproject)
             name = ''
         kwargs['install_mode'] = self._get_kwarg_install_mode(kwargs)
         if 'input' in kwargs:
@@ -2184,10 +2184,12 @@ This will become a hard error in the future.''', location=self.current_node)
                         "present in the given configuration data.", location=node)
                 if confdata_useless:
                     ifbase = os.path.basename(inputs_abs[0])
-                    mlog.warning('Got an empty configuration_data() object and found no '
-                                 f'substitutions in the input file {ifbase!r}. If you want to '
-                                 'copy a file to the build dir, use the \'copy:\' keyword '
-                                 'argument added in 0.47.0', location=node)
+                    tv = FeatureNew.get_target_version(self.subproject)
+                    if FeatureNew.check_version(tv, '0.47.0'):
+                        mlog.warning('Got an empty configuration_data() object and found no '
+                                     f'substitutions in the input file {ifbase!r}. If you want to '
+                                     'copy a file to the build dir, use the \'copy:\' keyword '
+                                     'argument added in 0.47.0', location=node)
             else:
                 mesonlib.dump_conf_header(ofile_abs, conf.conf_data, output_format)
             conf.mark_used()
@@ -2238,7 +2240,7 @@ This will become a hard error in the future.''', location=self.current_node)
         if idir is False:
             idir = ''
             FeatureDeprecated.single_use('configure_file install_dir: false', '0.50.0',
-                                         self.subproject, 'Use the `install:` kwarg instead')
+                                         self.subproject, 'Use the `install:` kwarg instead', location=node)
         if not isinstance(idir, str):
             if isinstance(idir, list) and len(idir) == 0:
                 mlog.deprecation('install_dir: kwarg must be a string and not an empty array. '
@@ -2316,7 +2318,7 @@ This will become a hard error in the future.''', location=self.current_node)
                     mlog.warning('include_directories sandbox violation!')
                     print(textwrap.dedent(f'''\
                         The project is trying to access the directory {a} which belongs to a different
-                        subproject. This is a problem as it hardcodes the relative paths of these two projeccts.
+                        subproject. This is a problem as it hardcodes the relative paths of these two projects.
                         This makes it impossible to compile the project in any other directory layout and also
                         prevents the subproject from changing its own directory layout.
 
